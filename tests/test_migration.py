@@ -7,12 +7,25 @@ from pathlib import Path
 import pytest
 
 import tools.migrate_formal_knowledge as migration_module
+from single_instance import SingleInstance, _ProcessMutexApi
 from tools.migrate_formal_knowledge import (
     MigrationBlocked,
     apply_migration,
     build_migration,
     run_migration,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolated_migration_single_instance(tmp_path, monkeypatch):
+    """Keep ordinary migration tests independent of a live production runtime."""
+    api = _ProcessMutexApi()
+    name = f"migration-test:{tmp_path}"
+
+    def factory():
+        return SingleInstance(name, api=api)
+
+    monkeypatch.setattr(migration_module, "SingleInstance", factory)
 
 
 REAL_SOURCE = (
