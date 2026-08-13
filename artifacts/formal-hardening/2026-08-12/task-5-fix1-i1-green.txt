@@ -1,0 +1,4 @@
+﻿COMMAND=.venv\Scripts\python.exe -m pytest tests/test_persistence.py::test_corrupt_credentials_in_v1_or_v2_produce_visible_typed_startup_block_without_byte_changes tests/test_persistence.py::test_illegal_utf8_settings_produce_visible_typed_startup_block_without_replacement tests/test_persistence.py::test_settings_read_oserror_produces_visible_typed_startup_block -q
+EXIT_CODE=0
+....                                                                     [100%]
+4 passed in 0.97s

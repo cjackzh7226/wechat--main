@@ -1,0 +1,4 @@
+﻿COMMAND=.venv\Scripts\python.exe -m pytest tests/test_core.py::ReplyParsingTests::test_enterprise_tie_managed_send_arbitrates_chosen_candidate tests/test_core.py::SettingsTests::test_managed_send_falls_back_to_discovered_same_chat_when_foreground_unavailable tests/test_core.py::SettingsTests::test_managed_send_preflight_uses_current_foreground_chat_without_hwnd_lock tests/test_core.py::SettingsTests::test_managed_send_uses_current_context_when_preflight_ocr_is_temporarily_empty -q
+EXIT_CODE=0
+....                                                                     [100%]
+4 passed in 1.13s

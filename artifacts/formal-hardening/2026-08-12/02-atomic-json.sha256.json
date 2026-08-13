@@ -1,0 +1,12 @@
+[
+  {
+    "Algorithm": "SHA256",
+    "Hash": "7AA66D59F228BCFE404C471A3F700AA06B53889068A944B686059C8B70874E1B",
+    "Path": "D:\\Vibe C\\客服\\wechat--main\\atomic_json.py"
+  },
+  {
+    "Algorithm": "SHA256",
+    "Hash": "67ED22B7DB3C2EAE16506673ACEA4EDAA0DE78350B266733FE078337627836F6",
+    "Path": "D:\\Vibe C\\客服\\wechat--main\\tests\\test_persistence.py"
+  }
+]

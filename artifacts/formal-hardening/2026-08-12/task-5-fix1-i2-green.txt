@@ -1,0 +1,4 @@
+﻿COMMAND=.venv\Scripts\python.exe -m pytest tests/test_persistence.py::test_runtime_logger_first_initialization_is_thread_safe_and_writes_event_once tests/test_persistence.py::test_diag_logger_lazy_initialization_is_thread_safe -q
+EXIT_CODE=0
+..                                                                       [100%]
+2 passed in 0.96s

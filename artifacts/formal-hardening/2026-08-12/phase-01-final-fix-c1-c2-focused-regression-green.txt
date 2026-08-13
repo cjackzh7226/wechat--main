@@ -1,0 +1,44 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- D:\Vibe C\客服\wechat--main\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\Vibe C\客服\wechat--main
+collecting ... collected 256 items / 220 deselected / 36 selected
+
+tests/test_core.py::MemoryTests::test_enterprise_ambiguous_runtime_and_phrasebook_both_refuse_to_send PASSED [  2%]
+tests/test_core.py::MemoryTests::test_enterprise_answers_do_not_leak_into_generic_model_memory_prompt PASSED [  5%]
+tests/test_core.py::MemoryTests::test_enterprise_candidates_rank_fuzzy_historical_lookup_above_current_year_edit PASSED [  8%]
+tests/test_core.py::MemoryTests::test_enterprise_candidates_recall_similar_login_question_with_source_metadata PASSED [ 11%]
+tests/test_core.py::MemoryTests::test_enterprise_decision_accepts_clear_margin_below_legacy_76_gate PASSED [ 13%]
+tests/test_core.py::MemoryTests::test_enterprise_exact_question_outranks_overlapping_later_questions PASSED [ 16%]
+tests/test_core.py::MemoryTests::test_enterprise_imperative_request_ambiguous_returns_no_answer_without_api PASSED [ 19%]
+tests/test_core.py::MemoryTests::test_enterprise_phrasebook_test_uses_the_same_top_candidate_as_runtime PASSED [ 22%]
+tests/test_core.py::MemoryTests::test_enterprise_semantic_scope_without_annual_report_word_returns_official_answer PASSED [ 25%]
+tests/test_core.py::MemoryTests::test_llm_import_enterprise_workbook_marks_source PASSED [ 27%]
+tests/test_core.py::ChatTrainingTests::test_complex_enterprise_annual_report_xlsx_preserves_hierarchy_and_org_type PASSED [ 30%]
+tests/test_core.py::ChatTrainingTests::test_enterprise_import_is_isolated_from_generic_training_and_replaces_only_its_own_library PASSED [ 33%]
+tests/test_core.py::ChatTrainingTests::test_enterprise_import_preserves_official_answer_line_breaks PASSED [ 36%]
+tests/test_core.py::ChatTrainingTests::test_missing_xls_reader_is_installed_on_demand_in_source_mode PASSED [ 38%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_ambiguous_candidate_does_not_use_model_selector PASSED [ 41%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_ambiguous_local_match_returns_explicit_no_answer_without_selector PASSED [ 44%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_fuzzy_history_lookup_returns_official_answer_without_api_key PASSED [ 47%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_generation_uses_current_target_turn_not_stale_history PASSED [ 50%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_judgement_failure_returns_no_answer PASSED [ 52%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_judgement_inconsistent_returns_no_answer PASSED [ 55%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_low_score_returns_no_answer_without_api_in_model_memory PASSED [ 58%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_ratio_phrase_disambiguates_rectify_question PASSED [ 61%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_rectify_question_returns_official_answer_without_model PASSED [ 63%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_scope_accepts_branch_agency_questions PASSED [ 66%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_scope_accepts_rectify_governance_question PASSED [ 69%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_score_between_20_and_40_with_margin_is_sendable PASSED [ 72%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_tie_arbitration_failure_returns_none PASSED [ 75%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_tie_arbitration_picks_chosen_candidate PASSED [ 77%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_tie_managed_send_arbitrates_chosen_candidate PASSED [ 80%]
+tests/test_core.py::ReplyParsingTests::test_low_confidence_enterprise_selector_returns_no_answer_without_general_model_fallback PASSED [ 83%]
+tests/test_core.py::SettingsTests::test_fixed_source_mode_ignores_real_legacy_callback_and_remains_reloadable PASSED [ 86%]
+tests/test_core.py::SettingsTests::test_reply_engine_calls_api_for_ack_when_key_is_configured PASSED [ 88%]
+tests/test_core.py::SettingsTests::test_reply_engine_reports_api_failure_instead_of_silent_fallback PASSED [ 91%]
+tests/test_core.py::SettingsTests::test_reply_engine_reports_empty_api_response_text PASSED [ 94%]
+tests/test_core.py::SettingsTests::test_reply_engine_reports_http_error_body_from_text_api PASSED [ 97%]
+tests/test_core.py::SettingsTests::test_source_mode_callback_cannot_enable_free_generation PASSED [100%]
+
+===================== 36 passed, 220 deselected in 2.08s ======================

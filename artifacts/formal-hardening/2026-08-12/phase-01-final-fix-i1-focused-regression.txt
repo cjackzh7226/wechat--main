@@ -1,0 +1,26 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- D:\Vibe C\客服\wechat--main\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\Vibe C\客服\wechat--main
+collecting ... collected 386 items / 368 deselected / 18 selected
+
+tests/test_persistence.py::test_settings_reject_literal_credentials_in_custom_request_templates[custom_headers-{"Authorization":"Bearer sk-live-literal"}] PASSED [  5%]
+tests/test_persistence.py::test_settings_reject_literal_credentials_in_custom_request_templates[custom_headers-{"X-Token":"literal-header-token"}] PASSED [ 11%]
+tests/test_persistence.py::test_settings_reject_literal_credentials_in_custom_request_templates[custom_body-{"token":"literal-body-token","prompt":"{prompt}"}] PASSED [ 16%]
+tests/test_persistence.py::test_settings_reject_literal_credentials_in_custom_request_templates[custom_body-{"auth":"literal-body-secret","prompt":"{prompt}"}] PASSED [ 22%]
+tests/test_persistence.py::test_settings_reject_literal_credentials_in_custom_request_templates[custom_body-{"api_key":"literal-body-key","prompt":"{prompt}"}] PASSED [ 27%]
+tests/test_persistence.py::test_settings_allow_api_key_placeholder_in_custom_request_templates PASSED [ 33%]
+tests/test_persistence.py::test_compound_credential_fields_reject_literals_and_keep_all_settings_snapshots_clean[custom_headers-{"X-Auth":"x-auth-literal-secret"}-x-auth-literal-secret] PASSED [ 38%]
+tests/test_persistence.py::test_compound_credential_fields_reject_literals_and_keep_all_settings_snapshots_clean[custom_headers-{"Proxy-Authorization":"Basic proxy-literal-secret"}-proxy-literal-secret] PASSED [ 44%]
+tests/test_persistence.py::test_compound_credential_fields_reject_literals_and_keep_all_settings_snapshots_clean[custom_body-{"access_token":"access-literal-secret"}-access-literal-secret] PASSED [ 50%]
+tests/test_persistence.py::test_compound_credential_fields_reject_literals_and_keep_all_settings_snapshots_clean[custom_body-{"client_secret":"client-literal-secret"}-client-literal-secret] PASSED [ 55%]
+tests/test_persistence.py::test_compound_credential_fields_reject_literals_and_keep_all_settings_snapshots_clean[custom_body-{"password":"password-literal-secret"}-password-literal-secret] PASSED [ 61%]
+tests/test_persistence.py::test_compound_credential_fields_allow_api_key_placeholder[custom_headers-{"X-Auth":"{api_key}"}] PASSED [ 66%]
+tests/test_persistence.py::test_compound_credential_fields_allow_api_key_placeholder[custom_headers-{"Proxy-Authorization":"Basic {api_key}"}] PASSED [ 72%]
+tests/test_persistence.py::test_compound_credential_fields_allow_api_key_placeholder[custom_body-{"access_token":"{api_key}"}] PASSED [ 77%]
+tests/test_persistence.py::test_compound_credential_fields_allow_api_key_placeholder[custom_body-{"client_secret":"{api_key}"}] PASSED [ 83%]
+tests/test_persistence.py::test_compound_credential_fields_allow_api_key_placeholder[custom_body-{"password":"{api_key}"}] PASSED [ 88%]
+tests/test_core.py::SettingsTests::test_custom_http_request_and_response_path PASSED [ 94%]
+tests/test_core.py::SettingsTests::test_text_provider_settings_roundtrip_supports_custom_http PASSED [100%]
+
+===================== 18 passed, 368 deselected in 1.79s ======================

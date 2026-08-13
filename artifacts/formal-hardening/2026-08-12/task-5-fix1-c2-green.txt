@@ -1,0 +1,4 @@
+﻿COMMAND=.venv\Scripts\python.exe -m pytest tests/test_persistence.py::test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send -q
+EXIT_CODE=0
+......                                                                   [100%]
+6 passed in 0.97s

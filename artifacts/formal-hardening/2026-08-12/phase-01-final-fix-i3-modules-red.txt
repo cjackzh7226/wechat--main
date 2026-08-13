@@ -1,0 +1,34 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- D:\Vibe C\客服\wechat--main\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\Vibe C\客服\wechat--main
+collecting ... collected 59 items / 57 deselected / 2 selected
+
+tests/test_phase1_final_fix.py::test_send_ledger_module_exists_for_persistent_idempotency FAILED [ 50%]
+tests/test_phase1_final_fix.py::test_single_instance_module_exists_for_process_lifetime_guard FAILED [100%]
+
+================================== FAILURES ===================================
+__________ test_send_ledger_module_exists_for_persistent_idempotency __________
+
+    def test_send_ledger_module_exists_for_persistent_idempotency() -> None:
+>       assert importlib.util.find_spec("send_ledger") is not None
+E       AssertionError: assert None is not None
+E        +  where None = <function find_spec at 0x00000210EB85AFC0>('send_ledger')
+E        +    where <function find_spec at 0x00000210EB85AFC0> = <module 'importlib.util' (frozen)>.find_spec
+E        +      where <module 'importlib.util' (frozen)> = importlib.util
+
+tests\test_phase1_final_fix.py:499: AssertionError
+________ test_single_instance_module_exists_for_process_lifetime_guard ________
+
+    def test_single_instance_module_exists_for_process_lifetime_guard() -> None:
+>       assert importlib.util.find_spec("single_instance") is not None
+E       AssertionError: assert None is not None
+E        +  where None = <function find_spec at 0x00000210EB85AFC0>('single_instance')
+E        +    where <function find_spec at 0x00000210EB85AFC0> = <module 'importlib.util' (frozen)>.find_spec
+E        +      where <module 'importlib.util' (frozen)> = importlib.util
+
+tests\test_phase1_final_fix.py:503: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_phase1_final_fix.py::test_send_ledger_module_exists_for_persistent_idempotency
+FAILED tests/test_phase1_final_fix.py::test_single_instance_module_exists_for_process_lifetime_guard
+====================== 2 failed, 57 deselected in 1.18s =======================

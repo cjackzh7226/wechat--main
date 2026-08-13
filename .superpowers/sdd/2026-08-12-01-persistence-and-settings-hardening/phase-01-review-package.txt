@@ -1,0 +1,4578 @@
+PHASE 01 BASELINE ZIP SHA256: 522DB2E0A6EA93BD1AF289A75053C3DE9161265C9F05F81DC00FE003EF37D12A
+PHASE PLAN: D:\Vibe C\客服\wechat--main\docs\superpowers\plans\2026-08-12-01-persistence-and-settings-hardening.md
+DESIGN: D:\Vibe C\客服\wechat--main\docs\superpowers\specs\2026-08-12-formal-use-hardening-design.md
+LEDGER: D:\Vibe C\客服\wechat--main\.superpowers\sdd\2026-08-12-01-persistence-and-settings-hardening\progress.md
+
+===== DIFF: app_paths.py =====
+warning: in the working copy of 'D:\Vibe C\客服\wechat--main\app_paths.py', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\app_paths.py" "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\app_paths.py"
+index e69de29..d244acc 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\app_paths.py"	
++++ "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\app_paths.py"	
+@@ -0,0 +1,42 @@
++from __future__ import annotations
++
++import os
++from pathlib import Path
++
++
++APP_NAME = "WeChatStyleReplyAssistant"
++TEST_OVERRIDE = "WECHAT_ASSISTANT_DATA_DIR"
++
++
++def data_dir() -> Path:
++    override = os.environ.get(TEST_OVERRIDE, "").strip()
++    if override:
++        return Path(override).resolve()
++    appdata = os.environ.get("APPDATA", "").strip()
++    if appdata:
++        return Path(appdata) / APP_NAME
++    return Path.home() / ".wechat_style_reply_assistant"
++
++
++def config_path() -> Path:
++    return data_dir() / "settings.json"
++
++
++def memory_path() -> Path:
++    return data_dir() / "memory.json"
++
++
++def vector_path() -> Path:
++    return data_dir() / "vector_memory.json"
++
++
++def credential_path() -> Path:
++    return data_dir() / "credentials.dat"
++
++
++def ledger_path() -> Path:
++    return data_dir() / "send_ledger.json"
++
++
++def logs_dir() -> Path:
++    return data_dir() / "logs"
+
+===== DIFF: atomic_json.py =====
+warning: in the working copy of 'D:\Vibe C\客服\wechat--main\atomic_json.py', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\atomic_json.py" "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\atomic_json.py"
+index e69de29..5505369 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\atomic_json.py"	
++++ "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\atomic_json.py"	
+@@ -0,0 +1,119 @@
++"""Validated JSON persistence with recoverable backups."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++import json
++import os
++from pathlib import Path
++import tempfile
++from typing import Callable
++
++
++JsonValidator = Callable[[object], None]
++
++
++class JsonDataError(RuntimeError):
++    """Raised when no valid JSON candidate is available."""
++
++    def __init__(self, path: Path, reasons: list[tuple[Path, str]]):
++        self.path = path
++        self.reasons = tuple(reasons)
++        details = "; ".join(f"{candidate}: {reason}" for candidate, reason in reasons)
++        super().__init__(f"No valid JSON data for {path}: {details}")
++
++
++@dataclass(frozen=True)
++class JsonLoadResult:
++    data: dict[str, object]
++    source: Path
++    recovered: bool
++
++
++def _read_valid_json(path: Path, validator: JsonValidator) -> dict[str, object]:
++    value = json.loads(path.read_text(encoding="utf-8"))
++    if not isinstance(value, dict):
++        raise ValueError("JSON root must be an object")
++    validator(value)
++    return value
++
++
++def load_json(path: Path, validator: JsonValidator) -> JsonLoadResult:
++    """Load the primary JSON file or the newest valid backup."""
++    path = Path(path)
++    candidates = [path, *(path.with_name(f"{path.name}.bak.{index}") for index in range(1, 6))]
++    reasons: list[tuple[Path, str]] = []
++    for candidate in candidates:
++        try:
++            return JsonLoadResult(
++                data=_read_valid_json(candidate, validator),
++                source=candidate,
++                recovered=candidate != path,
++            )
++        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
++            reasons.append((candidate, f"{type(error).__name__}: {error}"))
++    raise JsonDataError(path, reasons)
++
++
++def _read_valid_snapshot(path: Path, validator: JsonValidator) -> bytes:
++    snapshot = path.read_bytes()
++    value = json.loads(snapshot.decode("utf-8"))
++    if not isinstance(value, dict):
++        raise ValueError("JSON root must be an object")
++    validator(value)
++    return snapshot
++
++
++def _replace_backup(path: Path, snapshot: bytes) -> None:
++    descriptor, temp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
++    try:
++        with os.fdopen(descriptor, "wb") as stream:
++            stream.write(snapshot)
++            stream.flush()
++            os.fsync(stream.fileno())
++        os.replace(temp_name, path)
++    finally:
++        if os.path.exists(temp_name):
++            os.unlink(temp_name)
++
++
++def _rotate_backups(path: Path, validator: JsonValidator, backup_count: int) -> None:
++    if backup_count <= 0:
++        return
++    candidates = [path, *(path.with_name(f"{path.name}.bak.{index}") for index in range(1, backup_count + 1))]
++    snapshots: list[bytes] = []
++    for candidate in candidates:
++        try:
++            snapshots.append(_read_valid_snapshot(candidate, validator))
++        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
++            continue
++        if len(snapshots) == backup_count:
++            break
++    for index, snapshot in enumerate(snapshots, start=1):
++        _replace_backup(path.with_name(f"{path.name}.bak.{index}"), snapshot)
++    for index in range(len(snapshots) + 1, backup_count + 1):
++        path.with_name(f"{path.name}.bak.{index}").unlink(missing_ok=True)
++
++
++def atomic_write_json(
++    path: Path,
++    data: dict[str, object],
++    validator: JsonValidator,
++    backup_count: int = 5,
++) -> None:
++    """Validate, durably stage, and atomically replace a JSON document."""
++    validator(data)
++    path = Path(path)
++    path.parent.mkdir(parents=True, exist_ok=True)
++    payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
++    descriptor, temp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
++    try:
++        with os.fdopen(descriptor, "wb") as stream:
++            stream.write(payload)
++            stream.flush()
++            os.fsync(stream.fileno())
++        _rotate_backups(path, validator, backup_count)
++        os.replace(temp_name, path)
++    finally:
++        if os.path.exists(temp_name):
++            os.unlink(temp_name)
+
+===== DIFF: secure_store.py =====
+warning: in the working copy of 'D:\Vibe C\客服\wechat--main\secure_store.py', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\secure_store.py" "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\secure_store.py"
+index e69de29..85ff61c 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\secure_store.py"	
++++ "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\secure_store.py"	
+@@ -0,0 +1,139 @@
++"""Windows DPAPI-backed credential persistence with durable backups."""
++
++from __future__ import annotations
++
++import json
++import os
++from pathlib import Path
++import tempfile
++from typing import Callable, Mapping
++
++from app_paths import credential_path
++
++
++ProtectCallable = Callable[[bytes], bytes]
++UnprotectCallable = Callable[[bytes], bytes]
++
++
++class CredentialStoreError(RuntimeError):
++    """Raised when an existing credential store has no readable copy."""
++
++
++def _dpapi_protect(payload: bytes) -> bytes:
++    import win32crypt
++
++    return win32crypt.CryptProtectData(
++        payload,
++        "WeChatStyleReplyAssistant credentials",
++        None,
++        None,
++        None,
++        0,
++    )
++
++
++def _dpapi_unprotect(blob: bytes) -> bytes:
++    import win32crypt
++
++    _description, payload = win32crypt.CryptUnprotectData(blob, None, None, None, 0)
++    return payload
++
++
++def _atomic_write_binary(path: Path, payload: bytes) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    descriptor, temp_name = tempfile.mkstemp(
++        prefix=f"{path.name}.",
++        suffix=".tmp",
++        dir=path.parent,
++    )
++    try:
++        with os.fdopen(descriptor, "wb") as stream:
++            stream.write(payload)
++            stream.flush()
++            os.fsync(stream.fileno())
++        os.replace(temp_name, path)
++    finally:
++        if os.path.exists(temp_name):
++            os.unlink(temp_name)
++
++
++class CredentialStore:
++    def __init__(
++        self,
++        path: Path | None = None,
++        *,
++        protect: ProtectCallable | None = None,
++        unprotect: UnprotectCallable | None = None,
++        backup_count: int = 5,
++    ) -> None:
++        self.path = Path(path) if path is not None else credential_path()
++        self._protect = protect or _dpapi_protect
++        self._unprotect = unprotect or _dpapi_unprotect
++        self.backup_count = backup_count
++
++    def _decode_blob(self, blob: bytes) -> dict[str, str]:
++        payload = self._unprotect(blob)
++        if not isinstance(payload, bytes):
++            raise TypeError("unprotect must return bytes")
++        value = json.loads(payload.decode("utf-8"))
++        if not isinstance(value, dict):
++            raise ValueError("credential payload must be an object")
++        if any(type(key) is not str or type(secret) is not str for key, secret in value.items()):
++            raise ValueError("credential names and values must be strings")
++        return value
++
++    def _candidates(self) -> list[Path]:
++        return [
++            self.path,
++            *(self.path.with_name(f"{self.path.name}.bak.{index}") for index in range(1, self.backup_count + 1)),
++        ]
++
++    def load(self) -> dict[str, str]:
++        existing = False
++        reasons: list[str] = []
++        for candidate in self._candidates():
++            try:
++                blob = candidate.read_bytes()
++                existing = True
++                return self._decode_blob(blob)
++            except FileNotFoundError:
++                continue
++            except Exception as error:
++                existing = True
++                reasons.append(f"{candidate.name}: {type(error).__name__}: {error}")
++        if not existing:
++            return {}
++        raise CredentialStoreError("No valid credential blob: " + "; ".join(reasons))
++
++    def _valid_snapshots(self) -> list[bytes]:
++        snapshots: list[bytes] = []
++        for candidate in self._candidates():
++            try:
++                blob = candidate.read_bytes()
++                self._decode_blob(blob)
++            except Exception:
++                continue
++            snapshots.append(blob)
++            if len(snapshots) == self.backup_count:
++                break
++        return snapshots
++
++    def save(self, keys: Mapping[str, str]) -> None:
++        values = dict(keys)
++        if any(type(key) is not str or type(secret) is not str for key, secret in values.items()):
++            raise ValueError("credential names and values must be strings")
++        payload = json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
++        protected = self._protect(payload)
++        if not isinstance(protected, bytes):
++            raise TypeError("protect must return bytes")
++
++        snapshots = self._valid_snapshots()
++        self.path.parent.mkdir(parents=True, exist_ok=True)
++        for index, snapshot in enumerate(snapshots, start=1):
++            _atomic_write_binary(
++                self.path.with_name(f"{self.path.name}.bak.{index}"),
++                snapshot,
++            )
++        for index in range(len(snapshots) + 1, self.backup_count + 1):
++            self.path.with_name(f"{self.path.name}.bak.{index}").unlink(missing_ok=True)
++        _atomic_write_binary(self.path, protected)
+
+===== DIFF: runtime_logging.py =====
+warning: in the working copy of 'D:\Vibe C\客服\wechat--main\runtime_logging.py', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\runtime_logging.py" "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\runtime_logging.py"
+index e69de29..2b9b895 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\runtime_logging.py"	
++++ "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\runtime_logging.py"	
+@@ -0,0 +1,193 @@
++from __future__ import annotations
++
++from datetime import datetime, timezone
++import hashlib
++import hmac
++import json
++import logging
++from logging.handlers import RotatingFileHandler
++import math
++import os
++from pathlib import Path
++import re
++import secrets
++import threading
++from typing import Mapping
++
++
++_AUDIT_FIELDS = {
++    "record_id",
++    "score",
++    "org_scope",
++    "state",
++    "error_category",
++    "event",
++    "timestamp",
++}
++_PRIVATE_FIELD_NAMES = {
++    "chatname": "chat_name",
++    "message": "message",
++    "reply": "reply",
++    "context": "context",
++}
++_ALLOWED_AUDIT_VALUES = {
++    "event": frozenset(
++        {
++            "managed-send-diagnostic",
++            "managed-send",
++            "nested-redaction",
++            "rotation-check",
++            "debug-check",
++            "debug-disabled",
++            "concurrency-check",
++        }
++    ),
++    "state": frozenset(
++        {
++            "blocked",
++            "vector_index_not_ready",
++            "managed_preconditions_not_met",
++            "api_failure",
++            "latest_message_not_partner",
++            "no_unreplied_message",
++            "turn_already_handled",
++            "send_already_pending",
++            "no_candidate_selected",
++            "send_queued",
++            "preflight_checked",
++            "preflight_rejected",
++            "send_result",
++        }
++    ),
++    "error_category": frozenset({"vector", "settings", "credentials", "memory", "io", "api", "preflight", "send"}),
++    "org_scope": frozenset({"local", "municipal", "provincial", "national"}),
++}
++_SESSION_DEBUG = False
++_LOGGER_INIT_LOCK = threading.RLock()
++
++
++def enable_session_debug(enabled: bool = True) -> None:
++    """Enable privacy-safe diagnostic hashes for this process only."""
++    global _SESSION_DEBUG
++    _SESSION_DEBUG = bool(enabled)
++
++
++def _normalized_key(value: object) -> str:
++    return re.sub(r"[^a-z0-9]", "", str(value).casefold())
++
++
++def _load_or_create_salt(log_dir: Path) -> bytes:
++    salt_path = log_dir / ".runtime-salt"
++    try:
++        salt = salt_path.read_bytes()
++        if len(salt) >= 16:
++            return salt
++    except FileNotFoundError:
++        pass
++    salt = secrets.token_bytes(32)
++    try:
++        with salt_path.open("xb") as stream:
++            stream.write(salt)
++        try:
++            os.chmod(salt_path, 0o600)
++        except OSError:
++            pass
++        return salt
++    except FileExistsError:
++        existing = salt_path.read_bytes()
++        if len(existing) >= 16:
++            return existing
++        raise RuntimeError("runtime log salt is invalid")
++
++
++def _private_hash(value: object, salt: bytes) -> str:
++    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
++    return "sha256:" + hmac.new(salt, payload, hashlib.sha256).hexdigest()
++
++
++def _allowed_audit_value(key: str, value: object, *, salt: bytes | None) -> object | None:
++    """Apply a positive schema; nested and unknown values are never serialized."""
++    if key == "score":
++        if type(value) in {int, float} and math.isfinite(float(value)) and 0 <= float(value) <= 100:
++            return value
++        return None
++    if key == "timestamp":
++        return None
++    if key == "record_id":
++        if type(value) is str and value and len(value) <= 512 and salt is not None:
++            return _private_hash(value, salt)
++        return None
++    allowed_values = _ALLOWED_AUDIT_VALUES.get(key, frozenset())
++    return value if type(value) is str and value in allowed_values else None
++
++
++def redact_event(
++    event: Mapping[str, object],
++    *,
++    salt: bytes | None = None,
++    debug: bool | None = None,
++) -> dict[str, object]:
++    """Return only the non-content fields used for runtime auditing."""
++    debug_enabled = _SESSION_DEBUG if debug is None else bool(debug)
++    if debug_enabled:
++        if salt is None:
++            from app_paths import logs_dir
++
++            log_dir = logs_dir()
++            log_dir.mkdir(parents=True, exist_ok=True)
++            salt = _load_or_create_salt(log_dir)
++    redacted: dict[str, object] = {}
++    for key in sorted(_AUDIT_FIELDS):
++        if key not in event:
++            continue
++        allowed = _allowed_audit_value(key, event[key], salt=salt)
++        if allowed is not None:
++            redacted[key] = allowed
++    if debug_enabled:
++        for key, value in event.items():
++            normalized = _normalized_key(key)
++            canonical = _PRIVATE_FIELD_NAMES.get(normalized)
++            if canonical is not None:
++                redacted[canonical] = _private_hash(value, salt)
++    return redacted
++
++
++class _JsonLineFormatter(logging.Formatter):
++    def __init__(self, salt: bytes) -> None:
++        super().__init__()
++        self.salt = salt
++
++    def format(self, record: logging.LogRecord) -> str:
++        event_data = getattr(record, "event_data", {})
++        if not isinstance(event_data, Mapping):
++            event_data = {}
++        redacted = redact_event(event_data, salt=self.salt)
++        redacted["timestamp"] = datetime.now(timezone.utc).isoformat()
++        return json.dumps(redacted, ensure_ascii=False, sort_keys=True)
++
++
++def build_runtime_logger(log_dir: Path) -> logging.Logger:
++    resolved_dir = Path(log_dir).resolve()
++    logger_key = hashlib.sha256(str(resolved_dir).casefold().encode("utf-8")).hexdigest()
++    logger = logging.getLogger(f"wechat_assistant.runtime.{logger_key}")
++    log_path = resolved_dir / "runtime.log"
++    with _LOGGER_INIT_LOCK:
++        resolved_dir.mkdir(parents=True, exist_ok=True)
++        owned_handlers = [
++            handler
++            for handler in logger.handlers
++            if getattr(handler, "_wechat_runtime_path", None) == str(log_path)
++        ]
++        if not owned_handlers:
++            handler = RotatingFileHandler(
++                log_path,
++                maxBytes=2_000_000,
++                backupCount=5,
++                encoding="utf-8",
++            )
++            handler._wechat_runtime_path = str(log_path)
++            handler.setFormatter(_JsonLineFormatter(_load_or_create_salt(resolved_dir)))
++            logger.addHandler(handler)
++        logger.setLevel(logging.INFO)
++        logger.propagate = False
++    return logger
+
+===== DIFF: settings.py =====
+warning: in the working copy of 'D:\Vibe C\客服\wechat--main\.superpowers\sdd\2026-08-12-01-persistence-and-settings-hardening\phase-review-baseline\settings.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'D:\Vibe C\客服\wechat--main\settings.py', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\settings.py" "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\settings.py"
+index c71be06..a7c94c5 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\settings.py"	
++++ "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\settings.py"	
+@@ -1,22 +1,107 @@
+ from __future__ import annotations
+ 
+ import json
++import math
+ import os
+-import sys
+-from dataclasses import asdict, dataclass, field
++import re
++from dataclasses import dataclass, field
+ from pathlib import Path
++from typing import ClassVar
+ 
++from app_paths import config_path, credential_path
++from atomic_json import JsonDataError, atomic_write_json, load_json
++from secure_store import CredentialStore
+ 
+-APP_NAME = "WeChatStyleReplyAssistant"
++
++CONFIG_VERSION = 2
++MANAGED_MODES = {"off", "observe", "controlled", "full"}
++_VISION_PREFIX = "vision:"
++_FORBIDDEN_SETTINGS_KEY_FIELDS = ("api_key", "vision_api_key", "provider_api_keys")
++_PERSISTED_STRING_FIELDS = (
++    "api_provider",
++    "base_url",
++    "model",
++    "vision_provider",
++    "vision_base_url",
++    "vision_model",
++    "custom_headers",
++    "custom_body",
++    "custom_response_path",
++    "ocr_engine",
++    "wecom_account_name",
++)
++_QUOTED_TEMPLATE_FIELD = re.compile(r'"([^"\r\n]+)"\s*:\s*"([^"\r\n]*)"')
++_BEARER_VALUE = re.compile(r"(?i)\bbearer\s+([^\s\",]+|\{api_key\})")
++
++
++class SettingsValidationError(ValueError):
++    """Raised when settings do not match the formal versioned schema."""
++
++
++class SettingsPersistenceError(RuntimeError):
++    """Raised when settings or credential bytes cannot be safely read or written."""
+ 
+ 
+ def default_config_path() -> Path:
+-    if getattr(sys, "frozen", False):
+-        return Path(sys.executable).resolve().parent / "user_data" / "settings.json"
+-    base = os.environ.get("APPDATA")
+-    if base:
+-        return Path(base) / APP_NAME / "settings.json"
+-    return Path.home() / ".wechat_style_reply_assistant" / "settings.json"
++    return config_path()
++
++
++def require_bool(data: dict[str, object], key: str, default: bool) -> bool:
++    value = data.get(key, default)
++    if type(value) is not bool:
++        raise SettingsValidationError(f"{key} must be a boolean")
++    return value
++
++
++def bounded_number(value: object, key: str, low: float, high: float) -> float:
++    if type(value) not in {int, float}:
++        raise SettingsValidationError(f"{key} must be a number")
++    number = float(value)
++    if not math.isfinite(number) or not low <= number <= high:
++        raise SettingsValidationError(f"{key} must be in range {low}..{high}")
++    return number
++
++
++def _bounded_integer(value: object, key: str, low: int, high: int) -> int:
++    bounded_number(value, key, low, high)
++    if type(value) is not int:
++        raise SettingsValidationError(f"{key} must be an integer")
++    return value
++
++
++def _string_value(data: dict[str, object], key: str, default: str) -> str:
++    value = data.get(key, default)
++    if type(value) is not str:
++        raise SettingsValidationError(f"{key} must be a string")
++    return value
++
++
++def _validate_credential_template(value: str, key: str) -> None:
++    for match in _QUOTED_TEMPLATE_FIELD.finditer(value):
++        field_name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", match.group(1)).casefold()
++        parts = re.findall(r"[a-z0-9]+", field_name)
++        sensitive = any(
++            part in {
++                "auth",
++                "authorization",
++                "authentication",
++                "oauth",
++                "key",
++                "token",
++                "secret",
++                "password",
++                "credential",
++            }
++            for part in parts
++        )
++        if not sensitive:
++            continue
++        credential_value = match.group(2).strip()
++        if credential_value not in {"{api_key}", "Bearer {api_key}", "Basic {api_key}"}:
++            raise SettingsValidationError(f"{key} contains a literal credential")
++    for match in _BEARER_VALUE.finditer(value):
++        if match.group(1) != "{api_key}":
++            raise SettingsValidationError(f"{key} contains a literal bearer token")
+ 
+ 
+ @dataclass
+@@ -26,10 +111,47 @@ class ChatArea:
+     y_top: float = 0.09
+     y_bottom: float = 0.91
+ 
++    def validate(self) -> None:
++        for key in ("x_left", "x_right", "y_top", "y_bottom"):
++            bounded_number(getattr(self, key), f"chat_area.{key}", 0.0, 1.0)
++        if self.x_left >= self.x_right:
++            raise SettingsValidationError("chat_area requires x_left < x_right")
++        if self.y_top >= self.y_bottom:
++            raise SettingsValidationError("chat_area requires y_top < y_bottom")
++
+ 
+ @dataclass
+ class AppSettings:
++    PERSISTED_FIELDS: ClassVar[tuple[str, ...]] = (
++        "config_version",
++        "api_provider",
++        "base_url",
++        "model",
++        "vision_provider",
++        "vision_base_url",
++        "vision_model",
++        "custom_headers",
++        "custom_body",
++        "custom_response_path",
++        "reply_source_mode",
++        "ocr_engine",
++        "training_mode",
++        "auto_recognize",
++        "managed_mode",
++        "managed_allowed_chats",
++        "enable_web_search",
++        "search_max_results",
++        "auto_reply_delay_seconds",
++        "poll_interval_ms",
++        "capture_cooldown_seconds",
++        "wecom_account_name",
++        "group_poll_interval_ms",
++        "chat_area",
++    )
++
+     config_path: Path = field(default_factory=default_config_path)
++    credential_store: object | None = field(default=None, repr=False)
++    config_version: int = CONFIG_VERSION
+     api_provider: str = "zhipu"
+     api_key: str = ""
+     provider_api_keys: dict[str, str] = field(default_factory=dict)
+@@ -42,94 +164,357 @@ class AppSettings:
+     custom_headers: str = '{"Authorization":"Bearer {api_key}","Content-Type":"application/json"}'
+     custom_body: str = '{"model":"{model}","messages":{messages_json}}'
+     custom_response_path: str = "choices.0.message.content"
+-    reply_source_mode: str = "model_memory"
++    reply_source_mode: str = "knowledge_only"
+     ocr_engine: str = "rapidocr"
+     training_mode: bool = False
+     auto_recognize: bool = False
+-    managed_auto_reply: bool = False
+-    enable_web_search: bool = True
++    managed_mode: str = "off"
++    managed_allowed_chats: list[str] = field(default_factory=list)
++    enable_web_search: bool = False
+     search_max_results: int = 3
+     auto_reply_delay_seconds: float = 1.2
+     poll_interval_ms: int = 1200
+     capture_cooldown_seconds: float = 4.0
+-    # 群聊：当前企业微信账号用户名（用于 @ 识别与回复 @ 回去）
+     wecom_account_name: str = ""
+-    # 群聊 OCR 轮询间隔（比个人聊天快，@ 响应更及时）
+     group_poll_interval_ms: int = 800
+     chat_area: ChatArea = field(default_factory=ChatArea)
+ 
+-    def load(self) -> "AppSettings":
+-        if not self.config_path.exists():
+-            env_key = os.environ.get("TEXT_API_KEY", "") or os.environ.get("ZHIPU_API_KEY", "")
+-            if env_key:
+-                self.api_key = env_key
+-            return self
++    def __post_init__(self) -> None:
++        self.config_path = Path(self.config_path)
++        if self.credential_store is None:
++            default_path = default_config_path()
++            store_path = credential_path() if self.config_path == default_path else self.config_path.with_name("credentials.dat")
++            self.credential_store = CredentialStore(path=store_path)
+ 
+-        data = json.loads(self.config_path.read_text(encoding="utf-8"))
+-        self.api_provider = str(data.get("api_provider", self.api_provider))
+-        legacy_api_key = str(data.get("api_key", self.api_key))
+-        raw_provider_api_keys = data.get("provider_api_keys")
+-        if isinstance(raw_provider_api_keys, dict):
+-            self.provider_api_keys = {
+-                str(provider): str(api_key)
+-                for provider, api_key in raw_provider_api_keys.items()
+-                if provider is not None
+-            }
+-            # Keep older or manually edited files usable: the legacy field is
+-            # still the key for the currently selected provider.
+-            if self.api_provider not in self.provider_api_keys and legacy_api_key:
+-                self.provider_api_keys[self.api_provider] = legacy_api_key
+-            self.api_key = self.provider_api_keys.get(self.api_provider, "")
++    @property
++    def managed_auto_reply(self) -> bool:
++        """Compatibility gate: only explicit full mode enables the legacy sender."""
++        return self.managed_mode == "full"
++
++    @managed_auto_reply.setter
++    def managed_auto_reply(self, value: bool) -> None:
++        if type(value) is not bool:
++            raise SettingsValidationError("managed_auto_reply must be a boolean")
++        self.managed_mode = "full" if value else "off"
++
++    def validate(self) -> None:
++        if type(self.config_version) is not int or self.config_version != CONFIG_VERSION:
++            raise SettingsValidationError(f"config_version must be {CONFIG_VERSION}")
++        for key in _PERSISTED_STRING_FIELDS:
++            if type(getattr(self, key)) is not str:
++                raise SettingsValidationError(f"{key} must be a string")
++        _validate_credential_template(self.custom_headers, "custom_headers")
++        _validate_credential_template(self.custom_body, "custom_body")
++        for key in ("training_mode", "auto_recognize", "enable_web_search"):
++            if type(getattr(self, key)) is not bool:
++                raise SettingsValidationError(f"{key} must be a boolean")
++        if self.reply_source_mode != "knowledge_only":
++            raise SettingsValidationError("reply_source_mode must be knowledge_only")
++        if self.enable_web_search is not False:
++            raise SettingsValidationError("enable_web_search must be false")
++        if self.managed_mode not in MANAGED_MODES:
++            raise SettingsValidationError("managed_mode is invalid")
++        if type(self.managed_allowed_chats) is not list or any(
++            type(chat) is not str or not chat.strip() for chat in self.managed_allowed_chats
++        ):
++            raise SettingsValidationError("managed_allowed_chats must be a list of non-empty strings")
++        if len(set(self.managed_allowed_chats)) != len(self.managed_allowed_chats):
++            raise SettingsValidationError("managed_allowed_chats must not contain duplicates")
++        self.search_max_results = _bounded_integer(self.search_max_results, "search_max_results", 1, 6)
++        self.poll_interval_ms = _bounded_integer(self.poll_interval_ms, "poll_interval_ms", 250, 10000)
++        self.group_poll_interval_ms = _bounded_integer(
++            self.group_poll_interval_ms,
++            "group_poll_interval_ms",
++            250,
++            10000,
++        )
++        self.auto_reply_delay_seconds = bounded_number(
++            self.auto_reply_delay_seconds,
++            "auto_reply_delay_seconds",
++            0.5,
++            10,
++        )
++        self.capture_cooldown_seconds = bounded_number(
++            self.capture_cooldown_seconds,
++            "capture_cooldown_seconds",
++            0.5,
++            60,
++        )
++        if not isinstance(self.chat_area, ChatArea):
++            raise SettingsValidationError("chat_area must be a ChatArea")
++        self.chat_area.validate()
++
++    def _validate_raw_document(self, data: object) -> None:
++        if not isinstance(data, dict):
++            raise SettingsValidationError("settings root must be an object")
++        version = data.get("config_version", 1)
++        if type(version) is not int or version not in {1, CONFIG_VERSION}:
++            raise SettingsValidationError("unsupported config_version")
++        for key in _PERSISTED_STRING_FIELDS:
++            value = _string_value(data, key, getattr(self, key))
++            if key in {"custom_headers", "custom_body"}:
++                _validate_credential_template(value, key)
++        if version == CONFIG_VERSION:
++            for forbidden in _FORBIDDEN_SETTINGS_KEY_FIELDS:
++                if forbidden in data:
++                    raise SettingsValidationError(f"{forbidden} is forbidden in version 2 settings")
++            if "managed_auto_reply" in data:
++                require_bool(data, "managed_auto_reply", False)
++                raise SettingsValidationError("managed_auto_reply is obsolete in version 2 settings")
+         else:
+-            # Migrate the original single-key format without losing the key.
+-            self.provider_api_keys = {}
+-            self.api_key = legacy_api_key
+-            if self.api_key:
+-                self.provider_api_keys[self.api_provider] = self.api_key
+-        self.base_url = str(data.get("base_url", self.base_url))
+-        self.model = str(data.get("model", self.model))
+-        self.vision_provider = str(data.get("vision_provider", self.vision_provider))
+-        self.vision_api_key = str(data.get("vision_api_key", self.vision_api_key))
+-        self.vision_base_url = str(data.get("vision_base_url", self.vision_base_url))
+-        self.vision_model = str(data.get("vision_model", self.vision_model))
++            for key in ("api_key", "vision_api_key"):
++                if type(data.get(key, "")) is not str:
++                    raise SettingsValidationError(f"{key} must be a string")
++            raw_provider_keys = data.get("provider_api_keys", {})
++            if type(raw_provider_keys) is not dict or any(
++                type(provider) is not str or type(secret) is not str
++                for provider, secret in raw_provider_keys.items()
++            ):
++                raise SettingsValidationError("provider_api_keys must map strings to strings")
++        for key in ("training_mode", "auto_recognize"):
++            require_bool(data, key, getattr(self, key))
++        if version == 1:
++            require_bool(data, "managed_auto_reply", False)
++        require_bool(data, "enable_web_search", False)
++        for key, low, high in (
++            ("search_max_results", 1, 6),
++            ("poll_interval_ms", 250, 10000),
++            ("group_poll_interval_ms", 250, 10000),
++        ):
++            _bounded_integer(data.get(key, getattr(self, key)), key, low, high)
++        for key, low, high in (
++            ("auto_reply_delay_seconds", 0.5, 10),
++            ("capture_cooldown_seconds", 0.5, 60),
++        ):
++            bounded_number(data.get(key, getattr(self, key)), key, low, high)
++        area = data.get("chat_area")
++        if area is not None:
++            if not isinstance(area, dict):
++                raise SettingsValidationError("chat_area must be an object")
++            values = {}
++            for key in ("x_left", "x_right", "y_top", "y_bottom"):
++                values[key] = bounded_number(area.get(key, getattr(self.chat_area, key)), f"chat_area.{key}", 0, 1)
++            ChatArea(**values).validate()
++        if version == CONFIG_VERSION:
++            mode = data.get("managed_mode", "off")
++            if type(mode) is not str or mode not in MANAGED_MODES:
++                raise SettingsValidationError("managed_mode is invalid")
++            allowed = data.get("managed_allowed_chats", [])
++            if type(allowed) is not list or any(type(chat) is not str or not chat.strip() for chat in allowed):
++                raise SettingsValidationError("managed_allowed_chats must be a list of non-empty strings")
++            if len(set(allowed)) != len(allowed):
++                raise SettingsValidationError("managed_allowed_chats must not contain duplicates")
++            if data.get("reply_source_mode", "knowledge_only") != "knowledge_only":
++                raise SettingsValidationError("reply_source_mode must be knowledge_only")
++            if data.get("enable_web_search", False) is not False:
++                raise SettingsValidationError("enable_web_search must be false")
++
++    def _validate_redacted_document(self, data: object) -> None:
++        if not isinstance(data, dict):
++            raise SettingsValidationError("settings root must be an object")
++        for forbidden in _FORBIDDEN_SETTINGS_KEY_FIELDS:
++            if forbidden in data:
++                raise SettingsValidationError(f"{forbidden} is forbidden in persisted settings")
++        self._validate_raw_document(data)
++
++    def _load_document(self) -> dict[str, object]:
++        try:
++            return load_json(self.config_path, self._validate_raw_document).data
++        except JsonDataError:
++            try:
++                value = json.loads(self.config_path.read_text(encoding="utf-8"))
++            except (OSError, UnicodeDecodeError) as error:
++                raise SettingsPersistenceError("settings file could not be read") from error
++            except json.JSONDecodeError:
++                raise
++            self._validate_raw_document(value)
++            raise
++        except (OSError, UnicodeDecodeError) as error:
++            raise SettingsPersistenceError("settings file could not be read") from error
++
++    def _load_credentials(self) -> dict[str, str]:
++        try:
++            return self.credential_store.load()
++        except Exception as error:
++            self.managed_mode = "off"
++            raise SettingsPersistenceError("credential store could not be read") from error
++
++    def _save_credentials(self, credentials: dict[str, str]) -> None:
++        try:
++            self.credential_store.save(credentials)
++        except Exception as error:
++            self.managed_mode = "off"
++            raise SettingsPersistenceError("credential store could not be written") from error
++
++    def _apply_document(self, data: dict[str, object], *, legacy: bool) -> None:
++        for key in (
++            "api_provider",
++            "base_url",
++            "model",
++            "vision_provider",
++            "vision_base_url",
++            "vision_model",
++            "custom_headers",
++            "custom_body",
++            "custom_response_path",
++            "ocr_engine",
++            "wecom_account_name",
++        ):
++            setattr(self, key, _string_value(data, key, getattr(self, key)))
++        self.training_mode = require_bool(data, "training_mode", self.training_mode)
++        self.auto_recognize = require_bool(data, "auto_recognize", self.auto_recognize)
++        self.enable_web_search = False
++        self.reply_source_mode = "knowledge_only"
++        self.search_max_results = _bounded_integer(
++            data.get("search_max_results", self.search_max_results),
++            "search_max_results",
++            1,
++            6,
++        )
++        self.poll_interval_ms = _bounded_integer(
++            data.get("poll_interval_ms", self.poll_interval_ms),
++            "poll_interval_ms",
++            250,
++            10000,
++        )
++        self.group_poll_interval_ms = _bounded_integer(
++            data.get("group_poll_interval_ms", self.group_poll_interval_ms),
++            "group_poll_interval_ms",
++            250,
++            10000,
++        )
++        self.auto_reply_delay_seconds = bounded_number(
++            data.get("auto_reply_delay_seconds", self.auto_reply_delay_seconds),
++            "auto_reply_delay_seconds",
++            0.5,
++            10,
++        )
++        self.capture_cooldown_seconds = bounded_number(
++            data.get("capture_cooldown_seconds", self.capture_cooldown_seconds),
++            "capture_cooldown_seconds",
++            0.5,
++            60,
++        )
++        area = data.get("chat_area")
++        if isinstance(area, dict):
++            self.chat_area = ChatArea(
++                **{
++                    key: bounded_number(area.get(key, getattr(self.chat_area, key)), f"chat_area.{key}", 0, 1)
++                    for key in ("x_left", "x_right", "y_top", "y_bottom")
++                }
++            )
++        if legacy:
++            self.managed_mode = "observe" if require_bool(data, "managed_auto_reply", False) else "off"
++            self.managed_allowed_chats = []
++        else:
++            self.managed_mode = _string_value(data, "managed_mode", "off")
++            self.managed_allowed_chats = list(data.get("managed_allowed_chats", []))
+         if self.api_provider == "zhipu" and self.model in {"glm-4.7-flash", "glm-4-flash"}:
+             self.model = "glm-4-flash-250414"
+         if self.api_provider == "deepseek" and self.model in {"deepseek-chat", "deepseek-reasoner"}:
+             self.model = "deepseek-v4-flash"
+-        self.custom_headers = str(data.get("custom_headers", self.custom_headers))
+-        self.custom_body = str(data.get("custom_body", self.custom_body))
+-        self.custom_response_path = str(data.get("custom_response_path", self.custom_response_path))
+-        self.reply_source_mode = str(data.get("reply_source_mode", self.reply_source_mode))
+-        if self.reply_source_mode not in {"model", "memory", "model_memory"}:
+-            self.reply_source_mode = "model_memory"
+-        self.ocr_engine = str(data.get("ocr_engine", self.ocr_engine))
+-        self.training_mode = bool(data.get("training_mode", self.training_mode))
+-        self.auto_recognize = bool(data.get("auto_recognize", self.auto_recognize))
+-        self.managed_auto_reply = bool(data.get("managed_auto_reply", self.managed_auto_reply))
+-        self.enable_web_search = bool(data.get("enable_web_search", self.enable_web_search))
+-        self.search_max_results = max(1, min(6, int(data.get("search_max_results", self.search_max_results))))
+-        self.auto_reply_delay_seconds = float(data.get("auto_reply_delay_seconds", self.auto_reply_delay_seconds))
+-        self.poll_interval_ms = int(data.get("poll_interval_ms", self.poll_interval_ms))
+-        self.capture_cooldown_seconds = float(
+-            data.get("capture_cooldown_seconds", self.capture_cooldown_seconds)
+-        )
+-        self.wecom_account_name = str(data.get("wecom_account_name", self.wecom_account_name)).strip()
+-        self.group_poll_interval_ms = int(data.get("group_poll_interval_ms", self.group_poll_interval_ms))
+-        area = data.get("chat_area", {})
+-        if isinstance(area, dict):
+-            self.chat_area = ChatArea(
+-                x_left=float(area.get("x_left", self.chat_area.x_left)),
+-                x_right=float(area.get("x_right", self.chat_area.x_right)),
+-                y_top=float(area.get("y_top", self.chat_area.y_top)),
+-                y_bottom=float(area.get("y_bottom", self.chat_area.y_bottom)),
++        self.config_version = CONFIG_VERSION
++        self.validate()
++
++    def _apply_credentials(self, credentials: dict[str, str]) -> None:
++        self.provider_api_keys = {
++            provider: secret
++            for provider, secret in credentials.items()
++            if not provider.startswith(_VISION_PREFIX)
++        }
++        self.api_key = self.provider_api_keys.get(self.api_provider, "")
++        self.vision_api_key = credentials.get(f"{_VISION_PREFIX}{self.vision_provider}", "")
++
++    def _runtime_credentials(self) -> dict[str, str]:
++        values = {
++            str(provider): str(secret)
++            for provider, secret in self.provider_api_keys.items()
++            if provider and secret
++        }
++        if self.api_provider and self.api_key:
++            values[self.api_provider] = self.api_key
++        if self.vision_provider and self.vision_api_key:
++            values[f"{_VISION_PREFIX}{self.vision_provider}"] = self.vision_api_key
++        return values
++
++    def _legacy_credentials(self, data: dict[str, object]) -> dict[str, str]:
++        values: dict[str, str] = {}
++        raw_provider_keys = data.get("provider_api_keys", {})
++        if raw_provider_keys is not None and not isinstance(raw_provider_keys, dict):
++            raise SettingsValidationError("provider_api_keys must be an object")
++        if isinstance(raw_provider_keys, dict):
++            for provider, secret in raw_provider_keys.items():
++                if type(provider) is not str or type(secret) is not str:
++                    raise SettingsValidationError("provider_api_keys entries must be strings")
++                if provider and secret:
++                    values[provider] = secret
++        legacy_api_key = data.get("api_key", "")
++        legacy_vision_key = data.get("vision_api_key", "")
++        if type(legacy_api_key) is not str or type(legacy_vision_key) is not str:
++            raise SettingsValidationError("legacy API keys must be strings")
++        if legacy_api_key:
++            values[self.api_provider] = legacy_api_key
++        if legacy_vision_key:
++            values[f"{_VISION_PREFIX}{self.vision_provider}"] = legacy_vision_key
++        return values
++
++    def _settings_payload(self) -> dict[str, object]:
++        payload: dict[str, object] = {}
++        for key in self.PERSISTED_FIELDS:
++            value = getattr(self, key)
++            if key == "chat_area":
++                value = {
++                    "x_left": self.chat_area.x_left,
++                    "x_right": self.chat_area.x_right,
++                    "y_top": self.chat_area.y_top,
++                    "y_bottom": self.chat_area.y_bottom,
++                }
++            elif key == "managed_allowed_chats":
++                value = list(self.managed_allowed_chats)
++            payload[key] = value
++        return payload
++
++    def _persist_settings(self) -> None:
++        self.validate()
++        try:
++            atomic_write_json(
++                self.config_path,
++                self._settings_payload(),
++                self._validate_redacted_document,
++                backup_count=5,
+             )
+-            if self.chat_area.x_left < 0.25:
+-                self.chat_area.x_left = ChatArea().x_left
+-                self.chat_area.x_right = ChatArea().x_right
+-                self.chat_area.y_top = ChatArea().y_top
+-                self.chat_area.y_bottom = ChatArea().y_bottom
+-            if self.chat_area.y_bottom < 0.90:
+-                self.chat_area.y_bottom = ChatArea().y_bottom
++        except OSError as error:
++            self.managed_mode = "off"
++            raise SettingsPersistenceError("settings file could not be written") from error
++
++    def load(self) -> "AppSettings":
++        if not self.config_path.exists():
++            credentials = self._load_credentials()
++            self._apply_credentials(credentials)
++            env_key = os.environ.get("TEXT_API_KEY", "") or os.environ.get("ZHIPU_API_KEY", "")
++            if env_key and not self.api_key:
++                self.api_key = env_key
++                self.provider_api_keys[self.api_provider] = env_key
++            return self
++
++        data = self._load_document()
++        legacy = data.get("config_version", 1) == 1
++        self._apply_document(data, legacy=legacy)
++        if not legacy:
++            self._apply_credentials(self._load_credentials())
++            return self
++
++        encrypted = self._load_credentials()
++        plaintext = self._legacy_credentials(data)
++        encrypted.update(plaintext)
++        self._apply_credentials(encrypted)
++        if any(field in data for field in ("api_key", "vision_api_key", "provider_api_keys")):
++            self._save_credentials(encrypted)
++            read_back = self._load_credentials()
++            if read_back != encrypted:
++                raise SettingsPersistenceError("credential read-back did not match encrypted write")
++            self._apply_credentials(read_back)
++        self._persist_settings()
+         return self
+ 
+     def get_provider_api_key(self, provider: str) -> str:
+@@ -150,11 +535,12 @@ class AppSettings:
+             self.api_key = value
+ 
+     def save(self) -> None:
+-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+-        self.provider_api_keys[self.api_provider] = self.api_key
+-        data = asdict(self)
+-        data["config_path"] = str(self.config_path)
+-        self.config_path.write_text(
+-            json.dumps(data, ensure_ascii=False, indent=2),
+-            encoding="utf-8",
+-        )
++        self.validate()
++        credentials = self._runtime_credentials()
++        self._save_credentials(credentials)
++        read_back = self._load_credentials()
++        if read_back != credentials:
++            self.managed_mode = "off"
++            raise SettingsPersistenceError("credential read-back did not match encrypted write")
++        self._apply_credentials(read_back)
++        self._persist_settings()
+
+===== DIFF: memory.py =====
+warning: in the working copy of 'D:\Vibe C\客服\wechat--main\.superpowers\sdd\2026-08-12-01-persistence-and-settings-hardening\phase-review-baseline\memory.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'D:\Vibe C\客服\wechat--main\memory.py', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\memory.py" "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\memory.py"
+index 65a8d54..5c87c13 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\memory.py"	
++++ "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\memory.py"	
+@@ -2,22 +2,47 @@ from __future__ import annotations
+ 
+ import hashlib
+ import json
+-import os
++import math
+ import re
+-import shutil
+-import sys
+-import time
+ from collections import Counter
+ from dataclasses import dataclass, field
+ from datetime import datetime, timezone
+ from pathlib import Path
+ 
+-from settings import APP_NAME
++from app_paths import memory_path, vector_path
++from atomic_json import JsonDataError, JsonLoadResult, atomic_write_json, load_json
+ 
+ 
+ ENTERPRISE_ANNUAL_REPORT_SOURCE = "enterprise_annual_report_kb"
+ ENTERPRISE_LOCAL_CONFIDENT_MARGIN = 8
+ ENTERPRISE_LOCAL_MIN_SCORE = 8
++MEMORY_SCHEMA_VERSION = 2
++VECTOR_SCHEMA_VERSION = 1
++VECTOR_DIMENSION = 384
++
++_MEMORY_EXAMPLE_STRING_FIELDS = {
++    "partner",
++    "cue",
++    "reply",
++    "source",
++    "created_at",
++    "conversation_hash",
++    "scenario_id",
++    "scenario_title",
++    "why",
++    "question",
++    "module",
++    "subcategory",
++    "organization_type",
++    "source_sheet",
++    "source_cell",
++    "source_file",
++    "priority",
++}
++
++
++class VectorIndexError(RuntimeError):
++    """Raised when the vector index is unavailable for managed replies."""
+ # 企业年报"可直接发送"的可靠底线：第一名分数不低于该值且明显领先第二名（>=8 分）且无冲突。
+ # 2026-08-05 用户要求低分阈值 20 -> 30：命中评分 < 30 时回复企业未命中文案。
+ ENTERPRISE_LOCAL_CONFIDENT_FLOOR = 30
+@@ -107,12 +132,85 @@ _ENTERPRISE_SCOPE_TERMS = (
+ 
+ 
+ def default_memory_path() -> Path:
+-    if getattr(sys, "frozen", False):
+-        return Path(sys.executable).resolve().parent / "user_data" / "memory.json"
+-    base = os.environ.get("APPDATA")
+-    if base:
+-        return Path(base) / APP_NAME / "memory.json"
+-    return Path.home() / ".wechat_style_reply_assistant" / "memory.json"
++    return memory_path()
++
++
++def validate_memory_document(value: object) -> None:
++    if not isinstance(value, dict):
++        raise ValueError("memory root must be an object")
++    version = value.get("schema_version", 1)
++    if type(version) is not int or version not in {1, MEMORY_SCHEMA_VERSION}:
++        raise ValueError("unsupported memory schema_version")
++    missing = {"style_summary", "examples", "common_phrases"} - value.keys()
++    if missing:
++        raise ValueError(f"memory fields missing: {', '.join(sorted(missing))}")
++    if type(value["style_summary"]) is not str:
++        raise ValueError("style_summary must be a string")
++    examples = value["examples"]
++    if type(examples) is not list:
++        raise ValueError("examples must be a list")
++    for index, item in enumerate(examples):
++        if type(item) is not dict:
++            raise ValueError(f"examples[{index}] must be an object")
++        for key in _MEMORY_EXAMPLE_STRING_FIELDS:
++            if key in item and type(item[key]) is not str:
++                raise ValueError(f"examples[{index}].{key} must be a string")
++        missing_example = {"cue", "reply", "source", "conversation_hash"} - item.keys()
++        if missing_example:
++            raise ValueError(
++                f"examples[{index}] fields missing: {', '.join(sorted(missing_example))}"
++            )
++        normalized = _normalize_example(item)
++        if not normalized or not normalized["reply"]:
++            raise ValueError(f"examples[{index}].reply must normalize to non-empty text")
++    phrases = value["common_phrases"]
++    if type(phrases) is not dict:
++        raise ValueError("common_phrases must be an object")
++    if any(
++        type(phrase) is not str
++        or type(count) is not int
++        or count < 0
++        for phrase, count in phrases.items()
++    ):
++        raise ValueError("common_phrases must map strings to non-negative integers")
++
++
++def _validate_vector_document(value: object) -> None:
++    if not isinstance(value, dict):
++        raise ValueError("vector root must be an object")
++    if type(value.get("version")) is not int or value["version"] != VECTOR_SCHEMA_VERSION:
++        raise ValueError("unsupported vector schema version")
++    if type(value.get("dim")) is not int or value["dim"] != VECTOR_DIMENSION:
++        raise ValueError("unsupported vector dimension")
++    memory_hash = value.get("memory_hash")
++    if type(memory_hash) is not str or re.fullmatch(r"[0-9a-f]{64}", memory_hash) is None:
++        raise ValueError("memory_hash must be a SHA-256 hex digest")
++    items = value.get("items")
++    if type(items) is not list:
++        raise ValueError("vector items must be a list")
++    for index, item in enumerate(items):
++        if type(item) is not dict:
++            raise ValueError(f"vector items[{index}] must be an object")
++        for key in ("conversation_hash", "source", "reply"):
++            if type(item.get(key)) is not str:
++                raise ValueError(f"vector items[{index}].{key} must be a string")
++        vector = item.get("vector")
++        if type(vector) is not dict or not vector:
++            raise ValueError(f"vector items[{index}].vector must be non-empty")
++        for token, weight in vector.items():
++            if (
++                type(token) is not str
++                or re.fullmatch(r"0|[1-9][0-9]*", token) is None
++                or not 0 <= int(token) < VECTOR_DIMENSION
++            ):
++                raise ValueError(f"vector items[{index}] has an invalid bucket")
++            if (
++                type(weight) not in {int, float}
++                or isinstance(weight, bool)
++                or not math.isfinite(float(weight))
++                or not 0 < float(weight) <= 1
++            ):
++                raise ValueError(f"vector items[{index}] has an invalid weight")
+ 
+ 
+ @dataclass
+@@ -122,48 +220,71 @@ class StyleMemory:
+     examples: list[dict[str, str]] = field(default_factory=list)
+     common_phrases: Counter = field(default_factory=Counter)
+     max_examples: int = 3000
++    load_result: JsonLoadResult | None = field(default=None, init=False, repr=False)
++    vector_ready: bool = field(default=False, init=False)
++    last_vector_error: str | None = field(default=None, init=False)
+ 
+     @property
+     def vector_path(self) -> Path:
+-        return self.path.with_name("vector_memory.json")
++        return self.path.with_name(vector_path().name)
+ 
+     @property
+     def sop_library_path(self) -> Path:
+         return self.path.with_name("sop_library.json")
+ 
+     def load(self) -> "StyleMemory":
+-        if not self.path.exists():
++        backups = [self.path.with_name(f"{self.path.name}.bak.{index}") for index in range(1, 6)]
++        if not self.path.exists() and not any(backup.exists() for backup in backups):
+             return self
+-        data = json.loads(self.path.read_text(encoding="utf-8"))
++        self.load_result = load_json(self.path, validate_memory_document)
++        data = self.load_result.data
+         self.style_summary = str(data.get("style_summary", self.style_summary))
+-        raw_examples = list(data.get("examples", []))[-self.max_examples :]
+-        self.examples = [_normalize_example(item) for item in raw_examples if _normalize_example(item)]
++        raw_examples = list(data.get("examples", []))
++        self.examples = []
++        for item in raw_examples:
++            normalized = _normalize_example(item)
++            if normalized:
++                self.examples.append(normalized)
+         self.common_phrases = Counter(data.get("common_phrases", {}))
++        self._ensure_vector_index()
+         return self
+ 
+     def save(self) -> None:
+-        self.path.parent.mkdir(parents=True, exist_ok=True)
+-        # 数量骤减保护：磁盘已有大量知识库（≥50 条）而内存只有极少（<20 条）时，
+-        # 说明程序可能 load 到了旧/空数据（常见于程序运行中数据被外部同步/替换），
+-        # 先备份磁盘当前文件再覆盖，避免知识库被永久冲掉。
+-        try:
+-            if self.path.exists():
+-                disk_examples = json.loads(self.path.read_text(encoding="utf-8")).get("examples", [])
+-                if len(disk_examples) >= 50 and len(self.examples) < 20:
+-                    backup_path = self.path.with_name(
+-                        f"memory.json.bak-auto-{time.strftime('%Y%m%d-%H%M%S')}"
+-                    )
+-                    shutil.copy2(self.path, backup_path)
+-        except Exception:
+-            pass
+-        self.examples = _dedupe_memory_examples(self.examples)[-self.max_examples :]
+-        data = {
++        normalized_examples = []
++        for index, item in enumerate(self.examples):
++            if type(item) is not dict:
++                raise ValueError(f"examples[{index}] must be an object")
++            for key in _MEMORY_EXAMPLE_STRING_FIELDS:
++                if key in item and type(item[key]) is not str:
++                    raise ValueError(f"examples[{index}].{key} must be a string")
++            normalized = _normalize_example(item)
++            if not normalized:
++                raise ValueError(f"examples[{index}] must contain a non-empty reply")
++            normalized_examples.append(normalized)
++        document = {
++            "schema_version": MEMORY_SCHEMA_VERSION,
++            "style_summary": self.style_summary,
++            "examples": _dedupe_memory_examples(normalized_examples),
++            "common_phrases": dict(self.common_phrases.most_common(120)),
++        }
++        atomic_write_json(self.path, document, validate_memory_document, backup_count=5)
++        self.examples = list(document["examples"])
++        self.rebuild_vector_index()
++
++    def content_hash(self) -> str:
++        document = {
++            "schema_version": MEMORY_SCHEMA_VERSION,
+             "style_summary": self.style_summary,
+-            "examples": self.examples,
++            "examples": _dedupe_memory_examples(self.examples),
+             "common_phrases": dict(self.common_phrases.most_common(120)),
+         }
+-        self.path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+-        self._save_vector_index()
++        payload = json.dumps(
++            document,
++            ensure_ascii=False,
++            sort_keys=True,
++            separators=(",", ":"),
++        ).encode("utf-8")
++        return hashlib.sha256(payload).hexdigest()
+ 
+     def learn_from_chat_text(self, conversation_text: str) -> None:
+         lines = [line.strip() for line in conversation_text.splitlines() if line.strip()]
+@@ -397,11 +518,8 @@ class StyleMemory:
+ 
+     def vector_relevant_examples(self, conversation_text: str, limit: int = 6) -> list[dict[str, str]]:
+         query_vector = _text_vector(conversation_text)
+-        if not query_vector or not self.vector_path.exists():
+-            return []
+-        try:
+-            data = json.loads(self.vector_path.read_text(encoding="utf-8"))
+-        except Exception:
++        data = self._load_vector_document()
++        if not query_vector or data is None:
+             return []
+         by_hash = {item.get("conversation_hash", ""): item for item in self.examples}
+         scored: list[tuple[float, int, dict[str, str]]] = []
+@@ -545,11 +663,8 @@ class StyleMemory:
+         return False
+ 
+     def _vector_by_hash(self) -> dict[str, dict[str, float]]:
+-        if not self.vector_path.exists():
+-            return {}
+-        try:
+-            data = json.loads(self.vector_path.read_text(encoding="utf-8"))
+-        except Exception:
++        data = self._load_vector_document()
++        if data is None:
+             return {}
+         result: dict[str, dict[str, float]] = {}
+         for item in data.get("items", []):
+@@ -583,7 +698,34 @@ class StyleMemory:
+         question_note = "常用反问或确认句" if question else "表达直接"
+         self.style_summary = f"{length_note}、微信口语、{emoji_note}、{question_note}、少客服腔。"
+ 
+-    def _save_vector_index(self) -> None:
++    def _load_vector_document(self) -> dict[str, object] | None:
++        self.vector_ready = False
++        if not self.vector_path.exists():
++            self.last_vector_error = "vector index is missing"
++            return None
++        try:
++            result = load_json(self.vector_path, _validate_vector_document)
++        except JsonDataError:
++            self.last_vector_error = "vector index is invalid"
++            return None
++        if result.recovered:
++            self.last_vector_error = "vector index primary is invalid"
++            return None
++        if result.data["memory_hash"] != self.content_hash():
++            self.last_vector_error = "vector index is stale"
++            return None
++        if result.data["items"] != self._build_vector_items():
++            self.last_vector_error = "vector index does not match memory"
++            return None
++        self.vector_ready = True
++        self.last_vector_error = None
++        return result.data
++
++    def _ensure_vector_index(self) -> None:
++        if self._load_vector_document() is None:
++            self.rebuild_vector_index()
++
++    def _build_vector_items(self) -> list[dict[str, object]]:
+         items = []
+         for item in self.examples:
+             vector = _text_vector(f"{item.get('cue', '')}\n{item.get('reply', '')}")
+@@ -597,8 +739,28 @@ class StyleMemory:
+                     "vector": vector,
+                 }
+             )
+-        data = {"version": 1, "dim": 384, "items": items}
+-        self.vector_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
++        return items
++
++    def rebuild_vector_index(self) -> None:
++        self.vector_ready = False
++        self.last_vector_error = None
++        try:
++            data = {
++                "version": VECTOR_SCHEMA_VERSION,
++                "dim": VECTOR_DIMENSION,
++                "memory_hash": self.content_hash(),
++                "items": self._build_vector_items(),
++            }
++            atomic_write_json(self.vector_path, data, _validate_vector_document, backup_count=5)
++        except Exception as error:
++            self.last_vector_error = f"{type(error).__name__}: vector index rebuild failed"
++            raise VectorIndexError(self.last_vector_error) from error
++        self.vector_ready = True
++        self.last_vector_error = None
++
++    def assert_ready_for_managed_reply(self) -> None:
++        if not self.vector_ready:
++            raise VectorIndexError(self.last_vector_error or "vector index is not ready")
+ 
+     @staticmethod
+     def _extract_phrases(text: str) -> list[str]:
+@@ -686,7 +848,7 @@ def _normalize_example(item: object) -> dict[str, str]:
+         "cue": cue,
+         "reply": reply,
+         "source": source,
+-        "created_at": str(item.get("created_at", "")) or _utc_now(),
++        "created_at": str(item.get("created_at", "")),
+         "conversation_hash": str(item.get("conversation_hash", "")) or _conversation_hash(cue, reply),
+     }
+     for key in (
+@@ -963,6 +1125,8 @@ def _text_vector(text: str, dim: int = 384) -> dict[str, float]:
+     for size in (2, 3, 4):
+         for index in range(max(0, len(cleaned) - size + 1)):
+             features[cleaned[index : index + size]] += 1
++    if not features and cleaned:
++        features[f"single:{cleaned}"] += 1
+     if not features:
+         return {}
+     buckets: Counter[str] = Counter()
+
+===== DIFF: float_ui.py =====
+warning: in the working copy of 'D:\Vibe C\客服\wechat--main\.superpowers\sdd\2026-08-12-01-persistence-and-settings-hardening\phase-review-baseline\float_ui.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'D:\Vibe C\客服\wechat--main\float_ui.py', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\float_ui.py" "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\float_ui.py"
+index 0815162..d4826a0 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\float_ui.py"	
++++ "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\float_ui.py"	
+@@ -3,12 +3,31 @@ from __future__ import annotations
+ import threading
+ import tkinter as tk
+ import webbrowser
++import re
+ from tkinter import filedialog, messagebox, scrolledtext, ttk
+ from pathlib import Path
+ 
+ from llm_clients import provider_defaults, provider_labels, supported_provider_help
+ from settings import AppSettings
+ 
++
++SOURCE_MODE_OPTIONS = (("knowledge_only", "\u4ec5\u4f7f\u7528\u77e5\u8bc6\u5e93"),)
++MANAGED_MODE_OPTIONS = (
++    ("off", "\u5173\u95ed"),
++    ("observe", "\u89c2\u5bdf"),
++    ("controlled", "\u53d7\u63a7"),
++    ("full", "\u5168\u6258\u7ba1"),
++)
++
++
++def parse_managed_allowed_chats(value: str) -> list[str]:
++    chats: list[str] = []
++    for item in re.split(r"[,;\n\uff0c\uff1b]+", value):
++        chat = item.strip()
++        if chat and chat not in chats:
++            chats.append(chat)
++    return chats
++
+ TEXT = {
+     "title": "聊小智",
+     "waiting": "等待聊天窗口",
+@@ -183,7 +202,7 @@ class ReplyAssistantUI:
+         self.progress_var = tk.StringVar(value="")
+         self.training_var = tk.BooleanVar(value=self.settings.training_mode)
+         self.auto_var = tk.BooleanVar(value=self.settings.auto_recognize)
+-        self.managed_var = tk.BooleanVar(value=self.settings.managed_auto_reply)
++        self.managed_var = tk.StringVar(value=self.settings.managed_mode)
+         self.source_mode_var = tk.StringVar(value=self.settings.reply_source_mode)
+         self.source_mode_label_var = tk.StringVar(value=self._source_mode_short_label(self.settings.reply_source_mode))
+         self.selected_reply = ""
+@@ -308,17 +327,20 @@ class ReplyAssistantUI:
+         Tooltip(auto, TEXT["auto_tip"])
+         managed_group = tk.Frame(mode_row, bg=COLORS["page"])
+         managed_group.pack(side="right", padx=(4, 0))
+-        managed = tk.Checkbutton(
++        managed = tk.OptionMenu(
+             managed_group,
+-            text=TEXT["managed"],
+-            variable=self.managed_var,
+-            command=self._toggle_managed,
+-            bg=COLORS["page"],
++            self.managed_var,
++            *[mode for mode, _label in MANAGED_MODE_OPTIONS],
++            command=self._set_managed_mode,
++        )
++        managed.configure(
++            bg=COLORS["panel"],
+             fg=COLORS["muted"],
+             activebackground=COLORS["page"],
+-            selectcolor=COLORS["panel"],
+             font=("Microsoft YaHei UI", 10),
+-            padx=4,
++            relief="flat",
++            borderwidth=0,
++            highlightthickness=0,
+         )
+         managed.pack(side="left")
+         Tooltip(managed, TEXT["managed_tip"])
+@@ -546,65 +568,60 @@ class ReplyAssistantUI:
+         self.callbacks["training_changed"](enabled)
+ 
+     def _toggle_managed(self) -> None:
+-        enabled = bool(self.managed_var.get())
+-        self.settings.managed_auto_reply = enabled
+-        if enabled:
++        value = self.managed_var.get()
++        self._set_managed_mode("full" if value is True else "off" if value is False else str(value))
++
++    def _set_managed_mode(self, mode: str, *, persist: bool = True) -> None:
++        label_to_mode = {label: value for value, label in MANAGED_MODE_OPTIONS}
++        selected = label_to_mode.get(mode, mode)
++        if selected not in {value for value, _label in MANAGED_MODE_OPTIONS}:
++            selected = "off"
++        self.managed_var.set(selected)
++        self.settings.managed_mode = selected
++        if selected != "off":
+             self.settings.auto_recognize = True
+             self.auto_var.set(True)
+-        self.settings.save()
+-        self.callbacks["managed_changed"](enabled)
++        if "managed_mode_changed" in self.callbacks:
++            self.callbacks["managed_mode_changed"](selected)
++        elif "managed_changed" in self.callbacks:
++            self.callbacks["managed_changed"](selected == "full")
++        self.settings.managed_mode = selected
++        if selected != "off":
++            self.settings.auto_recognize = True
++            self.auto_var.set(True)
++        if persist:
++            self.settings.save()
+ 
+     def _toggle_source_mode(self) -> None:
+         mode = self._source_mode_value(self.source_mode_label_var.get())
+         self._set_source_mode(mode)
+ 
+     def _set_source_mode(self, mode: str) -> None:
+-        self.source_mode_var.set(mode)
+-        self.source_mode_label_var.set(self._source_mode_short_label(mode))
+-        self.settings.reply_source_mode = mode if mode in {"model", "memory", "model_memory"} else "model_memory"
++        del mode
++        self.source_mode_var.set("knowledge_only")
++        self.source_mode_label_var.set(self._source_mode_short_label("knowledge_only"))
++        self.settings.reply_source_mode = "knowledge_only"
+         self.settings.save()
+         self._refresh_source_menu()
+-        if "source_mode_changed" in self.callbacks:
+-            self.callbacks["source_mode_changed"](self.settings.reply_source_mode)
+ 
+     def _refresh_source_menu(self) -> None:
+         if not hasattr(self, "source_menu"):
+             return
+-        current = self.settings.reply_source_mode if self.settings.reply_source_mode in {"model", "memory", "model_memory"} else "model_memory"
+-        # 用户要求：移除"大模型"（model）选项，只保留"话术库"与"大模型+话术库"；
+-        # model 分支代码保留不影响主程序。
+-        items = [
+-            ("memory", TEXT["source_memory"]),
+-            ("model_memory", TEXT["source_model_memory"]),
+-        ]
++        current = "knowledge_only"
++        items = SOURCE_MODE_OPTIONS
+         self.source_menu.delete(0, "end")
+         for value, label in items:
+             prefix = "✓ " if value == current else "   "
+             self.source_menu.add_command(label=f"{prefix}{label}", command=lambda selected=value: self._set_source_mode(selected))
+ 
+     def _source_mode_label(self, value: str) -> str:
+-        return {
+-            "model": TEXT["source_model"],
+-            "memory": TEXT["source_memory"],
+-            "model_memory": TEXT["source_model_memory"],
+-        }.get(value, TEXT["source_model_memory"])
++        return dict(SOURCE_MODE_OPTIONS).get(value, dict(SOURCE_MODE_OPTIONS)["knowledge_only"])
+ 
+     def _source_mode_short_label(self, value: str) -> str:
+-        return {
+-            "model": TEXT["source_model_short"],
+-            "memory": TEXT["source_memory_short"],
+-            "model_memory": TEXT["source_model_memory_short"],
+-        }.get(value, TEXT["source_model_memory_short"])
++        return self._source_mode_label(value)
+ 
+     def _source_mode_value(self, label: str) -> str:
+-        return {
+-            TEXT["source_model"]: "model",
+-            TEXT["source_memory"]: "memory",
+-            TEXT["source_model_memory"]: "model_memory",
+-            TEXT["source_model_short"]: "model",
+-            TEXT["source_memory_short"]: "memory",
+-            TEXT["source_model_memory_short"]: "model_memory",
+-        }.get(label, "model_memory")
++        return {option_label: value for value, option_label in SOURCE_MODE_OPTIONS}.get(label, "knowledge_only")
+ 
+     def set_status(self, text: str) -> None:
+         self.status_var.set(text)
+@@ -1121,22 +1138,10 @@ class ReplyAssistantUI:
+         body_editor.insert("1.0", self.settings.custom_body)
+         body_editor.pack(fill="x", pady=(3, 10))
+ 
+-        web_search_var = tk.BooleanVar(value=bool(getattr(self.settings, "enable_web_search", True)))
+-        web_search_check = tk.Checkbutton(
+-            api_detail_frame,
+-            text=TEXT["web_search"],
+-            variable=web_search_var,
+-            bg=COLORS["page"],
+-            fg=COLORS["text"],
+-            selectcolor=COLORS["page"],
+-            activebackground=COLORS["page"],
+-            activeforeground=COLORS["text"],
+-            font=("Microsoft YaHei UI", 10),
+-        )
+-        web_search_check.pack(anchor="w", pady=(0, 2))
++        web_search_var = tk.BooleanVar(value=False)
+         tk.Label(
+             api_detail_frame,
+-            text=TEXT["web_search_tip"],
++            text="\u6b63\u5f0f\u6a21\u5f0f\u7981\u7528\u8054\u7f51\u641c\u7d22\uff0c\u56de\u590d\u4ec5\u6765\u81ea\u672c\u5730\u77e5\u8bc6\u5e93\u3002",
+             bg=COLORS["page"],
+             fg=COLORS["muted"],
+             justify="left",
+@@ -1144,6 +1149,49 @@ class ReplyAssistantUI:
+             anchor="w",
+         ).pack(fill="x", pady=(0, 10))
+ 
++        managed_mode_var = tk.StringVar(value=self.settings.managed_mode)
++        tk.Label(
++            frame,
++            text="\u6258\u7ba1\u6a21\u5f0f",
++            bg=COLORS["page"],
++            fg=COLORS["muted"],
++            anchor="w",
++        ).pack(fill="x")
++        managed_mode_menu = tk.OptionMenu(
++            frame,
++            managed_mode_var,
++            *[mode for mode, _label in MANAGED_MODE_OPTIONS],
++        )
++        managed_mode_menu.configure(
++            bg=COLORS["panel"],
++            fg=COLORS["text"],
++            relief="flat",
++            borderwidth=0,
++            highlightthickness=0,
++        )
++        managed_mode_menu.pack(fill="x", ipady=3, pady=(3, 8))
++        tk.Label(
++            frame,
++            text="\u53d7\u63a7\u6a21\u5f0f\u5141\u8bb8\u7684\u804a\u5929\uff08\u6bcf\u884c\u6216\u9017\u53f7\u5206\u9694\uff09",
++            bg=COLORS["page"],
++            fg=COLORS["muted"],
++            anchor="w",
++        ).pack(fill="x")
++        managed_allowlist_editor = scrolledtext.ScrolledText(
++            frame,
++            height=3,
++            wrap="word",
++            relief="flat",
++            borderwidth=0,
++            bg=COLORS["panel"],
++            fg=COLORS["text"],
++            font=("Microsoft YaHei UI", 9),
++            padx=8,
++            pady=6,
++        )
++        managed_allowlist_editor.insert("1.0", "\n".join(self.settings.managed_allowed_chats))
++        managed_allowlist_editor.pack(fill="x", pady=(3, 10))
++
+         vision_detail_visible = tk.BooleanVar(value=False)
+         vision_detail_frame = tk.Frame(frame, bg=COLORS["page"])
+ 
+@@ -1365,7 +1413,7 @@ class ReplyAssistantUI:
+                 self.settings.custom_headers = headers_var.get().strip()
+                 self.settings.custom_body = body_editor.get("1.0", "end").strip()
+                 self.settings.custom_response_path = response_path_var.get().strip()
+-                self.settings.enable_web_search = web_search_var.get()
++                self.settings.enable_web_search = False
+                 self.settings.save()
+                 result = self.callbacks["analyze_sop_training"](source_path)
+             except Exception as exc:
+@@ -1432,7 +1480,11 @@ class ReplyAssistantUI:
+             self.settings.custom_headers = headers_var.get().strip()
+             self.settings.custom_body = body_editor.get("1.0", "end").strip()
+             self.settings.custom_response_path = response_path_var.get().strip()
+-            self.settings.enable_web_search = web_search_var.get()
++            self.settings.enable_web_search = False
++            self.settings.managed_allowed_chats = parse_managed_allowed_chats(
++                managed_allowlist_editor.get("1.0", "end")
++            )
++            self._set_managed_mode(managed_mode_var.get(), persist=False)
+             self.settings.save()
+             self.set_status(TEXT["saved"])
+             dialog.destroy()
+
+===== DIFF: main.py =====
+warning: in the working copy of 'D:\Vibe C\客服\wechat--main\main.py', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\main.py" "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\main.py"
+index 03c2bf7..95b22e0 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\main.py"	
++++ "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\main.py"	
+@@ -7,14 +7,19 @@ import re
+ import sys
+ import threading
+ import time
++from dataclasses import dataclass
+ from difflib import SequenceMatcher
++from json import JSONDecodeError
+ from pathlib import Path
+ from queue import Empty, Queue
+ 
++from app_paths import logs_dir
++from atomic_json import JsonDataError
+ from chat_training import import_chat_zip_to_memory, import_chat_zip_to_memory_with_llm
+ from capture_ocr import ChatOCR
+ from float_ui import ReplyAssistantUI
+-from memory import ENTERPRISE_ANNUAL_REPORT_SOURCE, StyleMemory
++from memory import ENTERPRISE_ANNUAL_REPORT_SOURCE, StyleMemory, VectorIndexError
++from runtime_logging import build_runtime_logger, enable_session_debug
+ from reply_engine import (
+     NO_DIRECT_ANSWER_REPLY,
+     ReplyEngine,
+@@ -26,7 +31,7 @@ from reply_engine import (
+     unreplied_other_messages,
+ )
+ from sender import WeChatSender
+-from settings import AppSettings
++from settings import AppSettings, SettingsPersistenceError, SettingsValidationError
+ from sop_analyzer import (
+     analyze_training_source_to_memory,
+     build_sop_library_from_memory,
+@@ -51,29 +56,41 @@ except Exception:  # pragma: no cover
+ 
+ 
+ def _setup_diag_log() -> logging.Logger:
+-    """全托管发送链路诊断日志：记录每次发送决策与原因，便于排查“候选刷新但不发送”。"""
+-    logger = logging.getLogger("managed_send_diag")
+-    if not logger.handlers:
+-        logger.setLevel(logging.INFO)
+-        base = os.environ.get("APPDATA", "")
+-        log_dir = Path(base) / "WeChatStyleReplyAssistant" if base else Path.home() / ".wechat_style_reply_assistant"
+-        try:
+-            log_dir.mkdir(parents=True, exist_ok=True)
+-            handler = logging.FileHandler(log_dir / "managed_send.log", encoding="utf-8")
+-            handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+-            logger.addHandler(handler)
+-            logger.propagate = False
+-        except Exception:
+-            pass
+-    return logger
++    """Create the privacy-safe diagnostic logger only when an event is emitted."""
++    return build_runtime_logger(logs_dir())
+ 
+ 
+-DIAG_LOG = _setup_diag_log()
++DIAG_LOG: logging.Logger | None = None
++_DIAG_LOG_LOCK = threading.Lock()
+ 
+ 
+-def _diag(*args: object) -> None:
++def _diag(
++    code: str,
++    *,
++    error_category: str | None = None,
++    score: int | float | None = None,
++    org_scope: str | None = None,
++    record_id: str | None = None,
++) -> None:
++    global DIAG_LOG
+     try:
+-        DIAG_LOG.info(" ".join(str(arg) for arg in args))
++        if DIAG_LOG is None:
++            with _DIAG_LOG_LOCK:
++                if DIAG_LOG is None:
++                    DIAG_LOG = _setup_diag_log()
++        event_data: dict[str, object] = {"event": "managed-send-diagnostic", "state": code}
++        for key, value in {
++            "error_category": error_category,
++            "score": score,
++            "org_scope": org_scope,
++            "record_id": record_id,
++        }.items():
++            if value is not None:
++                event_data[key] = value
++        DIAG_LOG.info(
++            "managed-send-diagnostic",
++            extra={"event_data": event_data},
++        )
+     except Exception:
+         pass
+ 
+@@ -113,16 +130,103 @@ MSG = {
+     "managed_off": "\u5df2\u5173\u95ed\u5168\u6258\u7ba1\u3002",
+     "auto_sending": "\u5168\u6258\u7ba1\u5ba1\u6838\u540e\u9009\u4e2d\uff1a{text}",
+     "managed_preflight_blocked": "全托管发送前复核未通过：{reason}",
++    "managed_vector_blocked": "向量索引未就绪，已关闭全托管自动发送；请修复索引后使用手动诊断。",
+     "api_failed_stop_send": "接口未生效，已停止全托管自动发送。请先检查 API Key、额度、模型名或 Base URL。",
+     "no_send_window": "没有可发送的聊天窗口",
+     "training_imported": "训练包已导入：{files} 个文件，{turns} 轮对话，写入 {examples} 条长期记忆样例。",
+ }
+ 
+ 
++@dataclass
++class StartupState:
++    settings: AppSettings
++    memory: StyleMemory
++    managed_mode: str
++    blocking_error: str = ""
++    error_type: type[Exception] | None = None
++
++
++def _blocked_startup_state(
++    settings: AppSettings,
++    memory: StyleMemory,
++    message: str,
++    error: Exception,
++) -> StartupState:
++    settings.managed_mode = "off"
++    settings.auto_recognize = False
++    settings.training_mode = False
++    return StartupState(
++        settings=settings,
++        memory=memory,
++        managed_mode="off",
++        blocking_error=message,
++        error_type=type(error),
++    )
++
++
++def load_startup_state_for_test() -> StartupState:
++    """Load startup persistence without replacing invalid formal files."""
++    settings = AppSettings()
++    memory = StyleMemory()
++    try:
++        settings.load()
++    except JSONDecodeError as error:
++        typed_error = JsonDataError(
++            settings.config_path,
++            [(settings.config_path, f"JSONDecodeError: {error.msg}")],
++        )
++        return _blocked_startup_state(
++            settings,
++            memory,
++            "配置读取失败，已关闭托管模式；请检查设置文件后使用手动诊断。",
++            typed_error,
++        )
++    except SettingsPersistenceError as error:
++        return _blocked_startup_state(
++            settings,
++            memory,
++            "设置或凭据读取失败，已关闭托管模式；请检查配置与凭据文件后使用手动诊断。",
++            error,
++        )
++    except (SettingsValidationError, JsonDataError) as error:
++        return _blocked_startup_state(
++            settings,
++            memory,
++            "配置读取失败，已关闭托管模式；请检查设置文件后使用手动诊断。",
++            error,
++        )
++    try:
++        memory.load()
++    except JsonDataError as error:
++        return _blocked_startup_state(
++            settings,
++            memory,
++            "记忆读取失败，已关闭托管模式；请检查记忆文件后使用手动诊断。",
++            error,
++        )
++    except VectorIndexError as error:
++        return _blocked_startup_state(
++            settings,
++            memory,
++            "向量索引读取失败，已关闭托管模式；请修复索引后使用手动诊断。",
++            error,
++        )
++    return StartupState(
++        settings=settings,
++        memory=memory,
++        managed_mode=settings.managed_mode,
++    )
++
++
+ class WeChatStyleReplyAssistant:
+-    def __init__(self) -> None:
+-        self.settings = AppSettings().load()
+-        self.memory = StyleMemory().load()
++    def __init__(self, startup_state: StartupState | None = None) -> None:
++        state = startup_state or load_startup_state_for_test()
++        self.startup_state = state
++        self.startup_blocking_error = state.blocking_error
++        self.settings = state.settings
++        self.memory = state.memory
++        if self.startup_blocking_error:
++            self._install_blocking_startup_guards()
+         self.detector = WeChatWindowDetector()
+         self.ocr = ChatOCR(self.settings)
+         self.visible_analyzer = VisibleContentAnalyzer(self.settings)
+@@ -200,8 +304,15 @@ class WeChatStyleReplyAssistant:
+                 "exit": self._exit,
+             },
+         )
++        if self.startup_blocking_error:
++            self.ui._set_managed_mode = self._blocked_managed_mode
+ 
+     def start(self) -> None:
++        if self.startup_blocking_error:
++            self.ui.set_status(self.startup_blocking_error)
++            self.ui.mainloop()
++            self.running = False
++            return
+         self.ui.set_status(MSG["waiting"] if self.settings.api_key else MSG["no_key"])
+         threading.Thread(target=self._monitor_loop, daemon=True).start()
+         self.ui.root.after(250, self._ui_loop)
+@@ -532,8 +643,13 @@ class WeChatStyleReplyAssistant:
+ 
+     def _send_group_reply(self, wechat: WeChatWindow, text: str, question: str) -> None:
+         """群聊回复发送（后台线程，避免阻塞监控循环）。"""
++        if not self._managed_reply_readiness_allows_send():
++            return
++
+         def _do_send() -> None:
+             try:
++                if not self._managed_reply_readiness_allows_send():
++                    return
+                 ok, message = self.sender.send(wechat, text)
+                 if ok:
+                     self.queue.put(("status", f"群聊 @ 回复已发送：{text[:40]}"))
+@@ -1004,6 +1120,14 @@ class WeChatStyleReplyAssistant:
+         threading.Thread(target=lambda: self._process_window(wechat, force=True), daemon=True).start()
+ 
+     def _auto_changed(self, enabled: bool) -> None:
++        if getattr(self, "startup_blocking_error", ""):
++            self.settings.auto_recognize = False
++            self.settings.training_mode = False
++            auto_var = getattr(self.ui, "auto_var", None)
++            if auto_var is not None:
++                auto_var.set(False)
++            self.ui.set_status(self.startup_blocking_error)
++            return
+         self.current_hash = ""
+         self.last_capture = 0.0
+         self.ui.set_status(MSG["auto_on"] if enabled else MSG["auto_off"])
+@@ -1014,6 +1138,14 @@ class WeChatStyleReplyAssistant:
+                 threading.Thread(target=lambda: self._process_window(wechat, force=True), daemon=True).start()
+ 
+     def _training_changed(self, enabled: bool) -> None:
++        if getattr(self, "startup_blocking_error", ""):
++            self.settings.auto_recognize = False
++            self.settings.training_mode = False
++            training_var = getattr(self.ui, "training_var", None)
++            if training_var is not None:
++                training_var.set(False)
++            self.ui.set_status(self.startup_blocking_error)
++            return
+         self.settings.training_mode = enabled
+         self.settings.save()
+         self.current_hash = ""
+@@ -1026,6 +1158,9 @@ class WeChatStyleReplyAssistant:
+                 threading.Thread(target=lambda: self._process_window(wechat, force=False), daemon=True).start()
+ 
+     def _managed_changed(self, enabled: bool) -> None:
++        if getattr(self, "startup_blocking_error", ""):
++            self._blocked_managed_mode("off")
++            return
+         self.settings.managed_auto_reply = enabled
+         if enabled:
+             self.settings.auto_recognize = True
+@@ -1046,6 +1181,48 @@ class WeChatStyleReplyAssistant:
+             else:
+                 self.ui.set_status(MSG["no_window"])
+ 
++    def _blocked_managed_mode(self, _mode: str, *, persist: bool = True) -> None:
++        del persist
++        self.settings.managed_mode = "off"
++        managed_var = getattr(self.ui, "managed_var", None)
++        if managed_var is not None:
++            managed_var.set("off")
++        self.ui.set_status(self.startup_blocking_error)
++
++    def _install_blocking_startup_guards(self) -> None:
++        self.settings.managed_mode = "off"
++        self.settings.auto_recognize = False
++        self.settings.training_mode = False
++        self.settings.save = self._blocked_settings_save
++
++    def _blocked_settings_save(self) -> None:
++        self.settings.managed_mode = "off"
++        self.settings.auto_recognize = False
++        self.settings.training_mode = False
++
++    def _managed_reply_readiness_allows_send(self) -> bool:
++        if getattr(self, "startup_blocking_error", ""):
++            self.settings.managed_mode = "off"
++            self.queue.put(("status", self.startup_blocking_error))
++            return False
++        if self.settings.managed_mode != "full":
++            self.settings.managed_mode = "off"
++            self.queue.put(("status", MSG["managed_off"]))
++            return False
++        memory = getattr(self, "memory", None)
++        if memory is None:
++            self.settings.managed_mode = "off"
++            self.queue.put(("status", MSG["managed_vector_blocked"]))
++            return False
++        try:
++            memory.assert_ready_for_managed_reply()
++        except VectorIndexError:
++            self.settings.managed_mode = "off"
++            _diag("vector_index_not_ready", error_category="vector")
++            self.queue.put(("status", MSG["managed_vector_blocked"]))
++            return False
++        return True
++
+     def _source_mode_changed(self, mode: str) -> None:
+         self.settings.reply_source_mode = mode if mode in {"model", "memory", "model_memory"} else "model_memory"
+         self.settings.save()
+@@ -1061,21 +1238,23 @@ class WeChatStyleReplyAssistant:
+ 
+     def _maybe_managed_send(self, context: str, replies: list[str]) -> None:
+         if not self.settings.managed_auto_reply or not replies or not self.current_window:
+-            _diag("[send-skip] 前置条件不满足", "managed=", self.settings.managed_auto_reply, "replies=", len(replies), "window=", self.current_window is not None)
++            _diag("managed_preconditions_not_met")
++            return
++        if not self._managed_reply_readiness_allows_send():
+             return
+         send_window = self.current_window
+         if _managed_api_failure_blocks_send(self.settings, self.engine):
+-            _diag("[send-block] api_failure_blocks_send", "last_error=", self.engine.last_error, "last_source=", self.engine.last_source)
++            _diag("api_failure", error_category="api")
+             self.queue.put(("status", MSG["api_failed_stop_send"]))
+             return
+         unreplied_messages = _current_unreplied_turn(context)
+         latest_role, latest_text = latest_meaningful_message(context)
+         if latest_role != "对方" and not unreplied_messages:
+-            _diag("[send-block] 最后消息非对方且无未回复", "latest_role=", latest_role, "unreplied=", unreplied_messages)
++            _diag("latest_message_not_partner")
+             self.queue.put(("status", MSG["wait_other"]))
+             return
+         if not unreplied_messages:
+-            _diag("[send-block] 无未回复消息", "context=", context[:120])
++            _diag("no_unreplied_message")
+             self.queue.put(("status", MSG["wait_other"]))
+             return
+         signature = _managed_turn_cycle_signature(send_window.title, context, unreplied_messages)
+@@ -1085,7 +1264,7 @@ class WeChatStyleReplyAssistant:
+             and _turns_are_same_or_similar(self.managed_last_handled_turn_messages, unreplied_messages)
+         )
+         if same_handled_cycle:
+-            _diag("[send-block] 同一轮已处理过", "signature=", signature[:24])
++            _diag("turn_already_handled")
+             self.queue.put(("status", MSG["wait_other"]))
+             return
+         if (
+@@ -1094,7 +1273,7 @@ class WeChatStyleReplyAssistant:
+             or signature in self.handled_auto_reply_signatures
+             or self.managed_send_inflight
+         ):
+-            _diag("[send-block] 签名已处理/发送中", "sig=", signature[:24], "inflight=", self.managed_send_inflight)
++            _diag("send_already_pending")
+             self.queue.put(("status", MSG["wait_other"]))
+             return
+         selection_context = _turn_messages_to_context(unreplied_messages)
+@@ -1106,14 +1285,14 @@ class WeChatStyleReplyAssistant:
+             prefer_model_order="API" in self.engine.last_source,
+         )
+         if not text:
+-            _diag("[send-skip] 未选中候选文本", "replies=", replies)
++            _diag("no_candidate_selected")
+             return
+         if len(unreplied_messages) == 1:
+             text = _single_wechat_message(text)
+         self.pending_auto_reply_signature = signature
+         self.managed_send_inflight = True
+         self.managed_waiting_for_own_echo = False
+-        _diag("[send-go] 启动发送线程", "sig=", signature[:24], "text=", text[:40])
++        _diag("send_queued")
+         self.queue.put(("status", MSG["auto_sending"].format(text=text)))
+ 
+         def delayed_send() -> None:
+@@ -1121,7 +1300,7 @@ class WeChatStyleReplyAssistant:
+                 time.sleep(self.settings.auto_reply_delay_seconds)
+                 live_window = _managed_live_send_window(self.detector, send_window)
+                 latest_context = self._managed_preflight_context(live_window)
+-                _diag("[preflight] 重定位窗口", "live_window=", live_window is not None, "preflight_ctx_len=", len(latest_context or ""))
++                _diag("preflight_checked")
+                 latest_context = _managed_preflight_context_or_cached(
+                     send_window,
+                     live_window,
+@@ -1132,11 +1311,13 @@ class WeChatStyleReplyAssistant:
+                 allowed, reason = _managed_send_preflight_allows(send_window, live_window, context, latest_context)
+                 if not allowed:
+                     self.pending_auto_reply_signature = ""
+-                    _diag("[send-block] preflight 未通过:", reason)
++                    _diag("preflight_rejected", error_category="preflight")
+                     self.queue.put(("status", MSG["managed_preflight_blocked"].format(reason=reason)))
+                     return
++                if not self._managed_reply_readiness_allows_send():
++                    return
+                 ok, message = self.sender.send(live_window, text)
+-                _diag("[send-result]", "ok=", ok, "message=", message)
++                _diag("send_result", error_category="send", score=100 if ok else 0)
+                 if ok:
+                     self.last_auto_reply_signature = signature
+                     self.handled_auto_reply_signatures.add(signature)
+@@ -1256,6 +1437,8 @@ class WeChatStyleReplyAssistant:
+ 
+ 
+ def main() -> None:
++    if "--debug-session" in sys.argv:
++        enable_session_debug()
+     if "--self-check" in sys.argv:
+         from self_check import run_self_check
+ 
+
+===== DIFF: tests\test_persistence.py =====
+warning: in the working copy of 'D:\Vibe C\客服\wechat--main\tests\test_persistence.py', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\tests\\test_persistence.py" "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\tests\\test_persistence.py"
+index e69de29..61474cd 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\tests\\test_persistence.py"	
++++ "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\tests\\test_persistence.py"	
+@@ -0,0 +1,1932 @@
++from collections import Counter
++import hashlib
++import importlib.util
++import json
++import logging.handlers
++import math
++import os
++import subprocess
++import sys
++import threading
++import time
++import ast
++from datetime import datetime
++from pathlib import Path
++
++import pytest
++
++import app_paths
++from atomic_json import JsonDataError, atomic_write_json, load_json
++import memory as memory_module
++from memory import StyleMemory
++import settings as settings_module
++
++
++def test_entire_suite_uses_session_data_root_isolation(request):
++    assert "isolate_entire_test_suite_data_root" in request.fixturenames
++    assert os.environ.get("WECHAT_ASSISTANT_DATA_DIR")
++
++
++def test_full_data_directory_snapshot_includes_credentials_ledger_logs_salt_and_backups(tmp_path):
++    from conftest import snapshot_data_directory
++
++    expected_paths = {
++        "credentials.dat",
++        "credentials.dat.bak.1",
++        "send_ledger.json",
++        "logs/.runtime-salt",
++        "logs/runtime.log",
++        "settings.json",
++        "memory.json",
++        "vector_memory.json",
++    }
++    for relative in expected_paths:
++        path = tmp_path / relative
++        path.parent.mkdir(parents=True, exist_ok=True)
++        path.write_bytes(relative.encode("utf-8"))
++
++    manifest = snapshot_data_directory(tmp_path)
++
++    assert {item["relative_path"] for item in manifest["files"]} == expected_paths
++    assert all(set(item) == {"relative_path", "size", "sha256", "mtime_ns"} for item in manifest["files"])
++
++
++class FakeCredentialStore:
++    def __init__(self, initial=None, *, save_error=None, load_error=None):
++        self.values = dict(initial or {})
++        self.save_error = save_error
++        self.load_error = load_error
++
++    def load(self):
++        if self.load_error is not None:
++            raise self.load_error
++        return dict(self.values)
++
++    def save(self, keys):
++        if self.save_error is not None:
++            raise self.save_error
++        self.values = dict(keys)
++
++
++def test_runtime_event_redacts_private_values_and_keeps_audit_fields(tmp_path):
++    assert importlib.util.find_spec("runtime_logging") is not None
++    from runtime_logging import build_runtime_logger
++
++    logger = build_runtime_logger(tmp_path)
++    logger.info(
++        "managed-send",
++        extra={
++            "event_data": {
++                "chat_name": "张三",
++                "message": "身份证号码",
++                "reply": "私密回复",
++                "context": "完整上下文",
++                "api_key": "secret-key",
++                "Authorization": "Bearer secret-token",
++                "nested": {
++                    "API_KEY": "nested-secret",
++                    "authorization": "nested-token",
++                },
++                "record_id": "r1",
++                "score": 91,
++                "org_scope": "municipal",
++                "state": "blocked",
++                "error_category": "vector",
++                "event": "managed-send",
++                "timestamp": "2026-08-12T00:00:00+00:00",
++            }
++        },
++    )
++    line = (tmp_path / "runtime.log").read_text(encoding="utf-8").strip()
++    parsed = json.loads(line)
++
++    for private_value in (
++        "张三",
++        "身份证号码",
++        "私密回复",
++        "完整上下文",
++        "secret-key",
++        "secret-token",
++        "nested-secret",
++        "nested-token",
++    ):
++        assert private_value not in line
++    assert parsed | {"record_id": None, "timestamp": None} == {
++        "error_category": "vector",
++        "event": "managed-send",
++        "org_scope": "municipal",
++        "record_id": None,
++        "score": 91,
++        "state": "blocked",
++        "timestamp": None,
++    }
++    assert parsed["record_id"].startswith("sha256:") and "r1" not in parsed["record_id"]
++    assert parsed["timestamp"] != "2026-08-12T00:00:00+00:00"
++    datetime.fromisoformat(parsed["timestamp"])
++
++
++def test_runtime_event_drops_nested_private_and_credential_key_variants(tmp_path):
++    from runtime_logging import build_runtime_logger
++
++    logger = build_runtime_logger(tmp_path)
++    logger.info(
++        "nested-redaction",
++        extra={
++            "event_data": {
++                "event": "nested-redaction",
++                "state": {
++                    "safe": "kept",
++                    "ApiKey": "secret-one",
++                    "provider_api_keys": "secret-two",
++                    "proxy-Authorization": "secret-three",
++                    "message": "private-message",
++                    "message_text": "private-message-alias",
++                    "customer_chat_name": "private-name-alias",
++                    "reply_content": "private-reply-alias",
++                    "request_context": "private-context-alias",
++                    "nested": [
++                        "unkeyed-private",
++                        {
++                            "AUTHORIZATION": "secret-four",
++                            "chat_name": "private-name",
++                            "safe_id": "kept-id",
++                        }
++                    ],
++                },
++            }
++        },
++    )
++    text = (tmp_path / "runtime.log").read_text(encoding="utf-8")
++    parsed = json.loads(text)
++
++    for forbidden in (
++        "secret-one",
++        "secret-two",
++        "secret-three",
++        "secret-four",
++        "private-message",
++        "private-message-alias",
++        "private-name",
++        "private-name-alias",
++        "private-reply-alias",
++        "private-context-alias",
++        "unkeyed-private",
++        "apikey",
++        "authorization",
++    ):
++        assert forbidden not in text.casefold()
++    assert parsed == {"event": "nested-redaction", "timestamp": parsed["timestamp"]}
++
++
++def test_runtime_event_uses_positive_schema_and_rejects_aliases_nested_values_and_field_smuggling(tmp_path):
++    from runtime_logging import build_runtime_logger
++
++    logger = build_runtime_logger(tmp_path)
++    secrets = {
++        "chat_title": "FULL-CHAT-NAME",
++        "text": "FULL-MESSAGE",
++        "answer": "FULL-REPLY",
++        "access_token": "API-SECRET",
++        "prompt": "FULL-PROMPT",
++        "content": "FULL-CONTENT",
++        "customer": "FULL-CUSTOMER",
++        "partner": "FULL-PARTNER",
++    }
++    logger.info(
++        "schema-probe",
++        extra={
++            "event_data": {
++                **secrets,
++                "record_id": {"text": "RECORD-ID-SECRET"},
++                "state": ["STATE-SECRET", {"authorization": "Bearer STATE-TOKEN"}],
++                "event": "Bearer EVENT-SECRET",
++                "org_scope": {"customer": "ORG-SECRET"},
++                "error_category": "ERROR CATEGORY SECRET",
++                "score": 91.5,
++                "timestamp": "2026-08-12T00:00:00+00:00",
++            }
++        },
++    )
++    line = (tmp_path / "runtime.log").read_text(encoding="utf-8").strip()
++    parsed = json.loads(line)
++
++    for private_value in (*secrets.values(), "RECORD-ID-SECRET", "STATE-SECRET", "STATE-TOKEN", "EVENT-SECRET", "ORG-SECRET", "ERROR CATEGORY SECRET"):
++        assert private_value not in line
++    assert parsed["score"] == 91.5
++    assert set(parsed) == {"score", "timestamp"}
++    assert parsed["timestamp"] != "2026-08-12T00:00:00+00:00"
++    datetime.fromisoformat(parsed["timestamp"])
++
++
++@pytest.mark.parametrize("debug", [False, True])
++def test_runtime_schema_rejects_legal_shape_smuggling_hashes_record_id_and_ignores_caller_timestamp(debug):
++    from runtime_logging import redact_event
++
++    salt = b"installation-local-test-salt-32b"
++    event = {
++        "event": "sk-secret-token",
++        "state": "customer-message",
++        "error_category": "access-token",
++        "org_scope": "john.smith",
++        "record_id": "123e4567-e89b-12d3-a456-426614174000",
++        "score": 101,
++        "timestamp": "2026-08-12T00:00:00+00:00",
++        "api_key": "credential-secret",
++        "Authorization": "Bearer credential-token",
++        "nested": {"content": "private-content", "access_token": "nested-token"},
++    }
++
++    redacted = redact_event(event, salt=salt, debug=debug)
++    serialized = json.dumps(redacted, ensure_ascii=False)
++
++    for forbidden in (
++        "sk-secret-token",
++        "customer-message",
++        "access-token",
++        "john.smith",
++        "123e4567-e89b-12d3-a456-426614174000",
++        "2026-08-12T00:00:00+00:00",
++        "credential-secret",
++        "credential-token",
++        "private-content",
++        "nested-token",
++    ):
++        assert forbidden not in serialized
++    assert redacted["record_id"].startswith("sha256:")
++    assert len(redacted["record_id"]) == len("sha256:") + 64
++    assert "score" not in redacted
++    assert "timestamp" not in redacted
++
++
++def test_runtime_logger_rotates_at_exact_limit_and_writes_parseable_jsonl(tmp_path):
++    from runtime_logging import build_runtime_logger
++
++    logger = build_runtime_logger(tmp_path)
++    handlers = [handler for handler in logger.handlers if isinstance(handler, logging.handlers.RotatingFileHandler)]
++    assert len(handlers) == 1
++    handler = handlers[0]
++    assert handler.maxBytes == 2_000_000
++    assert handler.backupCount == 5
++
++    for index in range(16_000):
++        logger.info(
++            "rotation-check",
++            extra={
++                "event_data": {
++                    "event": "rotation-check",
++                    "record_id": f"r{index}",
++                    "state": "x" * 64,
++                }
++            },
++        )
++    handler.flush()
++
++    log_files = sorted(tmp_path.glob("runtime.log*"))
++    assert 2 <= len(log_files) <= 6
++    parsed_lines = []
++    for path in log_files:
++        for line in path.read_text(encoding="utf-8").splitlines():
++            parsed_lines.append(json.loads(line))
++    hashed_record_ids = {item["record_id"] for item in parsed_lines}
++    assert len(hashed_record_ids) == 16_000
++    assert all(value.startswith("sha256:") and len(value) == len("sha256:") + 64 for value in hashed_record_ids)
++    assert all(item.get("timestamp") for item in parsed_lines)
++
++
++def test_runtime_logger_does_not_duplicate_handler_for_same_log_dir(tmp_path):
++    from runtime_logging import build_runtime_logger
++
++    first = build_runtime_logger(tmp_path)
++    second = build_runtime_logger(tmp_path)
++
++    assert first is second
++    handlers = [handler for handler in first.handlers if isinstance(handler, logging.handlers.RotatingFileHandler)]
++    assert len(handlers) == 1
++
++
++def test_runtime_logger_first_initialization_is_thread_safe_and_writes_event_once(tmp_path, monkeypatch):
++    import runtime_logging as runtime_logging_module
++
++    real_handler = runtime_logging_module.RotatingFileHandler
++
++    class SlowHandler(real_handler):
++        def __init__(self, *args, **kwargs):
++            time.sleep(0.05)
++            super().__init__(*args, **kwargs)
++
++    monkeypatch.setattr(runtime_logging_module, "RotatingFileHandler", SlowHandler)
++    barrier = threading.Barrier(8)
++    results = []
++
++    def build():
++        barrier.wait()
++        results.append(runtime_logging_module.build_runtime_logger(tmp_path))
++
++    workers = [threading.Thread(target=build) for _ in range(8)]
++    for worker in workers:
++        worker.start()
++    for worker in workers:
++        worker.join(timeout=5)
++    assert all(not worker.is_alive() for worker in workers)
++    logger = results[0]
++    owned = [handler for handler in logger.handlers if getattr(handler, "_wechat_runtime_path", None)]
++    assert len(owned) == 1
++    assert logger.propagate is False
++
++    logger.info("once", extra={"event_data": {"event": "concurrency-check", "record_id": "r1"}})
++    owned[0].flush()
++    lines = (tmp_path / "runtime.log").read_text(encoding="utf-8").splitlines()
++    assert len(lines) == 1
++
++
++def test_diag_logger_lazy_initialization_is_thread_safe(monkeypatch):
++    import main as main_module
++
++    calls = []
++    events = []
++    fake_logger = type("FakeLogger", (), {"info": lambda self, *args, **kwargs: events.append((args, kwargs))})()
++
++    def slow_build(log_dir):
++        time.sleep(0.05)
++        calls.append(log_dir)
++        return fake_logger
++
++    main_module.DIAG_LOG = None
++    monkeypatch.setattr(main_module, "build_runtime_logger", slow_build)
++    barrier = threading.Barrier(8)
++
++    def emit():
++        barrier.wait()
++        main_module._diag("concurrency-check")
++
++    workers = [threading.Thread(target=emit) for _ in range(8)]
++    for worker in workers:
++        worker.start()
++    for worker in workers:
++        worker.join(timeout=5)
++
++    assert len(calls) == 1
++    assert len(events) == 8
++
++
++def test_all_production_diag_calls_use_explicit_enum_codes_and_remain_distinguishable(tmp_path, monkeypatch):
++    import main as main_module
++    from runtime_logging import build_runtime_logger
++
++    expected_codes = {
++        "vector_index_not_ready",
++        "managed_preconditions_not_met",
++        "api_failure",
++        "latest_message_not_partner",
++        "no_unreplied_message",
++        "turn_already_handled",
++        "send_already_pending",
++        "no_candidate_selected",
++        "send_queued",
++        "preflight_checked",
++        "preflight_rejected",
++        "send_result",
++    }
++    tree = ast.parse(Path(main_module.__file__).read_text(encoding="utf-8"))
++    diag_calls = [
++        node
++        for node in ast.walk(tree)
++        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_diag"
++    ]
++    assert diag_calls
++    assert all(
++        len(call.args) == 1 and isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str)
++        for call in diag_calls
++    )
++    assert {call.args[0].value for call in diag_calls} == expected_codes
++
++    logger = build_runtime_logger(tmp_path)
++    main_module.DIAG_LOG = None
++    monkeypatch.setattr(main_module, "_setup_diag_log", lambda: logger)
++    for code in sorted(expected_codes):
++        main_module._diag(code)
++    for handler in logger.handlers:
++        handler.flush()
++    lines = [json.loads(line) for line in (tmp_path / "runtime.log").read_text(encoding="utf-8").splitlines()]
++
++    assert {line["state"] for line in lines} == expected_codes
++    assert all(line["event"] == "managed-send-diagnostic" and line["timestamp"] for line in lines)
++
++
++def test_importing_main_does_not_create_runtime_log(tmp_path):
++    isolated_root = tmp_path / "subprocess-app-data"
++    isolated_appdata = tmp_path / "subprocess-formal-appdata"
++    environment = os.environ.copy()
++    environment["WECHAT_ASSISTANT_DATA_DIR"] = str(isolated_root)
++    environment["APPDATA"] = str(isolated_appdata)
++
++    result = subprocess.run(
++        [sys.executable, "-c", "import main"],
++        cwd=Path(__file__).resolve().parents[1],
++        env=environment,
++        capture_output=True,
++        text=True,
++        timeout=30,
++    )
++
++    assert result.returncode == 0, result.stderr
++    assert not (isolated_root / "managed_send.log").exists()
++    assert not (isolated_root / "logs" / "runtime.log").exists()
++    assert not (isolated_appdata / app_paths.APP_NAME / "managed_send.log").exists()
++
++
++def test_one_session_debug_hashes_private_content_and_never_logs_credentials(tmp_path):
++    from runtime_logging import build_runtime_logger, enable_session_debug
++
++    enable_session_debug()
++    try:
++        logger = build_runtime_logger(tmp_path)
++        logger.info(
++            "debug-check",
++            extra={
++                "event_data": {
++                    "event": "debug-check",
++                    "chat_name": "张三",
++                    "message": "原消息",
++                    "reply": "原回复",
++                    "context": "原上下文",
++                    "ApiKey": "top-secret",
++                    "nested": {"AUTHORIZATION": "Bearer nested-secret"},
++                }
++            },
++        )
++    finally:
++        enable_session_debug(False)
++
++    first = json.loads((tmp_path / "runtime.log").read_text(encoding="utf-8").splitlines()[0])
++    for field in ("chat_name", "message", "reply", "context"):
++        assert first[field].startswith("sha256:")
++        assert len(first[field]) == len("sha256:") + 64
++    serialized = json.dumps(first, ensure_ascii=False).casefold()
++    for forbidden in ("张三", "原消息", "原回复", "原上下文", "top-secret", "nested-secret", "apikey", "authorization"):
++        assert forbidden.casefold() not in serialized
++    assert (tmp_path / ".runtime-salt").read_bytes()
++
++    logger.info(
++        "debug-disabled",
++        extra={"event_data": {"event": "debug-disabled", "message": "second-private"}},
++    )
++    second = json.loads((tmp_path / "runtime.log").read_text(encoding="utf-8").splitlines()[1])
++    assert second["event"] == "debug-disabled"
++    assert second["timestamp"]
++    assert set(second) == {"event", "timestamp"}
++    assert not (tmp_path / "session-debug-enabled").exists()
++
++
++@pytest.mark.parametrize(
++    ("settings_payload", "expected_error_type"),
++    [
++        (b"broken-json", JsonDataError),
++        (json.dumps({"config_version": 2, "managed_mode": "invalid"}).encode("utf-8"), settings_module.SettingsValidationError),
++    ],
++)
++def test_settings_typed_startup_error_returns_visible_managed_off_state_without_replacement(
++    tmp_path,
++    monkeypatch,
++    settings_payload,
++    expected_error_type,
++):
++    from main import load_startup_state_for_test
++
++    data_root = tmp_path / "startup-settings"
++    monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(data_root))
++    data_root.mkdir(parents=True)
++    settings_path = data_root / "settings.json"
++    settings_path.write_bytes(settings_payload)
++
++    state = load_startup_state_for_test()
++
++    assert state.managed_mode == "off"
++    assert state.settings.managed_mode == "off"
++    assert state.settings.managed_auto_reply is False
++    assert "配置" in state.blocking_error
++    assert "手动诊断" in state.blocking_error
++    assert state.error_type is expected_error_type
++    assert settings_path.read_bytes() == settings_payload
++    assert not (data_root / "memory.json").exists()
++    assert not (data_root / "vector_memory.json").exists()
++
++
++@pytest.mark.parametrize("version", [1, 2])
++def test_corrupt_credentials_in_v1_or_v2_produce_visible_typed_startup_block_without_byte_changes(
++    tmp_path,
++    monkeypatch,
++    version,
++):
++    from main import load_startup_state_for_test
++
++    data_root = tmp_path / f"credential-v{version}"
++    monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(data_root))
++    data_root.mkdir(parents=True)
++    if version == 1:
++        settings_payload = {"config_version": 1, "managed_auto_reply": True, "api_key": "legacy-secret"}
++    else:
++        settings_payload = {"config_version": 2, "managed_mode": "full"}
++    settings_bytes = json.dumps(settings_payload).encode("utf-8")
++    credential_bytes = b"not-a-valid-dpapi-credential"
++    settings_path = data_root / "settings.json"
++    credential_path = data_root / "credentials.dat"
++    settings_path.write_bytes(settings_bytes)
++    credential_path.write_bytes(credential_bytes)
++
++    state = load_startup_state_for_test()
++
++    assert state.managed_mode == "off"
++    assert state.error_type is not None
++    assert state.error_type.__name__ == "SettingsPersistenceError"
++    assert "凭据" in state.blocking_error and "手动诊断" in state.blocking_error
++    assert settings_path.read_bytes() == settings_bytes
++    assert credential_path.read_bytes() == credential_bytes
++
++
++def test_illegal_utf8_settings_produce_visible_typed_startup_block_without_replacement(tmp_path, monkeypatch):
++    from main import load_startup_state_for_test
++
++    data_root = tmp_path / "invalid-utf8"
++    monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(data_root))
++    data_root.mkdir(parents=True)
++    settings_path = data_root / "settings.json"
++    original = b"\xff\xfe\xfa"
++    settings_path.write_bytes(original)
++
++    state = load_startup_state_for_test()
++
++    assert state.error_type is not None
++    assert state.error_type.__name__ == "SettingsPersistenceError"
++    assert "配置" in state.blocking_error and "手动诊断" in state.blocking_error
++    assert settings_path.read_bytes() == original
++
++
++def test_settings_read_oserror_produces_visible_typed_startup_block(tmp_path, monkeypatch):
++    from main import load_startup_state_for_test
++
++    data_root = tmp_path / "settings-io"
++    monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(data_root))
++    data_root.mkdir(parents=True)
++    settings_path = data_root / "settings.json"
++    original = json.dumps({"config_version": 2, "managed_mode": "full"}).encode("utf-8")
++    settings_path.write_bytes(original)
++
++    def denied_read(*args, **kwargs):
++        raise OSError("permission denied")
++
++    monkeypatch.setattr(settings_module, "load_json", denied_read)
++    state = load_startup_state_for_test()
++
++    assert state.error_type is not None
++    assert state.error_type.__name__ == "SettingsPersistenceError"
++    assert "配置" in state.blocking_error and "手动诊断" in state.blocking_error
++    assert settings_path.read_bytes() == original
++
++
++def test_memory_json_startup_error_returns_visible_managed_off_state_without_replacement(tmp_path, monkeypatch):
++    from main import load_startup_state_for_test
++
++    data_root = tmp_path / "startup-memory"
++    monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(data_root))
++    data_root.mkdir(parents=True)
++    settings_payload = {"config_version": 2, "managed_mode": "full"}
++    (data_root / "settings.json").write_text(json.dumps(settings_payload), encoding="utf-8")
++    memory_path = data_root / "memory.json"
++    memory_payload = b"broken-memory"
++    memory_path.write_bytes(memory_payload)
++
++    state = load_startup_state_for_test()
++
++    assert state.managed_mode == "off"
++    assert state.settings.managed_mode == "off"
++    assert state.settings.managed_auto_reply is False
++    assert "记忆" in state.blocking_error
++    assert "手动诊断" in state.blocking_error
++    assert state.error_type is JsonDataError
++    assert memory_path.read_bytes() == memory_payload
++    assert not (data_root / "vector_memory.json").exists()
++
++
++def test_vector_startup_error_returns_visible_managed_off_state_without_replacement(tmp_path, monkeypatch):
++    from main import load_startup_state_for_test
++    from memory import VectorIndexError
++
++    data_root = tmp_path / "startup-vector"
++    monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(data_root))
++    data_root.mkdir(parents=True)
++    (data_root / "settings.json").write_text(
++        json.dumps({"config_version": 2, "managed_mode": "full"}),
++        encoding="utf-8",
++    )
++    memory_path = data_root / "memory.json"
++    memory_payload = json.dumps(_valid_memory([_valid_example(1)]), ensure_ascii=False).encode("utf-8")
++    memory_path.write_bytes(memory_payload)
++    real_atomic_write_json = memory_module.atomic_write_json
++
++    def fail_vector_write(destination, data, validator, backup_count=5):
++        if Path(destination) == data_root / "vector_memory.json":
++            raise OSError("simulated vector failure")
++        return real_atomic_write_json(destination, data, validator, backup_count)
++
++    monkeypatch.setattr(memory_module, "atomic_write_json", fail_vector_write)
++
++    state = load_startup_state_for_test()
++
++    assert state.managed_mode == "off"
++    assert state.settings.managed_mode == "off"
++    assert state.settings.managed_auto_reply is False
++    assert "向量" in state.blocking_error
++    assert "手动诊断" in state.blocking_error
++    assert state.error_type is VectorIndexError
++    assert memory_path.read_bytes() == memory_payload
++    assert not (data_root / "vector_memory.json").exists()
++
++
++def test_blocking_startup_enters_manual_ui_without_starting_background_monitor(monkeypatch):
++    import main as main_module
++
++    class ManualDiagnosticUI:
++        def __init__(self):
++            self.statuses = []
++            self.mainloop_calls = 0
++
++        def set_status(self, text):
++            self.statuses.append(text)
++
++        def mainloop(self):
++            self.mainloop_calls += 1
++
++    app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
++    app.settings = settings_module.AppSettings()
++    app.startup_blocking_error = "配置读取失败，已关闭托管模式；请使用手动诊断。"
++    app.ui = ManualDiagnosticUI()
++    app.running = True
++
++    def fail_if_background_monitor_starts(*args, **kwargs):
++        raise AssertionError("blocking startup must not start the background monitor")
++
++    monkeypatch.setattr(main_module.threading, "Thread", fail_if_background_monitor_starts)
++
++    app.start()
++
++    assert app.ui.statuses == [app.startup_blocking_error]
++    assert app.ui.mainloop_calls == 1
++    assert app.running is False
++
++
++def test_managed_send_blocks_before_sender_when_vector_index_is_not_ready(tmp_path, monkeypatch):
++    import main as main_module
++
++    class RecordingQueue:
++        def __init__(self):
++            self.items = []
++
++        def put(self, item):
++            self.items.append(item)
++
++    class RecordingSender:
++        def __init__(self):
++            self.calls = []
++
++        def send(self, window, text):
++            self.calls.append((window, text))
++            return True, "sent"
++
++    class InlineThread:
++        def __init__(self, target, **kwargs):
++            self.target = target
++
++        def start(self):
++            self.target()
++
++    settings = settings_module.AppSettings()
++    settings.managed_mode = "full"
++    settings.auto_reply_delay_seconds = 0
++    memory = StyleMemory(path=tmp_path / "memory.json")
++    memory.vector_ready = False
++    memory.last_vector_error = "vector index is invalid"
++    window = type("Window", (), {"title": "customer"})()
++    app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
++    app.settings = settings
++    app.memory = memory
++    app.current_window = window
++    app.current_context = "[对方] 请问如何办理"
++    app.engine = type("Engine", (), {"last_error": "", "last_source": "knowledge"})()
++    app.sender = RecordingSender()
++    app.queue = RecordingQueue()
++    app.detector = type("Detector", (), {"foreground_chat": lambda self: window})()
++    app._managed_preflight_context = lambda current_window: app.current_context
++    app.last_auto_reply_signature = ""
++    app.pending_auto_reply_signature = ""
++    app.handled_auto_reply_signatures = set()
++    app.managed_send_inflight = False
++    app.managed_waiting_for_own_echo = False
++    app.managed_last_handled_turn_messages = []
++    app.managed_last_handled_turn_key = ""
++    app.managed_last_handled_partner = ""
++    monkeypatch.setattr(main_module.threading, "Thread", InlineThread)
++
++    app._maybe_managed_send(app.current_context, ["请到服务窗口办理"])
++
++    assert app.sender.calls == []
++    assert app.settings.managed_mode == "off"
++    assert app.settings.managed_auto_reply is False
++    status_messages = [str(item[1]) for item in app.queue.items if item[0] == "status"]
++    assert any("向量" in message and "关闭" in message for message in status_messages)
++
++
++def test_group_managed_send_blocks_before_sender_when_vector_index_is_not_ready(tmp_path, monkeypatch):
++    import main as main_module
++
++    class InlineThread:
++        def __init__(self, target, **kwargs):
++            self.target = target
++
++        def start(self):
++            self.target()
++
++    settings = settings_module.AppSettings()
++    settings.managed_mode = "full"
++    memory = StyleMemory(path=tmp_path / "memory.json")
++    memory.vector_ready = False
++    memory.last_vector_error = "vector index is invalid"
++    app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
++    app.settings = settings
++    app.memory = memory
++    app.startup_blocking_error = ""
++    app.sender = type(
++        "Sender",
++        (),
++        {
++            "calls": [],
++            "send": lambda self, window, text: self.calls.append((window, text)) or (True, "sent"),
++        },
++    )()
++    app.queue = type("Queue", (), {"items": [], "put": lambda self, item: self.items.append(item)})()
++    monkeypatch.setattr(main_module.threading, "Thread", InlineThread)
++
++    app._send_group_reply(type("Window", (), {})(), "群聊回复", "群聊问题")
++
++    assert app.sender.calls == []
++    assert app.settings.managed_mode == "off"
++    status_messages = [str(item[1]) for item in app.queue.items if item[0] == "status"]
++    assert any("向量" in message and "关闭" in message for message in status_messages)
++
++
++@pytest.mark.parametrize("path", ["personal", "group"])
++@pytest.mark.parametrize("transition", ["off", "vector_invalid", "memory_missing"])
++def test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send(
++    tmp_path,
++    monkeypatch,
++    path,
++    transition,
++):
++    import main as main_module
++
++    pending = []
++
++    class DeferredThread:
++        def __init__(self, target, **kwargs):
++            self.target = target
++
++        def start(self):
++            pending.append(self.target)
++
++    class RecordingSender:
++        def __init__(self):
++            self.calls = []
++
++        def send(self, window, text):
++            self.calls.append((window, text))
++            return True, "sent"
++
++    window = type("Window", (), {"title": "customer"})()
++    settings = settings_module.AppSettings()
++    settings.managed_mode = "full"
++    settings.auto_reply_delay_seconds = 0
++    memory = StyleMemory(path=tmp_path / "memory.json")
++    memory.vector_ready = True
++    app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
++    app.settings = settings
++    app.memory = memory
++    app.startup_blocking_error = ""
++    app.sender = RecordingSender()
++    app.queue = type("Queue", (), {"items": [], "put": lambda self, item: self.items.append(item)})()
++    app.current_window = window
++    app.current_context = "[对方] 请问如何办理"
++    app.engine = type("Engine", (), {"last_error": "", "last_source": "knowledge"})()
++    app.detector = type("Detector", (), {})()
++    app._managed_preflight_context = lambda current_window: app.current_context
++    app.last_auto_reply_signature = ""
++    app.pending_auto_reply_signature = ""
++    app.handled_auto_reply_signatures = set()
++    app.managed_send_inflight = False
++    app.managed_waiting_for_own_echo = False
++    app.managed_last_handled_turn_messages = []
++    app.managed_last_handled_turn_key = ""
++    app.managed_last_handled_partner = ""
++    monkeypatch.setattr(main_module.threading, "Thread", DeferredThread)
++    monkeypatch.setattr(main_module, "_managed_live_send_window", lambda detector, expected: expected)
++
++    if path == "personal":
++        app._maybe_managed_send(app.current_context, ["请到服务窗口办理"])
++    else:
++        app._send_group_reply(window, "群聊回复", "群聊问题")
++    assert len(pending) == 1
++
++    if transition == "off":
++        settings.managed_mode = "off"
++    elif transition == "vector_invalid":
++        memory.vector_ready = False
++        memory.last_vector_error = "vector invalid after queue"
++    else:
++        app.memory = None
++    pending.pop()()
++
++    assert app.sender.calls == []
++
++
++def test_blocking_startup_rejects_managed_callback_without_overwriting_corrupt_settings_or_starting_thread(
++    tmp_path,
++    monkeypatch,
++):
++    import main as main_module
++
++    path = tmp_path / "settings.json"
++    original = b"broken-settings"
++    path.write_bytes(original)
++    settings = settings_module.AppSettings(config_path=path, credential_store=FakeCredentialStore())
++    app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
++    app.settings = settings
++    app.startup_blocking_error = "配置读取失败，已关闭托管模式；请使用手动诊断。"
++    app.ui = type("UI", (), {"statuses": [], "set_status": lambda self, text: self.statuses.append(text)})()
++    app._target_wechat_window = lambda: (_ for _ in ()).throw(
++        AssertionError("blocking startup must not inspect a send target")
++    )
++
++    def fail_if_thread_starts(*args, **kwargs):
++        raise AssertionError("blocking startup must not start a managed thread")
++
++    monkeypatch.setattr(main_module.threading, "Thread", fail_if_thread_starts)
++
++    app._managed_changed(True)
++
++    assert path.read_bytes() == original
++    assert settings.managed_mode == "off"
++    assert settings.managed_auto_reply is False
++    assert app.ui.statuses == [app.startup_blocking_error]
++
++
++@pytest.mark.parametrize("callback_name", ["_auto_changed", "_training_changed"])
++def test_blocking_startup_rejects_auto_and_training_ui_save_before_callback(
++    tmp_path,
++    monkeypatch,
++    callback_name,
++):
++    import main as main_module
++
++    path = tmp_path / "settings.json"
++    original = b"broken-settings"
++    path.write_bytes(original)
++    settings = settings_module.AppSettings(config_path=path, credential_store=FakeCredentialStore())
++    app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
++    app.settings = settings
++    app.startup_blocking_error = "配置读取失败，已关闭托管模式；请使用手动诊断。"
++    app.ui = type(
++        "UI",
++        (),
++        {
++            "statuses": [],
++            "set_status": lambda self, text: self.statuses.append(text),
++            "auto_var": type("Var", (), {"set": lambda self, value: setattr(self, "value", value)})(),
++            "training_var": type("Var", (), {"set": lambda self, value: setattr(self, "value", value)})(),
++        },
++    )()
++    app._target_wechat_window = lambda: (_ for _ in ()).throw(
++        AssertionError("blocking startup must not inspect a send target")
++    )
++
++    def fail_if_thread_starts(*args, **kwargs):
++        raise AssertionError("blocking startup must not start an automatic thread")
++
++    monkeypatch.setattr(main_module.threading, "Thread", fail_if_thread_starts)
++    app._install_blocking_startup_guards()
++
++    if callback_name == "_auto_changed":
++        settings.auto_recognize = True
++    else:
++        settings.training_mode = True
++    settings.save()
++    getattr(app, callback_name)(True)
++
++    assert path.read_bytes() == original
++    assert settings.managed_mode == "off"
++    assert settings.auto_recognize is False
++    assert settings.training_mode is False
++    assert app.ui.statuses == [app.startup_blocking_error]
++
++
++def test_source_and_frozen_use_same_explicit_data_root(tmp_path, monkeypatch):
++    monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(tmp_path))
++    assert app_paths.config_path() == tmp_path / "settings.json"
++    assert app_paths.memory_path() == tmp_path / "memory.json"
++    assert app_paths.vector_path() == tmp_path / "vector_memory.json"
++
++
++def test_default_root_is_appdata_even_when_frozen(tmp_path, monkeypatch):
++    monkeypatch.delenv("WECHAT_ASSISTANT_DATA_DIR", raising=False)
++    monkeypatch.setenv("APPDATA", str(tmp_path))
++    monkeypatch.setattr(sys, "frozen", True, raising=False)
++    assert app_paths.data_dir() == tmp_path / "WeChatStyleReplyAssistant"
++
++
++def _require_examples_dict(value):
++    if not isinstance(value, dict) or "examples" not in value:
++        raise ValueError("examples must be a dictionary field")
++
++
++def _require_numeric_config_version(value):
++    if not isinstance(value, dict) or not isinstance(value.get("config_version"), int):
++        raise ValueError("config_version must be an integer")
++
++
++@pytest.fixture
++def isolated_memory_root(tmp_path, monkeypatch):
++    monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(tmp_path))
++    return tmp_path
++
++
++def _valid_example(index, *, reply=None, organization_type="association"):
++    return {
++        "partner": f"partner-{index}",
++        "cue": f"[other] question-{index}",
++        "reply": reply or f"answer-{index}",
++        "source": "manual_edit",
++        "created_at": "2026-08-12T00:00:00+00:00",
++        "conversation_hash": f"hash-{index}",
++        "organization_type": organization_type,
++    }
++
++
++def _valid_memory(examples):
++    return {
++        "schema_version": 2,
++        "style_summary": "short and direct",
++        "examples": list(examples),
++        "common_phrases": {"received": 2},
++    }
++
++
++def test_save_does_not_truncate_more_than_3000_records(isolated_memory_root):
++    memory = StyleMemory(path=isolated_memory_root / "memory.json")
++    memory.examples = [_valid_example(index) for index in range(3001)]
++
++    memory.save()
++    loaded = StyleMemory(path=memory.path).load()
++
++    assert len(json.loads(memory.path.read_text(encoding="utf-8"))["examples"]) == 3001
++    assert len(loaded.examples) == 3001
++
++
++def test_corrupt_primary_recovers_backup_without_empty_overwrite(isolated_memory_root):
++    path = isolated_memory_root / "memory.json"
++    corrupt_primary = b"broken-primary"
++    path.write_bytes(corrupt_primary)
++    (isolated_memory_root / "memory.json.bak.1").write_text(
++        json.dumps(_valid_memory([_valid_example(1)])),
++        encoding="utf-8",
++    )
++
++    memory = StyleMemory(path=path).load()
++
++    assert len(memory.examples) == 1
++    assert memory.load_result is not None
++    assert memory.load_result.recovered is True
++    assert memory.load_result.source == isolated_memory_root / "memory.json.bak.1"
++    assert path.read_bytes() == corrupt_primary
++
++
++def test_missing_primary_recovers_valid_backup(isolated_memory_root):
++    path = isolated_memory_root / "memory.json"
++    backup_path = isolated_memory_root / "memory.json.bak.1"
++    backup_path.write_text(
++        json.dumps(_valid_memory([_valid_example(7)])),
++        encoding="utf-8",
++    )
++
++    memory = StyleMemory(path=path).load()
++
++    assert memory.load_result is not None
++    assert memory.load_result.recovered is True
++    assert memory.load_result.source == backup_path
++    assert [item["conversation_hash"] for item in memory.examples] == ["hash-7"]
++    assert not path.exists()
++
++
++def test_missing_primary_with_only_invalid_backups_raises_without_byte_changes(isolated_memory_root):
++    path = isolated_memory_root / "memory.json"
++    backups = [isolated_memory_root / f"memory.json.bak.{index}" for index in range(1, 6)]
++    for index, backup in enumerate(backups, start=1):
++        backup.write_bytes(f"broken-backup-{index}".encode("utf-8"))
++    before = {backup: backup.read_bytes() for backup in backups}
++
++    with pytest.raises(JsonDataError):
++        StyleMemory(path=path).load()
++
++    assert not path.exists()
++    assert {backup: backup.read_bytes() for backup in backups} == before
++
++
++@pytest.mark.parametrize(
++    "invalid_primary",
++    [
++        {},
++        {"style_summary": "incomplete", "examples": []},
++        {
++            "schema_version": 2,
++            "style_summary": "invalid empty reply",
++            "examples": [
++                {
++                    "cue": "[other] question",
++                    "reply": "   ",
++                    "source": "manual_edit",
++                    "conversation_hash": "empty-reply",
++                }
++            ],
++            "common_phrases": {},
++        },
++        {
++            "style_summary": "legacy partial item",
++            "examples": [{"cue": "[other] question", "reply": "answer"}],
++            "common_phrases": {},
++        },
++    ],
++    ids=["empty-object", "missing-core-field", "empty-reply", "partial-v1-item"],
++)
++def test_invalid_primary_candidate_cannot_preempt_valid_backup(
++    invalid_primary,
++    isolated_memory_root,
++):
++    path = isolated_memory_root / "memory.json"
++    path.write_text(json.dumps(invalid_primary), encoding="utf-8")
++    backup_path = isolated_memory_root / "memory.json.bak.1"
++    backup_path.write_text(
++        json.dumps(_valid_memory([_valid_example(9)])),
++        encoding="utf-8",
++    )
++
++    memory = StyleMemory(path=path).load()
++
++    assert memory.load_result is not None
++    assert memory.load_result.recovered is True
++    assert memory.load_result.source == backup_path
++    assert [item["conversation_hash"] for item in memory.examples] == ["hash-9"]
++
++
++def test_all_corrupt_memory_candidates_raise_typed_error_without_byte_changes(isolated_memory_root):
++    path = isolated_memory_root / "memory.json"
++    candidates = [path, *(isolated_memory_root / f"memory.json.bak.{index}" for index in range(1, 6))]
++    payloads = [
++        b"{broken-primary",
++        b"[]",
++        b'{"schema_version":"2","examples":[]}',
++        b'{"schema_version":2,"style_summary":[],"examples":[],"common_phrases":{}}',
++        b'{"schema_version":2,"style_summary":"ok","examples":{},"common_phrases":{}}',
++        b'{"schema_version":2,"style_summary":"ok","examples":[],"common_phrases":[]}',
++    ]
++    for candidate, payload in zip(candidates, payloads):
++        candidate.write_bytes(payload)
++    before = {candidate: candidate.read_bytes() for candidate in candidates}
++
++    with pytest.raises(JsonDataError):
++        StyleMemory(path=path).load()
++
++    assert {candidate: candidate.read_bytes() for candidate in candidates} == before
++
++
++@pytest.mark.parametrize(
++    ("field", "invalid_value"),
++    [
++        ("schema_version", "2"),
++        ("style_summary", []),
++        ("examples", {}),
++        ("common_phrases", []),
++    ],
++)
++def test_memory_validator_rejects_wrong_top_level_field_types(field, invalid_value):
++    document = _valid_memory([_valid_example(1)])
++    document[field] = invalid_value
++
++    with pytest.raises(ValueError):
++        memory_module.validate_memory_document(document)
++
++
++@pytest.mark.parametrize(
++    "field",
++    [
++        "partner",
++        "cue",
++        "reply",
++        "source",
++        "created_at",
++        "conversation_hash",
++        "organization_type",
++    ],
++)
++def test_memory_validator_rejects_non_string_example_fields(field):
++    example = _valid_example(1)
++    example[field] = 123
++
++    with pytest.raises(ValueError):
++        memory_module.validate_memory_document(_valid_memory([example]))
++
++
++@pytest.mark.parametrize(
++    "phrases",
++    [
++        {1: 2},
++        {"received": "2"},
++        {"received": True},
++        {"received": -1},
++    ],
++)
++def test_memory_validator_requires_non_negative_integer_phrase_counts(phrases):
++    document = _valid_memory([_valid_example(1)])
++    document["common_phrases"] = phrases
++
++    with pytest.raises(ValueError):
++        memory_module.validate_memory_document(document)
++
++
++@pytest.mark.parametrize("state", ["missing", "corrupt", "schema_mismatch", "hash_mismatch"])
++def test_vector_hash_and_other_invalid_states_rebuild_from_memory(
++    state,
++    isolated_memory_root,
++):
++    path = isolated_memory_root / "memory.json"
++    path.write_text(json.dumps(_valid_memory([_valid_example(1)])), encoding="utf-8")
++    vector_path = isolated_memory_root / "vector_memory.json"
++    if state == "corrupt":
++        vector_path.write_text("{broken-vector", encoding="utf-8")
++    elif state == "schema_mismatch":
++        vector_path.write_text(
++            json.dumps({"version": 999, "dim": 384, "memory_hash": "0" * 64, "items": []}),
++            encoding="utf-8",
++        )
++    elif state == "hash_mismatch":
++        vector_path.write_text(
++            json.dumps({"version": 1, "dim": 384, "memory_hash": "0" * 64, "items": []}),
++            encoding="utf-8",
++        )
++
++    memory = StyleMemory(path=path).load()
++    rebuilt = json.loads(vector_path.read_text(encoding="utf-8"))
++
++    assert rebuilt["version"] == 1
++    assert rebuilt["memory_hash"] == memory.content_hash()
++    assert len(rebuilt["items"]) == 1
++
++
++def test_vector_write_failure_is_observable_and_preserves_memory_hash(
++    isolated_memory_root,
++    monkeypatch,
++):
++    path = isolated_memory_root / "memory.json"
++    path.write_text(json.dumps(_valid_memory([_valid_example(1)])), encoding="utf-8")
++    vector_path = isolated_memory_root / "vector_memory.json"
++    vector_path.write_text("{broken-vector", encoding="utf-8")
++    memory_hash_before = hashlib.sha256(path.read_bytes()).hexdigest()
++    real_atomic_write_json = atomic_write_json
++
++    def fail_vector_write(destination, data, validator, backup_count=5):
++        if Path(destination) == vector_path:
++            raise OSError("simulated vector write failure")
++        return real_atomic_write_json(destination, data, validator, backup_count)
++
++    monkeypatch.setattr(memory_module, "atomic_write_json", fail_vector_write, raising=False)
++
++    memory = StyleMemory(path=path)
++    with pytest.raises(memory_module.VectorIndexError) as error:
++        memory.load()
++
++    assert hashlib.sha256(path.read_bytes()).hexdigest() == memory_hash_before
++    assert isinstance(error.value.__cause__, OSError)
++    assert memory.vector_ready is False
++    assert memory.last_vector_error
++    with pytest.raises(memory_module.VectorIndexError):
++        memory.assert_ready_for_managed_reply()
++
++
++def test_runtime_save_vector_failure_blocks_until_successful_rebuild(
++    isolated_memory_root,
++    monkeypatch,
++):
++    memory = StyleMemory(path=isolated_memory_root / "memory.json")
++    memory.examples = [_valid_example(1)]
++    memory.save()
++    memory.examples.append(_valid_example(2))
++    real_atomic_write_json = memory_module.atomic_write_json
++
++    def fail_vector_write(destination, data, validator, backup_count=5):
++        if Path(destination) == memory.vector_path:
++            raise OSError("sensitive customer payload at C:\\private\\memory")
++        return real_atomic_write_json(destination, data, validator, backup_count)
++
++    with monkeypatch.context() as scoped:
++        scoped.setattr(memory_module, "atomic_write_json", fail_vector_write)
++        with pytest.raises(memory_module.VectorIndexError):
++            memory.save()
++
++    persisted_after_failure = memory.path.read_bytes()
++    assert len(json.loads(persisted_after_failure)["examples"]) == 2
++    assert memory.vector_ready is False
++    assert memory.last_vector_error is not None
++    assert "OSError" in memory.last_vector_error
++    assert "customer" not in memory.last_vector_error
++    assert "private" not in memory.last_vector_error
++    with pytest.raises(memory_module.VectorIndexError):
++        memory.assert_ready_for_managed_reply()
++
++    memory.rebuild_vector_index()
++
++    assert memory.path.read_bytes() == persisted_after_failure
++    assert memory.vector_ready is True
++    assert memory.last_vector_error is None
++    memory.assert_ready_for_managed_reply()
++
++
++@pytest.mark.parametrize(
++    "corruption",
++    [
++        "nan-weight",
++        "infinite-weight",
++        "weight-out-of-range",
++        "bucket-out-of-range",
++        "noncanonical-bucket",
++        "empty-vector",
++        "record-mismatch",
++    ],
++)
++def test_invalid_vector_payload_with_current_memory_hash_is_rebuilt(
++    corruption,
++    isolated_memory_root,
++):
++    memory = StyleMemory(path=isolated_memory_root / "memory.json")
++    memory.examples = [_valid_example(1)]
++    memory.save()
++    vector_path = memory.vector_path
++    vector_document = json.loads(vector_path.read_text(encoding="utf-8"))
++    expected_items = json.loads(json.dumps(vector_document["items"]))
++    item = vector_document["items"][0]
++    bucket = next(iter(item["vector"]))
++    if corruption == "nan-weight":
++        item["vector"][bucket] = float("nan")
++    elif corruption == "infinite-weight":
++        item["vector"][bucket] = float("inf")
++    elif corruption == "weight-out-of-range":
++        item["vector"][bucket] = 1.5
++    elif corruption == "bucket-out-of-range":
++        item["vector"] = {"384": 0.5}
++    elif corruption == "noncanonical-bucket":
++        item["vector"] = {"01": 0.5}
++    elif corruption == "empty-vector":
++        item["vector"] = {}
++    else:
++        item["reply"] = "tampered reply"
++    vector_path.write_text(json.dumps(vector_document), encoding="utf-8")
++
++    loaded = StyleMemory(path=memory.path).load()
++    rebuilt = json.loads(vector_path.read_text(encoding="utf-8"))
++
++    assert rebuilt["items"] == expected_items
++    assert loaded.vector_ready is True
++    assert loaded.last_vector_error is None
++    for rebuilt_item in rebuilt["items"]:
++        assert rebuilt_item["vector"]
++        assert all(
++            bucket_key == str(int(bucket_key)) and 0 <= int(bucket_key) < 384
++            for bucket_key in rebuilt_item["vector"]
++        )
++        assert all(
++            math.isfinite(weight) and 0 < weight <= 1
++            for weight in rebuilt_item["vector"].values()
++        )
++
++
++@pytest.mark.parametrize("reply", ["x", "中"], ids=["ascii", "chinese"])
++def test_single_character_examples_always_have_stable_vector_items(
++    reply,
++    isolated_memory_root,
++):
++    memory = StyleMemory(path=isolated_memory_root / "memory.json")
++    example = _valid_example(1, reply=reply)
++    example["cue"] = ""
++    example["conversation_hash"] = f"single-{ord(reply)}"
++    memory.examples = [example]
++
++    memory.save()
++    built_items = memory._build_vector_items()
++    vector_document = json.loads(memory.vector_path.read_text(encoding="utf-8"))
++
++    assert len(built_items) == len(memory.examples) == 1
++    assert built_items[0]["vector"]
++    assert vector_document["items"] == built_items
++    assert memory_module._text_vector(reply) == built_items[0]["vector"]
++    assert memory.vector_ready is True
++    memory.assert_ready_for_managed_reply()
++
++    vector_backup = memory.vector_path.with_name(f"{memory.vector_path.name}.bak.1")
++    assert not vector_backup.exists()
++    first_reload = StyleMemory(path=memory.path).load()
++    second_reload = StyleMemory(path=memory.path).load()
++
++    assert first_reload.vector_ready is True
++    assert second_reload.vector_ready is True
++    assert not vector_backup.exists()
++
++
++def test_content_hash_uses_stable_canonical_json(isolated_memory_root):
++    example = _valid_example(1)
++    memory = StyleMemory(path=isolated_memory_root / "memory.json")
++    memory.style_summary = "stable summary"
++    memory.examples = [dict(reversed(list(example.items())))]
++    memory.common_phrases = Counter({"second": 1, "first": 2})
++    canonical_document = {
++        "schema_version": 2,
++        "style_summary": "stable summary",
++        "examples": [example],
++        "common_phrases": {"first": 2, "second": 1},
++    }
++    expected = hashlib.sha256(
++        json.dumps(
++            canonical_document,
++            ensure_ascii=False,
++            sort_keys=True,
++            separators=(",", ":"),
++        ).encode("utf-8")
++    ).hexdigest()
++
++    assert memory.content_hash() == expected
++
++
++def test_legacy_memory_without_created_at_keeps_stable_hash(isolated_memory_root, monkeypatch):
++    path = isolated_memory_root / "memory.json"
++    legacy_example = _valid_example(1)
++    legacy_example.pop("created_at")
++    legacy_document = _valid_memory([legacy_example])
++    legacy_document.pop("schema_version")
++    path.write_text(json.dumps(legacy_document), encoding="utf-8")
++    ticks = iter(f"generated-{index}" for index in range(20))
++    monkeypatch.setattr(memory_module, "_utc_now", lambda: next(ticks))
++
++    first_hash = StyleMemory(path=path).load().content_hash()
++    second_hash = StyleMemory(path=path).load().content_hash()
++
++    assert first_hash == second_hash
++
++
++def test_dedupe_preserves_different_answers_sharing_conversation_hash(isolated_memory_root):
++    first = _valid_example(1, reply="answer for associations", organization_type="association")
++    second = _valid_example(2, reply="answer for foundations", organization_type="foundation")
++    first["conversation_hash"] = second["conversation_hash"] = "shared-conversation"
++    memory = StyleMemory(path=isolated_memory_root / "memory.json")
++    memory.examples = [first, second]
++
++    memory.save()
++
++    assert [item["reply"] for item in StyleMemory(path=memory.path).load().examples] == [
++        "answer for associations",
++        "answer for foundations",
++    ]
++
++
++def test_missing_memory_returns_empty_without_creating_primary_or_vector(isolated_memory_root):
++    memory = StyleMemory(path=isolated_memory_root / "memory.json").load()
++
++    assert memory.examples == []
++    assert memory.load_result is None
++    assert not memory.path.exists()
++    assert not memory.vector_path.exists()
++
++
++def test_load_recovers_newest_valid_backup(tmp_path):
++    path = tmp_path / "memory.json"
++    path.write_text("{broken", encoding="utf-8")
++    (tmp_path / "memory.json.bak.1").write_text("{broken", encoding="utf-8")
++    (tmp_path / "memory.json.bak.2").write_text('{"examples": [1]}', encoding="utf-8")
++    (tmp_path / "memory.json.bak.3").write_text('{"examples": [2]}', encoding="utf-8")
++
++    result = load_json(path, _require_examples_dict)
++
++    assert result.data == {"examples": [1]}
++    assert result.source == tmp_path / "memory.json.bak.2"
++    assert result.recovered is True
++
++
++def test_atomic_write_failed_validation_does_not_replace_existing_file(tmp_path):
++    path = tmp_path / "settings.json"
++    path.write_text('{"config_version": 2}', encoding="utf-8")
++
++    with pytest.raises(ValueError):
++        atomic_write_json(path, {"config_version": "bad"}, _require_numeric_config_version)
++
++    assert json.loads(path.read_text(encoding="utf-8")) == {"config_version": 2}
++
++
++def test_atomic_write_rotates_five_backups(tmp_path):
++    path = tmp_path / "settings.json"
++    path.write_text('{"config_version": 0}', encoding="utf-8")
++    for index in range(1, 6):
++        (tmp_path / f"settings.json.bak.{index}").write_text(
++            json.dumps({"config_version": index}), encoding="utf-8"
++        )
++
++    atomic_write_json(path, {"config_version": 6}, _require_numeric_config_version)
++
++    assert json.loads(path.read_text(encoding="utf-8")) == {"config_version": 6}
++    assert [
++        json.loads((tmp_path / f"settings.json.bak.{index}").read_text(encoding="utf-8"))
++        for index in range(1, 6)
++    ] == [{"config_version": value} for value in range(0, 5)]
++
++
++def test_atomic_write_retains_older_valid_backup_when_newer_slots_are_corrupt(tmp_path):
++    path = tmp_path / "settings.json"
++    path.write_text('{"config_version": 0}', encoding="utf-8")
++    (tmp_path / "settings.json.bak.1").write_text("{broken", encoding="utf-8")
++    (tmp_path / "settings.json.bak.2").write_text('{"config_version": 2}', encoding="utf-8")
++    (tmp_path / "settings.json.bak.3").write_text("{broken", encoding="utf-8")
++    (tmp_path / "settings.json.bak.4").write_text("{broken", encoding="utf-8")
++    (tmp_path / "settings.json.bak.5").write_text('{"config_version": 5}', encoding="utf-8")
++
++    atomic_write_json(path, {"config_version": 6}, _require_numeric_config_version)
++
++    assert [
++        json.loads((tmp_path / f"settings.json.bak.{index}").read_text(encoding="utf-8"))
++        for index in range(1, 4)
++    ] == [
++        {"config_version": 0},
++        {"config_version": 2},
++        {"config_version": 5},
++    ]
++    assert not (tmp_path / "settings.json.bak.4").exists()
++    assert not (tmp_path / "settings.json.bak.5").exists()
++
++
++def test_atomic_replace_failure_leaves_original_primary_readable(tmp_path, monkeypatch):
++    path = tmp_path / "settings.json"
++    path.write_text('{"config_version": 2}', encoding="utf-8")
++
++    import atomic_json
++
++    original_replace = atomic_json.os.replace
++
++    def fail_primary_replace(source, destination):
++        if destination == path:
++            raise OSError("simulated replace failure")
++        return original_replace(source, destination)
++
++    monkeypatch.setattr(atomic_json.os, "replace", fail_primary_replace)
++
++    with pytest.raises(OSError, match="simulated replace failure"):
++        atomic_write_json(path, {"config_version": 3}, _require_numeric_config_version)
++
++    assert json.loads(path.read_text(encoding="utf-8")) == {"config_version": 2}
++
++
++def test_load_json_all_invalid_candidates_raises_without_creating_file(tmp_path):
++    path = tmp_path / "memory.json"
++    (tmp_path / "memory.json.bak.1").write_text("[]", encoding="utf-8")
++
++    with pytest.raises(JsonDataError) as error:
++        load_json(path, _require_examples_dict)
++
++    assert not path.exists()
++    assert "memory.json" in str(error.value)
++
++
++@pytest.mark.parametrize("field", ["managed_auto_reply", "auto_recognize", "training_mode"])
++def test_string_false_is_rejected(field, tmp_path):
++    path = tmp_path / "settings.json"
++    path.write_text(json.dumps({"config_version": 2, field: "false"}), encoding="utf-8")
++
++    with pytest.raises(settings_module.SettingsValidationError):
++        settings_module.AppSettings(
++            config_path=path,
++            credential_store=FakeCredentialStore(),
++        ).load()
++
++
++@pytest.mark.parametrize(
++    ("field", "low", "high"),
++    [
++        ("poll_interval_ms", 250, 10000),
++        ("group_poll_interval_ms", 250, 10000),
++        ("auto_reply_delay_seconds", 0.5, 10),
++        ("capture_cooldown_seconds", 0.5, 60),
++        ("search_max_results", 1, 6),
++    ],
++)
++def test_settings_numeric_bounds_are_inclusive_and_reject_outside_values(field, low, high, tmp_path):
++    for accepted in (low, high):
++        path = tmp_path / f"{field}-{accepted}.json"
++        path.write_text(json.dumps({"config_version": 2, field: accepted}), encoding="utf-8")
++        loaded = settings_module.AppSettings(
++            config_path=path,
++            credential_store=FakeCredentialStore(),
++        ).load()
++        assert getattr(loaded, field) == accepted
++
++    for rejected in (low - 0.01, high + 0.01, "1", True):
++        path = tmp_path / f"{field}-invalid-{rejected}.json"
++        path.write_text(json.dumps({"config_version": 2, field: rejected}), encoding="utf-8")
++        with pytest.raises(settings_module.SettingsValidationError):
++            settings_module.AppSettings(
++                config_path=path,
++                credential_store=FakeCredentialStore(),
++            ).load()
++
++
++@pytest.mark.parametrize(
++    "area",
++    [
++        {"x_left": -0.01, "x_right": 0.9, "y_top": 0.1, "y_bottom": 0.9},
++        {"x_left": 0.1, "x_right": 1.01, "y_top": 0.1, "y_bottom": 0.9},
++        {"x_left": 0.4, "x_right": 0.4, "y_top": 0.1, "y_bottom": 0.9},
++        {"x_left": 0.7, "x_right": 0.4, "y_top": 0.1, "y_bottom": 0.9},
++        {"x_left": 0.1, "x_right": 0.9, "y_top": 0.9, "y_bottom": 0.9},
++        {"x_left": 0.1, "x_right": 0.9, "y_top": 0.95, "y_bottom": 0.9},
++        {"x_left": "0.1", "x_right": 0.9, "y_top": 0.1, "y_bottom": 0.9},
++    ],
++)
++def test_chat_area_requires_numeric_unit_coordinates_in_visual_order(area, tmp_path):
++    path = tmp_path / "settings.json"
++    path.write_text(json.dumps({"config_version": 2, "chat_area": area}), encoding="utf-8")
++
++    with pytest.raises(settings_module.SettingsValidationError):
++        settings_module.AppSettings(
++            config_path=path,
++            credential_store=FakeCredentialStore(),
++        ).load()
++
++
++def test_formal_settings_forbid_generation_and_search():
++    with pytest.raises(settings_module.SettingsValidationError):
++        settings_module.AppSettings(reply_source_mode="model").validate()
++    with pytest.raises(settings_module.SettingsValidationError):
++        settings_module.AppSettings(enable_web_search=True).validate()
++
++
++def test_legacy_managed_true_migrates_only_to_observe(tmp_path):
++    path = tmp_path / "settings.json"
++    path.write_text(json.dumps({"managed_auto_reply": True}), encoding="utf-8")
++
++    loaded = settings_module.AppSettings(
++        config_path=path,
++        credential_store=FakeCredentialStore(),
++    ).load()
++
++    assert loaded.managed_mode == "observe"
++    assert loaded.managed_auto_reply is False
++    persisted = json.loads(path.read_text(encoding="utf-8"))
++    assert persisted["config_version"] == 2
++    assert persisted["managed_mode"] == "observe"
++    assert "managed_auto_reply" not in persisted
++
++
++def test_credential_store_round_trip_uses_injected_protection(tmp_path):
++    from secure_store import CredentialStore
++
++    def protect(payload):
++        return b"protected:" + payload[::-1]
++
++    def unprotect(blob):
++        assert blob.startswith(b"protected:")
++        return blob[len(b"protected:") :][::-1]
++
++    path = tmp_path / "credentials.dat"
++    store = CredentialStore(path=path, protect=protect, unprotect=unprotect)
++    store.save({"deepseek": "secret-value", "vision:zhipu": "vision-secret"})
++
++    assert store.load() == {"deepseek": "secret-value", "vision:zhipu": "vision-secret"}
++    assert b"secret-value" not in path.read_bytes()
++
++
++def test_credential_store_binary_write_fsyncs_replaces_and_keeps_five_valid_backups(tmp_path, monkeypatch):
++    import secure_store
++
++    path = tmp_path / "credentials.dat"
++    store = secure_store.CredentialStore(
++        path=path,
++        protect=lambda payload: b"sealed:" + payload,
++        unprotect=lambda blob: blob.removeprefix(b"sealed:"),
++    )
++    fsync_calls = []
++    replace_destinations = []
++    real_fsync = secure_store.os.fsync
++    real_replace = secure_store.os.replace
++
++    def track_fsync(fd):
++        fsync_calls.append(fd)
++        return real_fsync(fd)
++
++    def track_replace(source, destination):
++        assert Path(source).parent == Path(destination).parent == tmp_path
++        replace_destinations.append(Path(destination).name)
++        return real_replace(source, destination)
++
++    monkeypatch.setattr(secure_store.os, "fsync", track_fsync)
++    monkeypatch.setattr(secure_store.os, "replace", track_replace)
++    for value in range(7):
++        store.save({"deepseek": f"secret-{value}"})
++
++    assert fsync_calls
++    assert "credentials.dat" in replace_destinations
++    assert [
++        secure_store.CredentialStore(
++            path=tmp_path / f"credentials.dat.bak.{index}",
++            protect=lambda payload: b"sealed:" + payload,
++            unprotect=lambda blob: blob.removeprefix(b"sealed:"),
++        ).load()["deepseek"]
++        for index in range(1, 6)
++    ] == ["secret-5", "secret-4", "secret-3", "secret-2", "secret-1"]
++
++
++def test_credential_store_skips_undecryptable_primary_and_loads_valid_backup(tmp_path):
++    from secure_store import CredentialStore
++
++    def unprotect(blob):
++        if not blob.startswith(b"sealed:"):
++            raise RuntimeError("simulated DPAPI rejection")
++        return blob.removeprefix(b"sealed:")
++
++    path = tmp_path / "credentials.dat"
++    store = CredentialStore(
++        path=path,
++        protect=lambda payload: b"sealed:" + payload,
++        unprotect=unprotect,
++    )
++    store.save({"deepseek": "older"})
++    store.save({"deepseek": "current"})
++    path.write_bytes(b"not-a-dpapi-blob")
++
++    assert store.load() == {"deepseek": "older"}
++
++
++def test_legacy_plaintext_keys_are_removed_only_after_encrypted_round_trip(tmp_path):
++    path = tmp_path / "settings.json"
++    path.write_text(
++        json.dumps(
++            {
++                "api_provider": "deepseek",
++                "api_key": "legacy-text",
++                "provider_api_keys": {"zhipu": "legacy-zhipu"},
++                "vision_provider": "zhipu",
++                "vision_api_key": "legacy-vision",
++            }
++        ),
++        encoding="utf-8",
++    )
++    credential_store = FakeCredentialStore()
++
++    loaded = settings_module.AppSettings(
++        config_path=path,
++        credential_store=credential_store,
++    ).load()
++
++    assert loaded.get_provider_api_key("deepseek") == "legacy-text"
++    assert loaded.get_provider_api_key("zhipu") == "legacy-zhipu"
++    assert loaded.vision_api_key == "legacy-vision"
++    assert credential_store.values == {
++        "deepseek": "legacy-text",
++        "zhipu": "legacy-zhipu",
++        "vision:zhipu": "legacy-vision",
++    }
++    persisted = path.read_text(encoding="utf-8")
++    assert "legacy-text" not in persisted
++    assert "legacy-zhipu" not in persisted
++    assert "legacy-vision" not in persisted
++    persisted_fields = json.loads(persisted)
++    assert "api_key" not in persisted_fields
++    assert "provider_api_keys" not in persisted_fields
++    assert "vision_api_key" not in persisted_fields
++
++
++def test_legacy_migration_purges_plaintext_keys_from_primary_and_all_settings_backups(tmp_path):
++    path = tmp_path / "settings.json"
++    path.write_text(
++        json.dumps({"api_provider": "deepseek", "api_key": "primary-secret"}),
++        encoding="utf-8",
++    )
++    (tmp_path / "settings.json.bak.1").write_text(
++        json.dumps({"provider_api_keys": {"zhipu": "backup-provider-secret"}}),
++        encoding="utf-8",
++    )
++    (tmp_path / "settings.json.bak.2").write_text(
++        json.dumps({"vision_api_key": "backup-vision-secret"}),
++        encoding="utf-8",
++    )
++
++    settings_module.AppSettings(
++        config_path=path,
++        credential_store=FakeCredentialStore(),
++    ).load()
++
++    candidates = [path, *sorted(tmp_path.glob("settings.json.bak.*"))]
++    assert candidates
++    for candidate in candidates:
++        raw = candidate.read_text(encoding="utf-8")
++        document = json.loads(raw)
++        assert not {"api_key", "vision_api_key", "provider_api_keys"} & document.keys()
++        assert "primary-secret" not in raw
++        assert "backup-provider-secret" not in raw
++        assert "backup-vision-secret" not in raw
++
++
++@pytest.mark.parametrize(
++    ("field", "literal_value"),
++    [
++        ("custom_headers", '{"Authorization":"Bearer sk-live-literal"}'),
++        ("custom_headers", '{"X-Token":"literal-header-token"}'),
++        ("custom_body", '{"token":"literal-body-token","prompt":"{prompt}"}'),
++        ("custom_body", '{"auth":"literal-body-secret","prompt":"{prompt}"}'),
++        ("custom_body", '{"api_key":"literal-body-key","prompt":"{prompt}"}'),
++    ],
++)
++def test_settings_reject_literal_credentials_in_custom_request_templates(field, literal_value, tmp_path):
++    settings = settings_module.AppSettings(
++        config_path=tmp_path / "settings.json",
++        credential_store=FakeCredentialStore(),
++    )
++    setattr(settings, field, literal_value)
++
++    with pytest.raises(settings_module.SettingsValidationError):
++        settings.save()
++
++    assert not settings.config_path.exists()
++
++
++def test_settings_allow_api_key_placeholder_in_custom_request_templates(tmp_path):
++    path = tmp_path / "settings.json"
++    settings = settings_module.AppSettings(config_path=path, credential_store=FakeCredentialStore())
++    settings.custom_headers = '{"Authorization":"Bearer {api_key}","X-Key":"{api_key}"}'
++    settings.custom_body = '{"model":"{model}","prompt":"{prompt}","credential":"{api_key}"}'
++
++    settings.save()
++    loaded = settings_module.AppSettings(
++        config_path=path,
++        credential_store=FakeCredentialStore(),
++    ).load()
++
++    assert loaded.custom_headers == settings.custom_headers
++    assert loaded.custom_body == settings.custom_body
++
++
++@pytest.mark.parametrize(
++    ("field", "literal_template", "secret"),
++    [
++        ("custom_headers", '{"X-Auth":"x-auth-literal-secret"}', "x-auth-literal-secret"),
++        (
++            "custom_headers",
++            '{"Proxy-Authorization":"Basic proxy-literal-secret"}',
++            "proxy-literal-secret",
++        ),
++        ("custom_body", '{"access_token":"access-literal-secret"}', "access-literal-secret"),
++        ("custom_body", '{"client_secret":"client-literal-secret"}', "client-literal-secret"),
++        ("custom_body", '{"password":"password-literal-secret"}', "password-literal-secret"),
++    ],
++)
++def test_compound_credential_fields_reject_literals_and_keep_all_settings_snapshots_clean(
++    field,
++    literal_template,
++    secret,
++    tmp_path,
++):
++    path = tmp_path / "settings.json"
++    settings = settings_module.AppSettings(config_path=path, credential_store=FakeCredentialStore())
++    for _index in range(7):
++        settings.save()
++
++    setattr(settings, field, literal_template)
++    with pytest.raises(settings_module.SettingsValidationError):
++        settings.save()
++
++    candidates = [path, *sorted(tmp_path.glob("settings.json.bak.*"))]
++    assert len(candidates) == 6
++    for candidate in candidates:
++        assert secret not in candidate.read_text(encoding="utf-8")
++
++
++@pytest.mark.parametrize(
++    ("field", "placeholder_template"),
++    [
++        ("custom_headers", '{"X-Auth":"{api_key}"}'),
++        ("custom_headers", '{"Proxy-Authorization":"Basic {api_key}"}'),
++        ("custom_body", '{"access_token":"{api_key}"}'),
++        ("custom_body", '{"client_secret":"{api_key}"}'),
++        ("custom_body", '{"password":"{api_key}"}'),
++    ],
++)
++def test_compound_credential_fields_allow_api_key_placeholder(field, placeholder_template, tmp_path):
++    path = tmp_path / "settings.json"
++    settings = settings_module.AppSettings(config_path=path, credential_store=FakeCredentialStore())
++    setattr(settings, field, placeholder_template)
++
++    settings.save()
++    loaded = settings_module.AppSettings(config_path=path, credential_store=FakeCredentialStore()).load()
++
++    assert getattr(loaded, field) == placeholder_template
++
++
++def test_settings_load_uses_valid_backup_when_primary_persisted_string_type_is_corrupt(tmp_path):
++    path = tmp_path / "settings.json"
++    path.write_text(
++        json.dumps({"config_version": 2, "api_provider": ["not", "a", "string"]}),
++        encoding="utf-8",
++    )
++    (tmp_path / "settings.json.bak.1").write_text(
++        json.dumps({"config_version": 2, "api_provider": "deepseek", "model": "backup-model"}),
++        encoding="utf-8",
++    )
++
++    loaded = settings_module.AppSettings(
++        config_path=path,
++        credential_store=FakeCredentialStore(),
++    ).load()
++
++    assert loaded.api_provider == "deepseek"
++    assert loaded.model == "backup-model"
++
++
++@pytest.mark.parametrize(
++    ("malformed_field", "malformed_value", "backup_model"),
++    [
++        ("api_key", ["not", "a", "string"], "backup-api-key"),
++        ("vision_api_key", 123, "backup-vision-key"),
++        ("provider_api_keys", {"deepseek": ["not", "a", "string"]}, "backup-provider-keys"),
++    ],
++)
++def test_v1_malformed_credential_field_is_rejected_before_valid_backup_selection(
++    malformed_field,
++    malformed_value,
++    backup_model,
++    tmp_path,
++):
++    path = tmp_path / "settings.json"
++    path.write_text(json.dumps({malformed_field: malformed_value}), encoding="utf-8")
++    (tmp_path / "settings.json.bak.1").write_text(
++        json.dumps({"config_version": 2, "api_provider": "deepseek", "model": backup_model}),
++        encoding="utf-8",
++    )
++
++    loaded = settings_module.AppSettings(
++        config_path=path,
++        credential_store=FakeCredentialStore(),
++    ).load()
++
++    assert loaded.api_provider == "deepseek"
++    assert loaded.model == backup_model
++
++
++@pytest.mark.parametrize("failure_mode", ["save", "load"])
++def test_failed_legacy_credential_migration_preserves_original_bytes_and_raises_typed_error(
++    failure_mode, tmp_path
++):
++    path = tmp_path / "settings.json"
++    original = b'{\n  "api_key": "legacy-secret",\n  "managed_auto_reply": true\n}\n'
++    path.write_bytes(original)
++    credential_store = FakeCredentialStore(
++        save_error=RuntimeError("encrypt failed") if failure_mode == "save" else None,
++        load_error=RuntimeError("read-back failed") if failure_mode == "load" else None,
++    )
++
++    settings = settings_module.AppSettings(
++        config_path=path,
++        credential_store=credential_store,
++    )
++    with pytest.raises(settings_module.SettingsPersistenceError):
++        settings.load()
++
++    assert path.read_bytes() == original
++    assert settings.managed_mode == "off"
++    assert settings.managed_auto_reply is False
++
++
++def test_save_uses_explicit_allowlist_without_runtime_objects_or_key_fields(tmp_path):
++    path = tmp_path / "settings.json"
++    credential_store = FakeCredentialStore()
++    settings = settings_module.AppSettings(config_path=path, credential_store=credential_store)
++    settings.set_provider_api_key("deepseek", "secret-value")
++    settings.vision_api_key = "vision-value"
++    settings.runtime_socket = object()
++    settings.save()
++
++    saved = json.loads(path.read_text(encoding="utf-8"))
++    assert saved["config_version"] == 2
++    assert "config_path" not in saved
++    assert "credential_store" not in saved
++    assert "runtime_socket" not in saved
++    assert not any("key" in field.casefold() for field in saved)
++    assert "secret-value" not in path.read_text(encoding="utf-8")
++    assert "vision-value" not in path.read_text(encoding="utf-8")
+
+===== DIFF: tests\test_core.py =====
+warning: in the working copy of 'D:\Vibe C\客服\wechat--main\.superpowers\sdd\2026-08-12-01-persistence-and-settings-hardening\phase-review-baseline\tests\test_core.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'D:\Vibe C\客服\wechat--main\tests\test_core.py', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\tests\\test_core.py" "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\tests\\test_core.py"
+index 3c65682..0fbf090 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\tests\\test_core.py"	
++++ "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\tests\\test_core.py"	
+@@ -1,4 +1,5 @@
+ import json
++import os
+ import sys
+ import types
+ import tempfile
+@@ -318,8 +319,8 @@ class MemoryTests(unittest.TestCase):
+         self.assertIn("C11:D11", engine.last_source)
+         self.assertIn("大模型确认一致", engine.last_source)
+ 
+-    def test_save_protects_disk_knowledge_when_memory_shrinks(self):
+-        """数量骤减保护：磁盘已有大量知识库（≥50 条）、内存只有极少时，save 先备份磁盘。"""
++    def test_save_keeps_previous_memory_in_managed_backup(self):
++        """每次覆盖前由统一原子写入层保留上一份有效正文。"""
+         tmp = tempfile.TemporaryDirectory()
+         self.addCleanup(tmp.cleanup)
+         memory = StyleMemory(Path(tmp.name) / "memory.json")
+@@ -348,10 +349,10 @@ class MemoryTests(unittest.TestCase):
+         ] * 3
+         memory2.save()
+ 
+-        # 保护触发：磁盘文件里应有自动备份
+-        backup_files = list(Path(tmp.name).glob("memory.json.bak-auto-*"))
+-        self.assertTrue(backup_files, "应生成自动备份")
+-        backup = json.loads(backup_files[0].read_text(encoding="utf-8"))
++        # 统一原子写入层应把覆盖前正文放入最新的有效备份槽位。
++        backup_path = Path(tmp.name) / "memory.json.bak.1"
++        self.assertTrue(backup_path.exists(), "应生成托管备份")
++        backup = json.loads(backup_path.read_text(encoding="utf-8"))
+         self.assertEqual(len(backup.get("examples", [])), 60, "备份应包含 60 条知识库")
+ 
+     def test_enterprise_ambiguous_runtime_and_phrasebook_both_refuse_to_send(self):
+@@ -2077,6 +2078,7 @@ class ReplyParsingTests(unittest.TestCase):
+         app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
+         app.engine = engine
+         app.settings = settings
++        app.memory = memory
+         app.current_window = types.SimpleNamespace(title="测试窗口")
+         app.queue = _FakeQueue()
+         app.managed_last_handled_turn_key = ""
+@@ -2988,6 +2990,180 @@ class VisibleContentTests(unittest.TestCase):
+ 
+ 
+ class SettingsTests(unittest.TestCase):
++    def test_formal_ui_exposes_only_knowledge_source_and_all_managed_modes(self):
++        import float_ui
++
++        self.assertEqual([value for value, _label in float_ui.SOURCE_MODE_OPTIONS], ["knowledge_only"])
++        self.assertEqual(
++            [value for value, _label in float_ui.MANAGED_MODE_OPTIONS],
++            ["off", "observe", "controlled", "full"],
++        )
++
++    def test_managed_allowlist_parser_deduplicates_in_display_order(self):
++        import float_ui
++
++        self.assertEqual(
++            float_ui.parse_managed_allowed_chats("客户甲\n客户乙, 客户甲；客户丙"),
++            ["客户甲", "客户乙", "客户丙"],
++        )
++
++    def test_managed_mode_callback_preserves_new_mode_with_legacy_boolean_callback(self):
++        from float_ui import ReplyAssistantUI
++
++        class FakeVar:
++            def __init__(self, value=None):
++                self.value = value
++
++            def get(self):
++                return self.value
++
++            def set(self, value):
++                self.value = value
++
++        callback_values = []
++        ui = ReplyAssistantUI.__new__(ReplyAssistantUI)
++        ui.settings = AppSettings()
++        ui.managed_var = FakeVar("off")
++        ui.auto_var = FakeVar(False)
++        ui.callbacks = {"managed_changed": callback_values.append}
++
++        ui._set_managed_mode("controlled")
++
++        self.assertEqual(ui.settings.managed_mode, "controlled")
++        self.assertTrue(ui.settings.auto_recognize)
++        self.assertEqual(callback_values, [False])
++
++    def test_source_mode_callback_cannot_enable_free_generation(self):
++        from float_ui import ReplyAssistantUI
++
++        class FakeVar:
++            def __init__(self):
++                self.value = None
++
++            def set(self, value):
++                self.value = value
++
++        callback_values = []
++        ui = ReplyAssistantUI.__new__(ReplyAssistantUI)
++        ui.settings = AppSettings()
++        ui.source_mode_var = FakeVar()
++        ui.source_mode_label_var = FakeVar()
++        ui.callbacks = {"source_mode_changed": callback_values.append}
++        ui._refresh_source_menu = lambda: None
++
++        ui._set_source_mode("model")
++
++        self.assertEqual(ui.settings.reply_source_mode, "knowledge_only")
++        self.assertEqual(callback_values, [])
++
++    def test_fixed_source_mode_ignores_real_legacy_callback_and_remains_reloadable(self):
++        import main as main_module
++        from float_ui import ReplyAssistantUI
++
++        class FakeVar:
++            def __init__(self):
++                self.value = None
++
++            def set(self, value):
++                self.value = value
++
++        with tempfile.TemporaryDirectory() as tmp:
++            path = Path(tmp) / "settings.json"
++            settings = AppSettings(config_path=path)
++            legacy_app = types.SimpleNamespace(
++                settings=settings,
++                ui=types.SimpleNamespace(set_status=lambda _text: None),
++            )
++            ui = ReplyAssistantUI.__new__(ReplyAssistantUI)
++            ui.settings = settings
++            ui.source_mode_var = FakeVar()
++            ui.source_mode_label_var = FakeVar()
++            ui._refresh_source_menu = lambda: None
++            ui.callbacks = {
++                "source_mode_changed": lambda mode: main_module.WeChatStyleReplyAssistant._source_mode_changed(
++                    legacy_app,
++                    mode,
++                )
++            }
++
++            ui._set_source_mode("model")
++            loaded = AppSettings(config_path=path).load()
++
++            self.assertEqual(settings.reply_source_mode, "knowledge_only")
++            self.assertEqual(loaded.reply_source_mode, "knowledge_only")
++
++    def test_observe_and_controlled_survive_real_legacy_managed_callback_on_disk(self):
++        import main as main_module
++        from float_ui import ReplyAssistantUI
++
++        class FakeVar:
++            def __init__(self, value=None):
++                self.value = value
++
++            def get(self):
++                return self.value
++
++            def set(self, value):
++                self.value = value
++
++        for mode in ("observe", "controlled"):
++            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
++                path = Path(tmp) / "settings.json"
++                settings = AppSettings(config_path=path)
++                legacy_app = types.SimpleNamespace(
++                    settings=settings,
++                    ui=types.SimpleNamespace(set_status=lambda _text: None),
++                )
++                ui = ReplyAssistantUI.__new__(ReplyAssistantUI)
++                ui.settings = settings
++                ui.managed_var = FakeVar("off")
++                ui.auto_var = FakeVar(False)
++                ui.callbacks = {
++                    "managed_changed": lambda enabled: main_module.WeChatStyleReplyAssistant._managed_changed(
++                        legacy_app,
++                        enabled,
++                    )
++                }
++
++                ui._set_managed_mode(mode)
++                loaded = AppSettings(config_path=path).load()
++
++                self.assertEqual(settings.managed_mode, mode)
++                self.assertEqual(loaded.managed_mode, mode)
++
++    def test_settings_dialog_managed_mode_path_uses_same_callback_safe_transition(self):
++        import main as main_module
++        from float_ui import ReplyAssistantUI
++
++        class FakeVar:
++            def __init__(self, value=None):
++                self.value = value
++
++            def set(self, value):
++                self.value = value
++
++        with tempfile.TemporaryDirectory() as tmp:
++            path = Path(tmp) / "settings.json"
++            settings = AppSettings(config_path=path)
++            legacy_app = types.SimpleNamespace(
++                settings=settings,
++                ui=types.SimpleNamespace(set_status=lambda _text: None),
++            )
++            ui = ReplyAssistantUI.__new__(ReplyAssistantUI)
++            ui.settings = settings
++            ui.managed_var = FakeVar("off")
++            ui.auto_var = FakeVar(False)
++            ui.callbacks = {
++                "managed_changed": lambda enabled: main_module.WeChatStyleReplyAssistant._managed_changed(
++                    legacy_app,
++                    enabled,
++                )
++            }
++
++            ui._set_managed_mode("controlled", persist=False)
++            settings.save()
++
++            self.assertEqual(AppSettings(config_path=path).load().managed_mode, "controlled")
+     def test_model_prompt_is_readable_chinese_and_forbids_invented_data(self):
+         settings = AppSettings()
+         settings.reply_source_mode = "model"
+@@ -3240,6 +3416,10 @@ class SettingsTests(unittest.TestCase):
+         app.settings = AppSettings()
+         app.settings.managed_auto_reply = True
+         app.settings.auto_reply_delay_seconds = 0
++        app.memory = types.SimpleNamespace(
++            vector_ready=True,
++            assert_ready_for_managed_reply=lambda: None,
++        )
+         app.engine = types.SimpleNamespace(last_error="", last_source="DeepSeek API")
+         app.queue = queue.Queue()
+         app.sender = types.SimpleNamespace(
+@@ -3291,6 +3471,10 @@ class SettingsTests(unittest.TestCase):
+         app.settings = AppSettings()
+         app.settings.managed_auto_reply = True
+         app.settings.auto_reply_delay_seconds = 0
++        app.memory = types.SimpleNamespace(
++            vector_ready=True,
++            assert_ready_for_managed_reply=lambda: None,
++        )
+         app.engine = types.SimpleNamespace(last_error="", last_source="DeepSeek API")
+         app.queue = queue.Queue()
+         app.sender = types.SimpleNamespace(
+@@ -3340,6 +3524,10 @@ class SettingsTests(unittest.TestCase):
+         app.settings = AppSettings()
+         app.settings.managed_auto_reply = True
+         app.settings.auto_reply_delay_seconds = 0
++        app.memory = types.SimpleNamespace(
++            vector_ready=True,
++            assert_ready_for_managed_reply=lambda: None,
++        )
+         app.engine = types.SimpleNamespace(last_error="", last_source="DeepSeek API")
+         app.queue = queue.Queue()
+         app.sender = types.SimpleNamespace(
+@@ -3482,7 +3670,7 @@ class SettingsTests(unittest.TestCase):
+             path = Path(tmp) / "settings.json"
+             settings = AppSettings(config_path=path)
+             settings.api_provider = "custom_http"
+-            settings.reply_source_mode = "memory"
++            settings.reply_source_mode = "knowledge_only"
+             settings.api_key = "test-key"
+             settings.base_url = "https://example.com/generate"
+             settings.model = "custom-model"
+@@ -3494,7 +3682,7 @@ class SettingsTests(unittest.TestCase):
+             loaded = AppSettings(config_path=path).load()
+ 
+             self.assertEqual(loaded.api_provider, "custom_http")
+-            self.assertEqual(loaded.reply_source_mode, "memory")
++            self.assertEqual(loaded.reply_source_mode, "knowledge_only")
+             self.assertEqual(loaded.custom_headers, '{"Authorization":"Bearer {api_key}"}')
+             self.assertEqual(loaded.custom_body, '{"model":"{model}","prompt":"{prompt}"}')
+             self.assertEqual(loaded.custom_response_path, "data.answer")
+@@ -4537,15 +4725,19 @@ class SettingsTests(unittest.TestCase):
+             self.assertEqual(loaded.api_key, "deepseek-key")
+             self.assertEqual(loaded.get_provider_api_key("deepseek"), "deepseek-key")
+ 
+-    def test_frozen_portable_defaults_store_data_next_to_exe(self):
++    def test_frozen_defaults_store_data_in_appdata(self):
+         with tempfile.TemporaryDirectory() as tmp:
+             exe_path = Path(tmp) / "聊小智.exe"
+-            with patch.object(sys, "frozen", True, create=True), patch.object(sys, "executable", str(exe_path)):
++            with patch.dict(
++                os.environ,
++                {"APPDATA": tmp, "WECHAT_ASSISTANT_DATA_DIR": ""},
++                clear=False,
++            ), patch.object(sys, "frozen", True, create=True), patch.object(sys, "executable", str(exe_path)):
+                 config_path = settings_module.default_config_path()
+                 memory_path = memory_module.default_memory_path()
+ 
+-            self.assertEqual(config_path, Path(tmp) / "user_data" / "settings.json")
+-            self.assertEqual(memory_path, Path(tmp) / "user_data" / "memory.json")
++            self.assertEqual(config_path, Path(tmp) / "WeChatStyleReplyAssistant" / "settings.json")
++            self.assertEqual(memory_path, Path(tmp) / "WeChatStyleReplyAssistant" / "memory.json")
+ 
+ 
+ class BuildReleaseTests(unittest.TestCase):
+
+===== DIFF: tests\conftest.py =====
+warning: in the working copy of 'D:\Vibe C\客服\wechat--main\tests\conftest.py', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\tests\\conftest.py" "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\tests\\conftest.py"
+index e69de29..595a4e6 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-review-baseline\\tests\\conftest.py"	
++++ "b/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\tests\\conftest.py"	
+@@ -0,0 +1,64 @@
++from __future__ import annotations
++
++import hashlib
++import json
++import os
++from pathlib import Path
++
++import pytest
++
++import app_paths
++
++
++def snapshot_data_directory(root: Path) -> dict[str, object]:
++    root = Path(root)
++    files: list[dict[str, object]] = []
++    if root.exists():
++        for path in sorted((item for item in root.rglob("*") if item.is_file()), key=lambda item: str(item)):
++            stat = path.stat()
++            files.append(
++                {
++                    "relative_path": path.relative_to(root).as_posix(),
++                    "size": stat.st_size,
++                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
++                    "mtime_ns": stat.st_mtime_ns,
++                }
++            )
++    return {"root": str(root), "exists": root.exists(), "files": files}
++
++
++def _write_manifest(path: Path, manifest: dict[str, object]) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
++
++
++@pytest.fixture(scope="session", autouse=True)
++def isolate_entire_test_suite_data_root(tmp_path_factory):
++    appdata = os.environ.get("APPDATA", "").strip()
++    formal_root = Path(appdata) / app_paths.APP_NAME if appdata else Path.home() / ".wechat_style_reply_assistant"
++    artifact_dir = Path(__file__).resolve().parents[1] / "artifacts" / "formal-hardening" / "2026-08-12"
++    before_path = artifact_dir / "phase-01-formal-appdata-before.json"
++    after_path = artifact_dir / "phase-01-formal-appdata-after.json"
++    before = snapshot_data_directory(formal_root)
++    _write_manifest(before_path, before)
++
++    previous_override = os.environ.get(app_paths.TEST_OVERRIDE)
++    isolated_root = tmp_path_factory.mktemp("wechat-assistant-suite-data")
++    os.environ[app_paths.TEST_OVERRIDE] = str(isolated_root)
++    try:
++        yield isolated_root
++    finally:
++        if previous_override is None:
++            os.environ.pop(app_paths.TEST_OVERRIDE, None)
++        else:
++            os.environ[app_paths.TEST_OVERRIDE] = previous_override
++        after = snapshot_data_directory(formal_root)
++        _write_manifest(after_path, after)
++        assert after == before, "formal AppData changed during the test suite"
++
++
++@pytest.fixture(autouse=True)
++def isolate_each_test_data_root(tmp_path, monkeypatch):
++    isolated_root = tmp_path / "isolated-app-data"
++    monkeypatch.setenv(app_paths.TEST_OVERRIDE, str(isolated_root))
++    return isolated_root
+
+===== PROGRESS LEDGER =====
+# SDD ledger — plan: D:\Vibe C\客服\wechat--main\docs\superpowers\plans\2026-08-12-01-persistence-and-settings-hardening.md
+Execution mode: non-Git in-place workspace authorized by user; project/runtime ZIP backups are the recovery baseline.
+Baseline: 297 passed, 74 warnings, 4 subtests passed; production memory SHA-256 unchanged A8AE540D89ED970AF9D4CE788BD09EF35D72B75B37210445E60364DBA6F567FE.
+Task 1: dispatched
+Task 1: minor (deferred): tests/test_persistence.py does not yet assert credential_path, ledger_path, and logs_dir; final review must triage after their consuming tasks add coverage.
+Task 1: fix round 1/5 pending — review package omitted the existing 01-paths.sha256.json checkpoint evidence.
+Task 1: fix round 1/5 (1 addressed, 0 open — checkpoint JSON and live hashes included in fix evidence package; non-Git)
+Task 1: complete (non-Git snapshot/checkpoint, scoped re-review clean)
+Task 2: minor (deferred): atomic_json backup_count input is not constrained while load scans five slots; final review must triage API consistency.
+Task 2: fix round 1/5 pending — corrupt backup slots can overwrite valid older backups during rotation; mixed valid/corrupt regression coverage missing.
+Task 2: fix round 1/5 (2 addressed, 0 open — valid backups compacted before rotation; mixed valid/corrupt regression added; non-Git)
+Task 2: complete (non-Git snapshot/checkpoint, scoped re-review clean)
+Task 3: dispatched
+Task 3: minor (deferred): unhashable managed_mode should normalize to SettingsValidationError; tooltip still describes removed model fallback; report test-count evidence says 102+supplement rather than claimed 103.
+Task 3: fix round 1/5 pending — plaintext legacy settings survive in backups; custom templates can persist literal secrets; old UI callbacks corrupt source/mode state; load validator misses persisted-field types.
+Task 3: fix round 1/5 (3 addressed, 2 open — custom credential names X-Auth/Proxy-Authorization bypass guard; malformed v1 credential fields still block valid backup)
+Task 3: fix round 2/5 pending — close compound credential-name and v1 candidate-validation gaps.
+Task 3: fix round 2/5 (2 addressed, 0 open — compound auth/token names guarded; malformed v1 credentials yield to valid backup)
+Task 3: complete (non-Git snapshot/checkpoint, scoped re-review clean)
+Task 4: dispatched
+Task 4: minor (deferred): 3001-record test distinguishes hard truncation but not the exact metadata-preserving dedupe boundary; final knowledge-schema review must triage.
+Task 4: cross-task ruling: this task must expose persistent vector health and a typed blocking error; main/preflight consumption is completed in Task 5/runtime plans because Task 4 file scope excludes main.py.
+Task 4: fix round 1/5 pending — vector failure health absent; missing primary ignores backups; semantic memory validation incomplete; vector validator admits non-finite/invalid buckets.
+Task 4: fix round 1/5 (3 addressed, 1 open — validator-accepted one-character memory example can be silently omitted from an items=[] vector index marked ready)
+Task 4: fix round 2/5 pending — ensure every valid non-empty memory example produces a non-empty vector item.
+Task 4: fix round 2/5 (1 addressed, 0 open — single-character ASCII/Chinese examples now generate stable non-empty vectors shared by queries)
+Task 4: complete (non-Git snapshot/checkpoint, scoped re-review clean)
+Task 5: dispatched
+Task 5: root review found 2 Critical / 3 Important / 1 Minor — log-schema smuggling, queued-send TOCTOU, typed startup gaps, concurrent handler duplication, and incomplete full-suite/formal-AppData isolation.
+Task 5: fix round 1/5 (4 original findings and original Minor addressed; C1 still open because generic safe-token fields allow legal-shape secrets; new Important: production diagnostic reasons are discarded)
+Task 5: fix round 2/5 (C1 and diagnostic observability addressed — per-field enums, HMAC record IDs, bounded scores, formatter timestamps, and 12 explicit production diagnostic codes)
+Task 5: minor (deferred): case-variant Windows paths could install duplicate handlers; a corrupt runtime salt can make diagnostic logging silently unavailable. Final phase review must triage both.
+Task 5: complete (root scoped re-review PASS; 386 passed + 6 subtests, JUnit 392/0/0, compileall 0, 11-file manifest mismatch 0, formal AppData 32-file mismatch 0)
+
+===== PHASE FILE HASH MANIFEST =====
+{
+    "algorithm":  "sha256",
+    "scope_note":  "Fix Round 2 updates runtime_logging.py, main.py, and tests/test_persistence.py; the complete Phase 1 production/test audit scope remains 11 files.",
+    "files":  {
+                  "app_paths.py":  "f8f5ff09720facc8b5384d302ae1f6a9083042a573cea5ecbde2060d1a530440",
+                  "atomic_json.py":  "7aa66d59f228bcfe404c471a3f700aa06b53889068a944b686059c8b70874e1b",
+                  "secure_store.py":  "5dd70dcd1d5c5b33f4622687cc9862102a8cf5bba25c12b8f4d3fcd848d49bba",
+                  "runtime_logging.py":  "d3c2f6cb9c459b9dd672924cd36727ffd85c786cb2911c7aa45ce80e7c1b5cbb",
+                  "settings.py":  "0c83c8efb7f5a2a4f5cdb68f09b96a95cb437bdf88834b0ef33d2258a378e541",
+                  "memory.py":  "3eb04ad35be57b66a961013889cc20586e480f7dbc3fe99848b712dd7b7a4c6b",
+                  "float_ui.py":  "fdbc5362b06f2d4ecdda11d6790fd9b2109ca947c9740dc438538b3f2a68e5bb",
+                  "main.py":  "0ffddeb09a056d982b17c931a257ec5315c5487cd301273e6fd49717457184ea",
+                  "tests/test_persistence.py":  "e3df1e32be627df6d9346e27b39b2631264c910b6259bee1097f069394a800d0",
+                  "tests/test_core.py":  "1d92460f414c875ef103042daefdbd20798ed82ff12f81d82703c4ebdd92f5f3",
+                  "tests/conftest.py":  "5c1c67648a5c77c3d6a7dbf34dd3770a436c6f3ca6f4e4720aaf1864ebf3d2a8"
+              }
+}
+
+===== EVIDENCE HASHES =====
+phase-01-persistence.xml C847B82FCAD3BB57169ABB69F1B09FEB4D18056D545441E1E5E636193D761472
+phase-01-formal-appdata-before.json DCE85A645EDBF5371D1B65536EF082CA253DA7317A15FAE5377602BB8BEB42E8
+phase-01-formal-appdata-after.json DCE85A645EDBF5371D1B65536EF082CA253DA7317A15FAE5377602BB8BEB42E8

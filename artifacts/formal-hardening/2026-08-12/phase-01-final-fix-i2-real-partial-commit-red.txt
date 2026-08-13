@@ -1,0 +1,174 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- D:\Vibe C\客服\wechat--main\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\Vibe C\客服\wechat--main
+collecting ... collected 57 items / 55 deselected / 2 selected
+
+tests/test_phase1_final_fix.py::test_atomic_json_real_backup_replace_failure_never_partially_commits FAILED [ 50%]
+tests/test_phase1_final_fix.py::test_secure_store_real_backup_replace_failure_never_partially_commits FAILED [100%]
+
+================================== FAILURES ===================================
+____ test_atomic_json_real_backup_replace_failure_never_partially_commits _____
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-127/test_atomic_json_real_backup_r0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x00000251FE9EDA10>
+
+    def test_atomic_json_real_backup_replace_failure_never_partially_commits(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path)
+        before = _candidate_bytes(path)
+        failed = False
+        real_replace = atomic_json.os.replace
+    
+        def fail_third_backup_once(source: object, destination: object) -> None:
+            nonlocal failed
+            if not failed and Path(destination) == path.with_name(f"{path.name}.bak.3"):
+                failed = True
+                raise OSError("real backup 3 replace fault")
+            real_replace(source, destination)
+    
+        monkeypatch.setattr(atomic_json.os, "replace", fail_third_backup_once)
+        with pytest.raises(OSError, match="real backup 3"):
+            atomic_json.atomic_write_json(path, {"version": 99}, _require_version_object)
+    
+>       assert _candidate_bytes(path) == before
+E       assert {'settings.json': b'{"version": 0}', 'settings.json.bak.1': b'{"version": 0}', 'settings.json.bak.2': b'{"version": 1}', 'settings.json.bak.3': b'{"version": 3}', 'settings.json.bak.4': b'{"version": 4}', 'settings.json.bak.5': b'{"version": 5}'} == {'settings.json': b'{"version": 0}', 'settings.json.bak.1': b'{"version": 1}', 'settings.json.bak.2': b'{"version": 2}', 'settings.json.bak.3': b'{"version": 3}', 'settings.json.bak.4': b'{"version": 4}', 'settings.json.bak.5': b'{"version": 5}'}
+E         
+E         Common items:
+E         {'settings.json': b'{"version": 0}',
+E          'settings.json.bak.3': b'{"version": 3}',
+E          'settings.json.bak.4': b'{"version": 4}',
+E          'settings.json.bak.5': b'{"version": 5}'}
+E         Differing items:
+E         {'settings.json.bak.2': b'{"version": 1}'} != {'settings.json.bak.2': b'{"version": 2}'}
+E         {'settings.json.bak.1': b'{"version": 0}'} != {'settings.json.bak.1': b'{"version": 1}'}
+E         
+E         Full diff:
+E           {
+E               'settings.json': b'{"version": 0}',
+E         -     'settings.json.bak.1': b'{"version": 1}',
+E         ?                                          ^
+E         +     'settings.json.bak.1': b'{"version": 0}',
+E         ?                                          ^
+E         -     'settings.json.bak.2': b'{"version": 2}',
+E         ?                                          ^
+E         +     'settings.json.bak.2': b'{"version": 1}',
+E         ?                                          ^
+E               'settings.json.bak.3': b'{"version": 3}',
+E               'settings.json.bak.4': b'{"version": 4}',
+E               'settings.json.bak.5': b'{"version": 5}',
+E           }
+
+tests\test_phase1_final_fix.py:400: AssertionError
+____ test_secure_store_real_backup_replace_failure_never_partially_commits ____
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-127/test_secure_store_real_backup_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x00000251FE9E5910>
+
+    def test_secure_store_real_backup_replace_failure_never_partially_commits(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "credentials.dat"
+        store = secure_store.CredentialStore(path=path, protect=_protect_for_test, unprotect=_unprotect_for_test)
+        for index in range(6):
+            store.save({"provider": f"old-secret-{index}"})
+        before = _candidate_bytes(path)
+        failed = False
+        real_replace = atomic_json.os.replace
+    
+        def fail_third_backup_once(source: object, destination: object) -> None:
+            nonlocal failed
+            if not failed and Path(destination) == path.with_name(f"{path.name}.bak.3"):
+                failed = True
+                raise OSError("real credential backup 3 replace fault")
+            real_replace(source, destination)
+    
+        monkeypatch.setattr(atomic_json.os, "replace", fail_third_backup_once)
+        with pytest.raises(OSError, match="real credential backup 3"):
+            store.save({"provider": "new-secret"})
+    
+>       assert _candidate_bytes(path) == before
+E       assert {'credentials.dat': b'protected:{"provider":"old-secret-5"}', 'credentials.dat.bak.1': b'protected:{"provider":"old-secret-5"}', 'credentials.dat.bak.2': b'protected:{"provider":"old-secret-4"}', 'credentials.dat.bak.3': b'protected:{"provider":"old-secret-2"}', 'credentials.dat.bak.4': b'protected:{"provider":"old-secret-1"}', 'credentials.dat.bak.5': b'protected:{"provider":"old-secret-0"}'} == {'credentials.dat': b'protected:{"provider":"old-secret-5"}', 'credentials.dat.bak.1': b'protected:{"provider":"old-secret-4"}', 'credentials.dat.bak.2': b'protected:{"provider":"old-secret-3"}', 'credentials.dat.bak.3': b'protected:{"provider":"old-secret-2"}', 'credentials.dat.bak.4': b'protected:{"provider":"old-secret-1"}', 'credentials.dat.bak.5': b'protected:{"provider":"old-secret-0"}'}
+E         
+E         Common items:
+E         {'credentials.dat': b'protected:{"provider":"old-secret-5"}',
+E          'credentials.dat.bak.3': b'protected:{"provider":"old-secret-2"}',
+E          'credentials.dat.bak.4': b'protected:{"provider":"old-secret-1"}',
+E          'credentials.dat.bak.5': b'protected:{"provider":"old-secret-0"}'}
+E         Differing items:
+E         {'credentials.dat.bak.1': b'protected:{"provider":"old-secret-5"}'} != {'credentials.dat.bak.1': b'protected:{"provider":"old-secret-4"}'}
+E         {'credentials.dat.bak.2': b'protected:{"provider":"old-secret-4"}'} != {'credentials.dat.bak.2': b'protected:{"provider":"old-secret-3"}'}
+E         
+E         Full diff:
+E           {
+E               'credentials.dat': b'protected:{"provider":"old-secret-5"}',
+E         -     'credentials.dat.bak.1': b'protected:{"provider":"old-secret-4"}',
+E         ?                                                                  ^
+E         +     'credentials.dat.bak.1': b'protected:{"provider":"old-secret-5"}',
+E         ?                                                                  ^
+E         -     'credentials.dat.bak.2': b'protected:{"provider":"old-secret-3"}',
+E         ?                                                                  ^
+E         +     'credentials.dat.bak.2': b'protected:{"provider":"old-secret-4"}',
+E         ?                                                                  ^
+E               'credentials.dat.bak.3': b'protected:{"provider":"old-secret-2"}',
+E               'credentials.dat.bak.4': b'protected:{"provider":"old-secret-1"}',
+E               'credentials.dat.bak.5': b'protected:{"provider":"old-secret-0"}',
+E           }
+
+tests\test_phase1_final_fix.py:479: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_real_backup_replace_failure_never_partially_commits - assert {'settings.json': b'{"version": 0}', 'settings.json.bak.1': b'{"version": 0}', 'settings.json.bak.2': b'{"version": 1}', 'settings.json.bak.3': b'{"version": 3}', 'settings.json.bak.4': b'{"version": 4}', 'settings.json.bak.5': b'{"version": 5}'} == {'settings.json': b'{"version": 0}', 'settings.json.bak.1': b'{"version": 1}', 'settings.json.bak.2': b'{"version": 2}', 'settings.json.bak.3': b'{"version": 3}', 'settings.json.bak.4': b'{"version": 4}', 'settings.json.bak.5': b'{"version": 5}'}
+  
+  Common items:
+  {'settings.json': b'{"version": 0}',
+   'settings.json.bak.3': b'{"version": 3}',
+   'settings.json.bak.4': b'{"version": 4}',
+   'settings.json.bak.5': b'{"version": 5}'}
+  Differing items:
+  {'settings.json.bak.2': b'{"version": 1}'} != {'settings.json.bak.2': b'{"version": 2}'}
+  {'settings.json.bak.1': b'{"version": 0}'} != {'settings.json.bak.1': b'{"version": 1}'}
+  
+  Full diff:
+    {
+        'settings.json': b'{"version": 0}',
+  -     'settings.json.bak.1': b'{"version": 1}',
+  ?                                          ^
+  +     'settings.json.bak.1': b'{"version": 0}',
+  ?                                          ^
+  -     'settings.json.bak.2': b'{"version": 2}',
+  ?                                          ^
+  +     'settings.json.bak.2': b'{"version": 1}',
+  ?                                          ^
+        'settings.json.bak.3': b'{"version": 3}',
+        'settings.json.bak.4': b'{"version": 4}',
+        'settings.json.bak.5': b'{"version": 5}',
+    }
+FAILED tests/test_phase1_final_fix.py::test_secure_store_real_backup_replace_failure_never_partially_commits - assert {'credentials.dat': b'protected:{"provider":"old-secret-5"}', 'credentials.dat.bak.1': b'protected:{"provider":"old-secret-5"}', 'credentials.dat.bak.2': b'protected:{"provider":"old-secret-4"}', 'credentials.dat.bak.3': b'protected:{"provider":"old-secret-2"}', 'credentials.dat.bak.4': b'protected:{"provider":"old-secret-1"}', 'credentials.dat.bak.5': b'protected:{"provider":"old-secret-0"}'} == {'credentials.dat': b'protected:{"provider":"old-secret-5"}', 'credentials.dat.bak.1': b'protected:{"provider":"old-secret-4"}', 'credentials.dat.bak.2': b'protected:{"provider":"old-secret-3"}', 'credentials.dat.bak.3': b'protected:{"provider":"old-secret-2"}', 'credentials.dat.bak.4': b'protected:{"provider":"old-secret-1"}', 'credentials.dat.bak.5': b'protected:{"provider":"old-secret-0"}'}
+  
+  Common items:
+  {'credentials.dat': b'protected:{"provider":"old-secret-5"}',
+   'credentials.dat.bak.3': b'protected:{"provider":"old-secret-2"}',
+   'credentials.dat.bak.4': b'protected:{"provider":"old-secret-1"}',
+   'credentials.dat.bak.5': b'protected:{"provider":"old-secret-0"}'}
+  Differing items:
+  {'credentials.dat.bak.1': b'protected:{"provider":"old-secret-5"}'} != {'credentials.dat.bak.1': b'protected:{"provider":"old-secret-4"}'}
+  {'credentials.dat.bak.2': b'protected:{"provider":"old-secret-4"}'} != {'credentials.dat.bak.2': b'protected:{"provider":"old-secret-3"}'}
+  
+  Full diff:
+    {
+        'credentials.dat': b'protected:{"provider":"old-secret-5"}',
+  -     'credentials.dat.bak.1': b'protected:{"provider":"old-secret-4"}',
+  ?                                                                  ^
+  +     'credentials.dat.bak.1': b'protected:{"provider":"old-secret-5"}',
+  ?                                                                  ^
+  -     'credentials.dat.bak.2': b'protected:{"provider":"old-secret-3"}',
+  ?                                                                  ^
+  +     'credentials.dat.bak.2': b'protected:{"provider":"old-secret-4"}',
+  ?                                                                  ^
+        'credentials.dat.bak.3': b'protected:{"provider":"old-secret-2"}',
+        'credentials.dat.bak.4': b'protected:{"provider":"old-secret-1"}',
+        'credentials.dat.bak.5': b'protected:{"provider":"old-secret-0"}',
+    }
+====================== 2 failed, 55 deselected in 1.34s =======================

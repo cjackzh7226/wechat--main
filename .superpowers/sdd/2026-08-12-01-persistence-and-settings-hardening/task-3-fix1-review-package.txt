@@ -1,0 +1,1996 @@
+﻿Task 3 fix round 1 non-Git scoped package
+Open findings: legacy plaintext backups, literal custom credentials, legacy source callback, managed-mode disk persistence, incomplete persisted-field validator.
+
+
+===== CURRENT CUMULATIVE DIFF: secure_store.py =====
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-3-baseline\\__empty__" b/secure_store.py
+index e69de29..85ff61c 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-3-baseline\\__empty__"	
++++ b/secure_store.py
+@@ -0,0 +1,139 @@
++"""Windows DPAPI-backed credential persistence with durable backups."""
++
++from __future__ import annotations
++
++import json
++import os
++from pathlib import Path
++import tempfile
++from typing import Callable, Mapping
++
++from app_paths import credential_path
++
++
++ProtectCallable = Callable[[bytes], bytes]
++UnprotectCallable = Callable[[bytes], bytes]
++
++
++class CredentialStoreError(RuntimeError):
++    """Raised when an existing credential store has no readable copy."""
++
++
++def _dpapi_protect(payload: bytes) -> bytes:
++    import win32crypt
++
++    return win32crypt.CryptProtectData(
++        payload,
++        "WeChatStyleReplyAssistant credentials",
++        None,
++        None,
++        None,
++        0,
++    )
++
++
++def _dpapi_unprotect(blob: bytes) -> bytes:
++    import win32crypt
++
++    _description, payload = win32crypt.CryptUnprotectData(blob, None, None, None, 0)
++    return payload
++
++
++def _atomic_write_binary(path: Path, payload: bytes) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    descriptor, temp_name = tempfile.mkstemp(
++        prefix=f"{path.name}.",
++        suffix=".tmp",
++        dir=path.parent,
++    )
++    try:
++        with os.fdopen(descriptor, "wb") as stream:
++            stream.write(payload)
++            stream.flush()
++            os.fsync(stream.fileno())
++        os.replace(temp_name, path)
++    finally:
++        if os.path.exists(temp_name):
++            os.unlink(temp_name)
++
++
++class CredentialStore:
++    def __init__(
++        self,
++        path: Path | None = None,
++        *,
++        protect: ProtectCallable | None = None,
++        unprotect: UnprotectCallable | None = None,
++        backup_count: int = 5,
++    ) -> None:
++        self.path = Path(path) if path is not None else credential_path()
++        self._protect = protect or _dpapi_protect
++        self._unprotect = unprotect or _dpapi_unprotect
++        self.backup_count = backup_count
++
++    def _decode_blob(self, blob: bytes) -> dict[str, str]:
++        payload = self._unprotect(blob)
++        if not isinstance(payload, bytes):
++            raise TypeError("unprotect must return bytes")
++        value = json.loads(payload.decode("utf-8"))
++        if not isinstance(value, dict):
++            raise ValueError("credential payload must be an object")
++        if any(type(key) is not str or type(secret) is not str for key, secret in value.items()):
++            raise ValueError("credential names and values must be strings")
++        return value
++
++    def _candidates(self) -> list[Path]:
++        return [
++            self.path,
++            *(self.path.with_name(f"{self.path.name}.bak.{index}") for index in range(1, self.backup_count + 1)),
++        ]
++
++    def load(self) -> dict[str, str]:
++        existing = False
++        reasons: list[str] = []
++        for candidate in self._candidates():
++            try:
++                blob = candidate.read_bytes()
++                existing = True
++                return self._decode_blob(blob)
++            except FileNotFoundError:
++                continue
++            except Exception as error:
++                existing = True
++                reasons.append(f"{candidate.name}: {type(error).__name__}: {error}")
++        if not existing:
++            return {}
++        raise CredentialStoreError("No valid credential blob: " + "; ".join(reasons))
++
++    def _valid_snapshots(self) -> list[bytes]:
++        snapshots: list[bytes] = []
++        for candidate in self._candidates():
++            try:
++                blob = candidate.read_bytes()
++                self._decode_blob(blob)
++            except Exception:
++                continue
++            snapshots.append(blob)
++            if len(snapshots) == self.backup_count:
++                break
++        return snapshots
++
++    def save(self, keys: Mapping[str, str]) -> None:
++        values = dict(keys)
++        if any(type(key) is not str or type(secret) is not str for key, secret in values.items()):
++            raise ValueError("credential names and values must be strings")
++        payload = json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
++        protected = self._protect(payload)
++        if not isinstance(protected, bytes):
++            raise TypeError("protect must return bytes")
++
++        snapshots = self._valid_snapshots()
++        self.path.parent.mkdir(parents=True, exist_ok=True)
++        for index, snapshot in enumerate(snapshots, start=1):
++            _atomic_write_binary(
++                self.path.with_name(f"{self.path.name}.bak.{index}"),
++                snapshot,
++            )
++        for index in range(len(snapshots) + 1, self.backup_count + 1):
++            self.path.with_name(f"{self.path.name}.bak.{index}").unlink(missing_ok=True)
++        _atomic_write_binary(self.path, protected)
+
+===== CURRENT CUMULATIVE DIFF: settings.py =====
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-3-baseline\\settings.py" b/settings.py
+index 4517134..5a932c6 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-3-baseline\\settings.py"	
++++ b/settings.py
+@@ -1,153 +1,503 @@
+ from __future__ import annotations
+ 
+ import json
++import math
+ import os
+-from dataclasses import asdict, dataclass, field
++import re
++from dataclasses import dataclass, field
+ from pathlib import Path
++from typing import ClassVar
+ 
+-from app_paths import config_path
++from app_paths import config_path, credential_path
++from atomic_json import JsonDataError, atomic_write_json, load_json
++from secure_store import CredentialStore
++
++
++CONFIG_VERSION = 2
++MANAGED_MODES = {"off", "observe", "controlled", "full"}
++_VISION_PREFIX = "vision:"
++_FORBIDDEN_SETTINGS_KEY_FIELDS = ("api_key", "vision_api_key", "provider_api_keys")
++_PERSISTED_STRING_FIELDS = (
++    "api_provider",
++    "base_url",
++    "model",
++    "vision_provider",
++    "vision_base_url",
++    "vision_model",
++    "custom_headers",
++    "custom_body",
++    "custom_response_path",
++    "ocr_engine",
++    "wecom_account_name",
++)
++_QUOTED_TEMPLATE_FIELD = re.compile(r'"([^"\r\n]+)"\s*:\s*"([^"\r\n]*)"')
++_BEARER_VALUE = re.compile(r"(?i)\bbearer\s+([^\s\",]+|\{api_key\})")
++
++
++class SettingsValidationError(ValueError):
++    """Raised when settings do not match the formal versioned schema."""
+ 
+ 
+ def default_config_path() -> Path:
+     return config_path()
+ 
+ 
++def require_bool(data: dict[str, object], key: str, default: bool) -> bool:
++    value = data.get(key, default)
++    if type(value) is not bool:
++        raise SettingsValidationError(f"{key} must be a boolean")
++    return value
++
++
++def bounded_number(value: object, key: str, low: float, high: float) -> float:
++    if type(value) not in {int, float}:
++        raise SettingsValidationError(f"{key} must be a number")
++    number = float(value)
++    if not math.isfinite(number) or not low <= number <= high:
++        raise SettingsValidationError(f"{key} must be in range {low}..{high}")
++    return number
++
++
++def _bounded_integer(value: object, key: str, low: int, high: int) -> int:
++    bounded_number(value, key, low, high)
++    if type(value) is not int:
++        raise SettingsValidationError(f"{key} must be an integer")
++    return value
++
++
++def _string_value(data: dict[str, object], key: str, default: str) -> str:
++    value = data.get(key, default)
++    if type(value) is not str:
++        raise SettingsValidationError(f"{key} must be a string")
++    return value
++
++
++def _validate_credential_template(value: str, key: str) -> None:
++    for match in _QUOTED_TEMPLATE_FIELD.finditer(value):
++        field_name = match.group(1).casefold()
++        parts = re.findall(r"[a-z0-9]+", field_name)
++        compact = "".join(parts)
++        sensitive = compact in {"auth", "authorization", "apikey", "accesstoken", "bearertoken"} or any(
++            part in {"key", "token", "secret", "password", "credential"} for part in parts
++        )
++        if not sensitive:
++            continue
++        credential_value = match.group(2).strip()
++        if credential_value not in {"{api_key}", "Bearer {api_key}", "Basic {api_key}"}:
++            raise SettingsValidationError(f"{key} contains a literal credential")
++    for match in _BEARER_VALUE.finditer(value):
++        if match.group(1) != "{api_key}":
++            raise SettingsValidationError(f"{key} contains a literal bearer token")
++
++
+ @dataclass
+ class ChatArea:
+     x_left: float = 0.31
+     x_right: float = 0.98
+     y_top: float = 0.09
+     y_bottom: float = 0.91
+ 
++    def validate(self) -> None:
++        for key in ("x_left", "x_right", "y_top", "y_bottom"):
++            bounded_number(getattr(self, key), f"chat_area.{key}", 0.0, 1.0)
++        if self.x_left >= self.x_right:
++            raise SettingsValidationError("chat_area requires x_left < x_right")
++        if self.y_top >= self.y_bottom:
++            raise SettingsValidationError("chat_area requires y_top < y_bottom")
++
+ 
+ @dataclass
+ class AppSettings:
++    PERSISTED_FIELDS: ClassVar[tuple[str, ...]] = (
++        "config_version",
++        "api_provider",
++        "base_url",
++        "model",
++        "vision_provider",
++        "vision_base_url",
++        "vision_model",
++        "custom_headers",
++        "custom_body",
++        "custom_response_path",
++        "reply_source_mode",
++        "ocr_engine",
++        "training_mode",
++        "auto_recognize",
++        "managed_mode",
++        "managed_allowed_chats",
++        "enable_web_search",
++        "search_max_results",
++        "auto_reply_delay_seconds",
++        "poll_interval_ms",
++        "capture_cooldown_seconds",
++        "wecom_account_name",
++        "group_poll_interval_ms",
++        "chat_area",
++    )
++
+     config_path: Path = field(default_factory=default_config_path)
++    credential_store: object | None = field(default=None, repr=False)
++    config_version: int = CONFIG_VERSION
+     api_provider: str = "zhipu"
+     api_key: str = ""
+     provider_api_keys: dict[str, str] = field(default_factory=dict)
+     base_url: str = "https://open.bigmodel.cn/api/paas/v4"
+     model: str = "glm-4-flash-250414"
+     vision_provider: str = "zhipu"
+     vision_api_key: str = ""
+     vision_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
+     vision_model: str = "glm-4v-flash"
+     custom_headers: str = '{"Authorization":"Bearer {api_key}","Content-Type":"application/json"}'
+     custom_body: str = '{"model":"{model}","messages":{messages_json}}'
+     custom_response_path: str = "choices.0.message.content"
+-    reply_source_mode: str = "model_memory"
++    reply_source_mode: str = "knowledge_only"
+     ocr_engine: str = "rapidocr"
+     training_mode: bool = False
+     auto_recognize: bool = False
+-    managed_auto_reply: bool = False
+-    enable_web_search: bool = True
++    managed_mode: str = "off"
++    managed_allowed_chats: list[str] = field(default_factory=list)
++    enable_web_search: bool = False
+     search_max_results: int = 3
+     auto_reply_delay_seconds: float = 1.2
+     poll_interval_ms: int = 1200
+     capture_cooldown_seconds: float = 4.0
+-    # 群聊：当前企业微信账号用户名（用于 @ 识别与回复 @ 回去）
+     wecom_account_name: str = ""
+-    # 群聊 OCR 轮询间隔（比个人聊天快，@ 响应更及时）
+     group_poll_interval_ms: int = 800
+     chat_area: ChatArea = field(default_factory=ChatArea)
+ 
+-    def load(self) -> "AppSettings":
+-        if not self.config_path.exists():
+-            env_key = os.environ.get("TEXT_API_KEY", "") or os.environ.get("ZHIPU_API_KEY", "")
+-            if env_key:
+-                self.api_key = env_key
+-            return self
++    def __post_init__(self) -> None:
++        self.config_path = Path(self.config_path)
++        if self.credential_store is None:
++            default_path = default_config_path()
++            store_path = credential_path() if self.config_path == default_path else self.config_path.with_name("credentials.dat")
++            self.credential_store = CredentialStore(path=store_path)
++
++    @property
++    def managed_auto_reply(self) -> bool:
++        """Compatibility gate: only explicit full mode enables the legacy sender."""
++        return self.managed_mode == "full"
++
++    @managed_auto_reply.setter
++    def managed_auto_reply(self, value: bool) -> None:
++        if type(value) is not bool:
++            raise SettingsValidationError("managed_auto_reply must be a boolean")
++        self.managed_mode = "full" if value else "off"
++
++    def validate(self) -> None:
++        if type(self.config_version) is not int or self.config_version != CONFIG_VERSION:
++            raise SettingsValidationError(f"config_version must be {CONFIG_VERSION}")
++        for key in _PERSISTED_STRING_FIELDS:
++            if type(getattr(self, key)) is not str:
++                raise SettingsValidationError(f"{key} must be a string")
++        _validate_credential_template(self.custom_headers, "custom_headers")
++        _validate_credential_template(self.custom_body, "custom_body")
++        for key in ("training_mode", "auto_recognize", "enable_web_search"):
++            if type(getattr(self, key)) is not bool:
++                raise SettingsValidationError(f"{key} must be a boolean")
++        if self.reply_source_mode != "knowledge_only":
++            raise SettingsValidationError("reply_source_mode must be knowledge_only")
++        if self.enable_web_search is not False:
++            raise SettingsValidationError("enable_web_search must be false")
++        if self.managed_mode not in MANAGED_MODES:
++            raise SettingsValidationError("managed_mode is invalid")
++        if type(self.managed_allowed_chats) is not list or any(
++            type(chat) is not str or not chat.strip() for chat in self.managed_allowed_chats
++        ):
++            raise SettingsValidationError("managed_allowed_chats must be a list of non-empty strings")
++        if len(set(self.managed_allowed_chats)) != len(self.managed_allowed_chats):
++            raise SettingsValidationError("managed_allowed_chats must not contain duplicates")
++        self.search_max_results = _bounded_integer(self.search_max_results, "search_max_results", 1, 6)
++        self.poll_interval_ms = _bounded_integer(self.poll_interval_ms, "poll_interval_ms", 250, 10000)
++        self.group_poll_interval_ms = _bounded_integer(
++            self.group_poll_interval_ms,
++            "group_poll_interval_ms",
++            250,
++            10000,
++        )
++        self.auto_reply_delay_seconds = bounded_number(
++            self.auto_reply_delay_seconds,
++            "auto_reply_delay_seconds",
++            0.5,
++            10,
++        )
++        self.capture_cooldown_seconds = bounded_number(
++            self.capture_cooldown_seconds,
++            "capture_cooldown_seconds",
++            0.5,
++            60,
++        )
++        if not isinstance(self.chat_area, ChatArea):
++            raise SettingsValidationError("chat_area must be a ChatArea")
++        self.chat_area.validate()
++
++    def _validate_raw_document(self, data: object) -> None:
++        if not isinstance(data, dict):
++            raise SettingsValidationError("settings root must be an object")
++        version = data.get("config_version", 1)
++        if type(version) is not int or version not in {1, CONFIG_VERSION}:
++            raise SettingsValidationError("unsupported config_version")
++        for key in _PERSISTED_STRING_FIELDS:
++            value = _string_value(data, key, getattr(self, key))
++            if key in {"custom_headers", "custom_body"}:
++                _validate_credential_template(value, key)
++        if version == CONFIG_VERSION:
++            for forbidden in _FORBIDDEN_SETTINGS_KEY_FIELDS:
++                if forbidden in data:
++                    raise SettingsValidationError(f"{forbidden} is forbidden in version 2 settings")
++            if "managed_auto_reply" in data:
++                require_bool(data, "managed_auto_reply", False)
++                raise SettingsValidationError("managed_auto_reply is obsolete in version 2 settings")
++        for key in ("training_mode", "auto_recognize"):
++            require_bool(data, key, getattr(self, key))
++        if version == 1:
++            require_bool(data, "managed_auto_reply", False)
++        require_bool(data, "enable_web_search", False)
++        for key, low, high in (
++            ("search_max_results", 1, 6),
++            ("poll_interval_ms", 250, 10000),
++            ("group_poll_interval_ms", 250, 10000),
++        ):
++            _bounded_integer(data.get(key, getattr(self, key)), key, low, high)
++        for key, low, high in (
++            ("auto_reply_delay_seconds", 0.5, 10),
++            ("capture_cooldown_seconds", 0.5, 60),
++        ):
++            bounded_number(data.get(key, getattr(self, key)), key, low, high)
++        area = data.get("chat_area")
++        if area is not None:
++            if not isinstance(area, dict):
++                raise SettingsValidationError("chat_area must be an object")
++            values = {}
++            for key in ("x_left", "x_right", "y_top", "y_bottom"):
++                values[key] = bounded_number(area.get(key, getattr(self.chat_area, key)), f"chat_area.{key}", 0, 1)
++            ChatArea(**values).validate()
++        if version == CONFIG_VERSION:
++            mode = data.get("managed_mode", "off")
++            if type(mode) is not str or mode not in MANAGED_MODES:
++                raise SettingsValidationError("managed_mode is invalid")
++            allowed = data.get("managed_allowed_chats", [])
++            if type(allowed) is not list or any(type(chat) is not str or not chat.strip() for chat in allowed):
++                raise SettingsValidationError("managed_allowed_chats must be a list of non-empty strings")
++            if len(set(allowed)) != len(allowed):
++                raise SettingsValidationError("managed_allowed_chats must not contain duplicates")
++            if data.get("reply_source_mode", "knowledge_only") != "knowledge_only":
++                raise SettingsValidationError("reply_source_mode must be knowledge_only")
++            if data.get("enable_web_search", False) is not False:
++                raise SettingsValidationError("enable_web_search must be false")
+ 
+-        data = json.loads(self.config_path.read_text(encoding="utf-8"))
+-        self.api_provider = str(data.get("api_provider", self.api_provider))
+-        legacy_api_key = str(data.get("api_key", self.api_key))
+-        raw_provider_api_keys = data.get("provider_api_keys")
+-        if isinstance(raw_provider_api_keys, dict):
+-            self.provider_api_keys = {
+-                str(provider): str(api_key)
+-                for provider, api_key in raw_provider_api_keys.items()
+-                if provider is not None
+-            }
+-            # Keep older or manually edited files usable: the legacy field is
+-            # still the key for the currently selected provider.
+-            if self.api_provider not in self.provider_api_keys and legacy_api_key:
+-                self.provider_api_keys[self.api_provider] = legacy_api_key
+-            self.api_key = self.provider_api_keys.get(self.api_provider, "")
++    def _validate_redacted_document(self, data: object) -> None:
++        if not isinstance(data, dict):
++            raise SettingsValidationError("settings root must be an object")
++        for forbidden in _FORBIDDEN_SETTINGS_KEY_FIELDS:
++            if forbidden in data:
++                raise SettingsValidationError(f"{forbidden} is forbidden in persisted settings")
++        self._validate_raw_document(data)
++
++    def _load_document(self) -> dict[str, object]:
++        try:
++            return load_json(self.config_path, self._validate_raw_document).data
++        except JsonDataError:
++            try:
++                value = json.loads(self.config_path.read_text(encoding="utf-8"))
++            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
++                raise
++            self._validate_raw_document(value)
++            raise
++
++    def _apply_document(self, data: dict[str, object], *, legacy: bool) -> None:
++        for key in (
++            "api_provider",
++            "base_url",
++            "model",
++            "vision_provider",
++            "vision_base_url",
++            "vision_model",
++            "custom_headers",
++            "custom_body",
++            "custom_response_path",
++            "ocr_engine",
++            "wecom_account_name",
++        ):
++            setattr(self, key, _string_value(data, key, getattr(self, key)))
++        self.training_mode = require_bool(data, "training_mode", self.training_mode)
++        self.auto_recognize = require_bool(data, "auto_recognize", self.auto_recognize)
++        self.enable_web_search = False
++        self.reply_source_mode = "knowledge_only"
++        self.search_max_results = _bounded_integer(
++            data.get("search_max_results", self.search_max_results),
++            "search_max_results",
++            1,
++            6,
++        )
++        self.poll_interval_ms = _bounded_integer(
++            data.get("poll_interval_ms", self.poll_interval_ms),
++            "poll_interval_ms",
++            250,
++            10000,
++        )
++        self.group_poll_interval_ms = _bounded_integer(
++            data.get("group_poll_interval_ms", self.group_poll_interval_ms),
++            "group_poll_interval_ms",
++            250,
++            10000,
++        )
++        self.auto_reply_delay_seconds = bounded_number(
++            data.get("auto_reply_delay_seconds", self.auto_reply_delay_seconds),
++            "auto_reply_delay_seconds",
++            0.5,
++            10,
++        )
++        self.capture_cooldown_seconds = bounded_number(
++            data.get("capture_cooldown_seconds", self.capture_cooldown_seconds),
++            "capture_cooldown_seconds",
++            0.5,
++            60,
++        )
++        area = data.get("chat_area")
++        if isinstance(area, dict):
++            self.chat_area = ChatArea(
++                **{
++                    key: bounded_number(area.get(key, getattr(self.chat_area, key)), f"chat_area.{key}", 0, 1)
++                    for key in ("x_left", "x_right", "y_top", "y_bottom")
++                }
++            )
++        if legacy:
++            self.managed_mode = "observe" if require_bool(data, "managed_auto_reply", False) else "off"
++            self.managed_allowed_chats = []
+         else:
+-            # Migrate the original single-key format without losing the key.
+-            self.provider_api_keys = {}
+-            self.api_key = legacy_api_key
+-            if self.api_key:
+-                self.provider_api_keys[self.api_provider] = self.api_key
+-        self.base_url = str(data.get("base_url", self.base_url))
+-        self.model = str(data.get("model", self.model))
+-        self.vision_provider = str(data.get("vision_provider", self.vision_provider))
+-        self.vision_api_key = str(data.get("vision_api_key", self.vision_api_key))
+-        self.vision_base_url = str(data.get("vision_base_url", self.vision_base_url))
+-        self.vision_model = str(data.get("vision_model", self.vision_model))
++            self.managed_mode = _string_value(data, "managed_mode", "off")
++            self.managed_allowed_chats = list(data.get("managed_allowed_chats", []))
+         if self.api_provider == "zhipu" and self.model in {"glm-4.7-flash", "glm-4-flash"}:
+             self.model = "glm-4-flash-250414"
+         if self.api_provider == "deepseek" and self.model in {"deepseek-chat", "deepseek-reasoner"}:
+             self.model = "deepseek-v4-flash"
+-        self.custom_headers = str(data.get("custom_headers", self.custom_headers))
+-        self.custom_body = str(data.get("custom_body", self.custom_body))
+-        self.custom_response_path = str(data.get("custom_response_path", self.custom_response_path))
+-        self.reply_source_mode = str(data.get("reply_source_mode", self.reply_source_mode))
+-        if self.reply_source_mode not in {"model", "memory", "model_memory"}:
+-            self.reply_source_mode = "model_memory"
+-        self.ocr_engine = str(data.get("ocr_engine", self.ocr_engine))
+-        self.training_mode = bool(data.get("training_mode", self.training_mode))
+-        self.auto_recognize = bool(data.get("auto_recognize", self.auto_recognize))
+-        self.managed_auto_reply = bool(data.get("managed_auto_reply", self.managed_auto_reply))
+-        self.enable_web_search = bool(data.get("enable_web_search", self.enable_web_search))
+-        self.search_max_results = max(1, min(6, int(data.get("search_max_results", self.search_max_results))))
+-        self.auto_reply_delay_seconds = float(data.get("auto_reply_delay_seconds", self.auto_reply_delay_seconds))
+-        self.poll_interval_ms = int(data.get("poll_interval_ms", self.poll_interval_ms))
+-        self.capture_cooldown_seconds = float(
+-            data.get("capture_cooldown_seconds", self.capture_cooldown_seconds)
++        self.config_version = CONFIG_VERSION
++        self.validate()
++
++    def _apply_credentials(self, credentials: dict[str, str]) -> None:
++        self.provider_api_keys = {
++            provider: secret
++            for provider, secret in credentials.items()
++            if not provider.startswith(_VISION_PREFIX)
++        }
++        self.api_key = self.provider_api_keys.get(self.api_provider, "")
++        self.vision_api_key = credentials.get(f"{_VISION_PREFIX}{self.vision_provider}", "")
++
++    def _runtime_credentials(self) -> dict[str, str]:
++        values = {
++            str(provider): str(secret)
++            for provider, secret in self.provider_api_keys.items()
++            if provider and secret
++        }
++        if self.api_provider and self.api_key:
++            values[self.api_provider] = self.api_key
++        if self.vision_provider and self.vision_api_key:
++            values[f"{_VISION_PREFIX}{self.vision_provider}"] = self.vision_api_key
++        return values
++
++    def _legacy_credentials(self, data: dict[str, object]) -> dict[str, str]:
++        values: dict[str, str] = {}
++        raw_provider_keys = data.get("provider_api_keys", {})
++        if raw_provider_keys is not None and not isinstance(raw_provider_keys, dict):
++            raise SettingsValidationError("provider_api_keys must be an object")
++        if isinstance(raw_provider_keys, dict):
++            for provider, secret in raw_provider_keys.items():
++                if type(provider) is not str or type(secret) is not str:
++                    raise SettingsValidationError("provider_api_keys entries must be strings")
++                if provider and secret:
++                    values[provider] = secret
++        legacy_api_key = data.get("api_key", "")
++        legacy_vision_key = data.get("vision_api_key", "")
++        if type(legacy_api_key) is not str or type(legacy_vision_key) is not str:
++            raise SettingsValidationError("legacy API keys must be strings")
++        if legacy_api_key:
++            values[self.api_provider] = legacy_api_key
++        if legacy_vision_key:
++            values[f"{_VISION_PREFIX}{self.vision_provider}"] = legacy_vision_key
++        return values
++
++    def _settings_payload(self) -> dict[str, object]:
++        payload: dict[str, object] = {}
++        for key in self.PERSISTED_FIELDS:
++            value = getattr(self, key)
++            if key == "chat_area":
++                value = {
++                    "x_left": self.chat_area.x_left,
++                    "x_right": self.chat_area.x_right,
++                    "y_top": self.chat_area.y_top,
++                    "y_bottom": self.chat_area.y_bottom,
++                }
++            elif key == "managed_allowed_chats":
++                value = list(self.managed_allowed_chats)
++            payload[key] = value
++        return payload
++
++    def _persist_settings(self) -> None:
++        self.validate()
++        atomic_write_json(
++            self.config_path,
++            self._settings_payload(),
++            self._validate_redacted_document,
++            backup_count=5,
+         )
+-        self.wecom_account_name = str(data.get("wecom_account_name", self.wecom_account_name)).strip()
+-        self.group_poll_interval_ms = int(data.get("group_poll_interval_ms", self.group_poll_interval_ms))
+-        area = data.get("chat_area", {})
+-        if isinstance(area, dict):
+-            self.chat_area = ChatArea(
+-                x_left=float(area.get("x_left", self.chat_area.x_left)),
+-                x_right=float(area.get("x_right", self.chat_area.x_right)),
+-                y_top=float(area.get("y_top", self.chat_area.y_top)),
+-                y_bottom=float(area.get("y_bottom", self.chat_area.y_bottom)),
+-            )
+-            if self.chat_area.x_left < 0.25:
+-                self.chat_area.x_left = ChatArea().x_left
+-                self.chat_area.x_right = ChatArea().x_right
+-                self.chat_area.y_top = ChatArea().y_top
+-                self.chat_area.y_bottom = ChatArea().y_bottom
+-            if self.chat_area.y_bottom < 0.90:
+-                self.chat_area.y_bottom = ChatArea().y_bottom
++
++    def load(self) -> "AppSettings":
++        if not self.config_path.exists():
++            credentials = self.credential_store.load()
++            self._apply_credentials(credentials)
++            env_key = os.environ.get("TEXT_API_KEY", "") or os.environ.get("ZHIPU_API_KEY", "")
++            if env_key and not self.api_key:
++                self.api_key = env_key
++                self.provider_api_keys[self.api_provider] = env_key
++            return self
++
++        data = self._load_document()
++        legacy = data.get("config_version", 1) == 1
++        self._apply_document(data, legacy=legacy)
++        if not legacy:
++            self._apply_credentials(self.credential_store.load())
++            return self
++
++        try:
++            encrypted = self.credential_store.load()
++            plaintext = self._legacy_credentials(data)
++            encrypted.update(plaintext)
++            self._apply_credentials(encrypted)
++            if any(field in data for field in ("api_key", "vision_api_key", "provider_api_keys")):
++                self.credential_store.save(encrypted)
++                read_back = self.credential_store.load()
++                if read_back != encrypted:
++                    raise RuntimeError("credential read-back did not match encrypted write")
++                self._apply_credentials(read_back)
++            self._persist_settings()
++        except Exception:
++            self.managed_mode = "off"
+         return self
+ 
+     def get_provider_api_key(self, provider: str) -> str:
+         provider = str(provider or "")
+         if provider in self.provider_api_keys:
+             return self.provider_api_keys[provider]
+         if provider == self.api_provider:
+             return self.api_key
+         return ""
+ 
+     def set_provider_api_key(self, provider: str, api_key: str) -> None:
+         provider = str(provider or "")
+         if not provider:
+             return
+         value = str(api_key or "")
+         self.provider_api_keys[provider] = value
+         if provider == self.api_provider:
+             self.api_key = value
+ 
+     def save(self) -> None:
+-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+-        self.provider_api_keys[self.api_provider] = self.api_key
+-        data = asdict(self)
+-        data["config_path"] = str(self.config_path)
+-        self.config_path.write_text(
+-            json.dumps(data, ensure_ascii=False, indent=2),
+-            encoding="utf-8",
+-        )
++        self.validate()
++        credentials = self._runtime_credentials()
++        self.credential_store.save(credentials)
++        read_back = self.credential_store.load()
++        if read_back != credentials:
++            self.managed_mode = "off"
++            raise RuntimeError("credential read-back did not match encrypted write")
++        self._apply_credentials(read_back)
++        self._persist_settings()
+
+===== CURRENT CUMULATIVE DIFF: float_ui.py =====
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-3-baseline\\float_ui.py" b/float_ui.py
+index 0815162..d4826a0 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-3-baseline\\float_ui.py"	
++++ b/float_ui.py
+@@ -1,26 +1,45 @@
+ from __future__ import annotations
+ 
+ import threading
+ import tkinter as tk
+ import webbrowser
++import re
+ from tkinter import filedialog, messagebox, scrolledtext, ttk
+ from pathlib import Path
+ 
+ from llm_clients import provider_defaults, provider_labels, supported_provider_help
+ from settings import AppSettings
+ 
++
++SOURCE_MODE_OPTIONS = (("knowledge_only", "\u4ec5\u4f7f\u7528\u77e5\u8bc6\u5e93"),)
++MANAGED_MODE_OPTIONS = (
++    ("off", "\u5173\u95ed"),
++    ("observe", "\u89c2\u5bdf"),
++    ("controlled", "\u53d7\u63a7"),
++    ("full", "\u5168\u6258\u7ba1"),
++)
++
++
++def parse_managed_allowed_chats(value: str) -> list[str]:
++    chats: list[str] = []
++    for item in re.split(r"[,;\n\uff0c\uff1b]+", value):
++        chat = item.strip()
++        if chat and chat not in chats:
++            chats.append(chat)
++    return chats
++
+ TEXT = {
+     "title": "聊小智",
+     "waiting": "等待聊天窗口",
+     "starting": "\u542f\u52a8\u4e2d...",
+     "settings": "\u8bbe\u7f6e",
+     "context": "\u5f53\u524d\u804a\u5929\u4e0a\u4e0b\u6587",
+     "progress": "\u8bc6\u522b\u8fdb\u5ea6",
+     "recognize": "\u8bc6\u522b\u5f53\u524d\u804a\u5929",
+     "training": "\u8bad\u7ec3\u6a21\u5f0f  i",
+     "training_tip": "\u8bad\u7ec3\u6a21\u5f0f\uff1a\u6301\u7eed\u8bc6\u522b\u5f53\u524d\u804a\u5929\uff0c\u53ea\u5b66\u4e60\u4e0a\u4e0b\u6587\u548c\u4f60\u5b9e\u9645\u53d1\u51fa\u7684\u56de\u590d\uff0c\u7528\u6765\u589e\u52a0\u573a\u666f\u8bdd\u672f\u5e93\u3002\u4e0d\u4f1a\u81ea\u52a8\u53d1\u9001\u6d88\u606f\u3002",
+     "auto": "\u81ea\u52a8  i",
+     "managed": "\u5168\u6258\u7ba1  i",
+     "auto_tip": "自动识别：当你切换微信、企业微信或 QQ 聊天时，程序会自动截图 OCR 并生成候选回复。适合 OCR 稳定后再开。",
+     "managed_tip": "\u5168\u6258\u7ba1\uff1a\u81ea\u52a8\u8bc6\u522b\u5f53\u524d\u804a\u5929\uff0c\u751f\u62103\u6761\u5019\u9009\u540e\u5148\u5ba1\u6838\u4e0a\u4e0b\u6587\u548c\u8bed\u5883\uff0c\u518d\u53d1\u9001\u6700\u5408\u9002\u7684\u4e00\u6761\u3002\u5168\u6258\u7ba1\u53d1\u9001\u4e0d\u5199\u5165\u8bb0\u5fc6\uff0c\u5efa\u8bae OCR \u7a33\u5b9a\u540e\u518d\u5f00\u3002",
+     "replies": "\u5019\u9009\u56de\u590d",
+@@ -171,31 +190,31 @@ class ReplyAssistantUI:
+         if ico_icon_path.exists():
+             try:
+                 self.root.iconbitmap(str(ico_icon_path))
+             except Exception:
+                 pass
+         self.root.geometry("440x700+120+120")
+         self.root.minsize(410, 560)
+         self.root.attributes("-topmost", True)
+         self.root.configure(bg=COLORS["page"])
+ 
+         self.partner_var = tk.StringVar(value=TEXT["waiting"])
+         self.status_var = tk.StringVar(value=TEXT["starting"])
+         self.progress_var = tk.StringVar(value="")
+         self.training_var = tk.BooleanVar(value=self.settings.training_mode)
+         self.auto_var = tk.BooleanVar(value=self.settings.auto_recognize)
+-        self.managed_var = tk.BooleanVar(value=self.settings.managed_auto_reply)
++        self.managed_var = tk.StringVar(value=self.settings.managed_mode)
+         self.source_mode_var = tk.StringVar(value=self.settings.reply_source_mode)
+         self.source_mode_label_var = tk.StringVar(value=self._source_mode_short_label(self.settings.reply_source_mode))
+         self.selected_reply = ""
+         self.reply_cards: list[tk.Frame] = []
+ 
+         self._build()
+         self.root.bind("<Control-Return>", lambda _event: self._send_editor())
+         self.root.protocol("WM_DELETE_WINDOW", self._close_requested)
+ 
+     def _build(self) -> None:
+         outer = tk.Frame(self.root, bg=COLORS["page"], padx=11, pady=6)
+         outer.pack(fill="both", expand=True)
+ 
+         meta = tk.Frame(outer, bg=COLORS["page"])
+         meta.pack(fill="x", pady=(0, 4))
+@@ -296,41 +315,44 @@ class ReplyAssistantUI:
+             auto_group,
+             text=TEXT["auto"],
+             variable=self.auto_var,
+             command=self._toggle_auto,
+             bg=COLORS["page"],
+             fg=COLORS["muted"],
+             activebackground=COLORS["page"],
+             selectcolor=COLORS["panel"],
+             font=("Microsoft YaHei UI", 10),
+             padx=4,
+         )
+         auto.pack(side="left")
+         Tooltip(auto, TEXT["auto_tip"])
+         managed_group = tk.Frame(mode_row, bg=COLORS["page"])
+         managed_group.pack(side="right", padx=(4, 0))
+-        managed = tk.Checkbutton(
++        managed = tk.OptionMenu(
+             managed_group,
+-            text=TEXT["managed"],
+-            variable=self.managed_var,
+-            command=self._toggle_managed,
+-            bg=COLORS["page"],
++            self.managed_var,
++            *[mode for mode, _label in MANAGED_MODE_OPTIONS],
++            command=self._set_managed_mode,
++        )
++        managed.configure(
++            bg=COLORS["panel"],
+             fg=COLORS["muted"],
+             activebackground=COLORS["page"],
+-            selectcolor=COLORS["panel"],
+             font=("Microsoft YaHei UI", 10),
+-            padx=4,
++            relief="flat",
++            borderwidth=0,
++            highlightthickness=0,
+         )
+         managed.pack(side="left")
+         Tooltip(managed, TEXT["managed_tip"])
+ 
+         bottom = tk.Frame(outer, bg=COLORS["page"])
+         bottom.pack(side="bottom", fill="x", pady=(4, 0))
+         self._ghost_button(bottom, TEXT["copy"], self._copy_editor).pack(side="left", fill="x", expand=True, padx=(0, 8))
+         self._primary_button(bottom, TEXT["send"], self._send_editor).pack(side="right", fill="x", expand=True)
+ 
+         # 当前账号用户名输入行（群聊 @ 识别用）：模式行下方、上下文面板上方
+         username_row = tk.Frame(outer, bg=COLORS["page"])
+         username_row.pack(fill="x", pady=(0, 6))
+         tk.Label(
+             username_row,
+             text="当前账号用户名",
+@@ -534,89 +556,84 @@ class ReplyAssistantUI:
+         return label
+ 
+     def _toggle_auto(self) -> None:
+         enabled = bool(self.auto_var.get())
+         self.settings.auto_recognize = enabled
+         self.settings.save()
+         self.callbacks["auto_changed"](enabled)
+ 
+     def _toggle_training(self) -> None:
+         enabled = bool(self.training_var.get())
+         self.settings.training_mode = enabled
+         self.settings.save()
+         self.callbacks["training_changed"](enabled)
+ 
+     def _toggle_managed(self) -> None:
+-        enabled = bool(self.managed_var.get())
+-        self.settings.managed_auto_reply = enabled
+-        if enabled:
++        value = self.managed_var.get()
++        self._set_managed_mode("full" if value is True else "off" if value is False else str(value))
++
++    def _set_managed_mode(self, mode: str, *, persist: bool = True) -> None:
++        label_to_mode = {label: value for value, label in MANAGED_MODE_OPTIONS}
++        selected = label_to_mode.get(mode, mode)
++        if selected not in {value for value, _label in MANAGED_MODE_OPTIONS}:
++            selected = "off"
++        self.managed_var.set(selected)
++        self.settings.managed_mode = selected
++        if selected != "off":
+             self.settings.auto_recognize = True
+             self.auto_var.set(True)
+-        self.settings.save()
+-        self.callbacks["managed_changed"](enabled)
++        if "managed_mode_changed" in self.callbacks:
++            self.callbacks["managed_mode_changed"](selected)
++        elif "managed_changed" in self.callbacks:
++            self.callbacks["managed_changed"](selected == "full")
++        self.settings.managed_mode = selected
++        if selected != "off":
++            self.settings.auto_recognize = True
++            self.auto_var.set(True)
++        if persist:
++            self.settings.save()
+ 
+     def _toggle_source_mode(self) -> None:
+         mode = self._source_mode_value(self.source_mode_label_var.get())
+         self._set_source_mode(mode)
+ 
+     def _set_source_mode(self, mode: str) -> None:
+-        self.source_mode_var.set(mode)
+-        self.source_mode_label_var.set(self._source_mode_short_label(mode))
+-        self.settings.reply_source_mode = mode if mode in {"model", "memory", "model_memory"} else "model_memory"
++        del mode
++        self.source_mode_var.set("knowledge_only")
++        self.source_mode_label_var.set(self._source_mode_short_label("knowledge_only"))
++        self.settings.reply_source_mode = "knowledge_only"
+         self.settings.save()
+         self._refresh_source_menu()
+-        if "source_mode_changed" in self.callbacks:
+-            self.callbacks["source_mode_changed"](self.settings.reply_source_mode)
+ 
+     def _refresh_source_menu(self) -> None:
+         if not hasattr(self, "source_menu"):
+             return
+-        current = self.settings.reply_source_mode if self.settings.reply_source_mode in {"model", "memory", "model_memory"} else "model_memory"
+-        # 用户要求：移除"大模型"（model）选项，只保留"话术库"与"大模型+话术库"；
+-        # model 分支代码保留不影响主程序。
+-        items = [
+-            ("memory", TEXT["source_memory"]),
+-            ("model_memory", TEXT["source_model_memory"]),
+-        ]
++        current = "knowledge_only"
++        items = SOURCE_MODE_OPTIONS
+         self.source_menu.delete(0, "end")
+         for value, label in items:
+             prefix = "✓ " if value == current else "   "
+             self.source_menu.add_command(label=f"{prefix}{label}", command=lambda selected=value: self._set_source_mode(selected))
+ 
+     def _source_mode_label(self, value: str) -> str:
+-        return {
+-            "model": TEXT["source_model"],
+-            "memory": TEXT["source_memory"],
+-            "model_memory": TEXT["source_model_memory"],
+-        }.get(value, TEXT["source_model_memory"])
++        return dict(SOURCE_MODE_OPTIONS).get(value, dict(SOURCE_MODE_OPTIONS)["knowledge_only"])
+ 
+     def _source_mode_short_label(self, value: str) -> str:
+-        return {
+-            "model": TEXT["source_model_short"],
+-            "memory": TEXT["source_memory_short"],
+-            "model_memory": TEXT["source_model_memory_short"],
+-        }.get(value, TEXT["source_model_memory_short"])
++        return self._source_mode_label(value)
+ 
+     def _source_mode_value(self, label: str) -> str:
+-        return {
+-            TEXT["source_model"]: "model",
+-            TEXT["source_memory"]: "memory",
+-            TEXT["source_model_memory"]: "model_memory",
+-            TEXT["source_model_short"]: "model",
+-            TEXT["source_memory_short"]: "memory",
+-            TEXT["source_model_memory_short"]: "model_memory",
+-        }.get(label, "model_memory")
++        return {option_label: value for value, option_label in SOURCE_MODE_OPTIONS}.get(label, "knowledge_only")
+ 
+     def set_status(self, text: str) -> None:
+         self.status_var.set(text)
+ 
+     def _save_account_name(self, _event=None) -> None:
+         """保存当前账号用户名（修改即存，不覆盖已填值）。"""
+         try:
+             name = self.account_name_var.get().strip()
+             if name != self.settings.wecom_account_name:
+                 self.settings.wecom_account_name = name
+                 self.settings.save()
+                 if name:
+                     self.set_status(f"已保存当前账号用户名：{name}")
+         except Exception:
+             pass
+@@ -1109,53 +1126,84 @@ class ReplyAssistantUI:
+         body_editor = scrolledtext.ScrolledText(
+             api_detail_frame,
+             height=4,
+             wrap="word",
+             relief="flat",
+             borderwidth=0,
+             bg=COLORS["panel"],
+             fg=COLORS["text"],
+             font=("Microsoft YaHei UI", 9),
+             padx=8,
+             pady=6,
+         )
+         body_editor.insert("1.0", self.settings.custom_body)
+         body_editor.pack(fill="x", pady=(3, 10))
+ 
+-        web_search_var = tk.BooleanVar(value=bool(getattr(self.settings, "enable_web_search", True)))
+-        web_search_check = tk.Checkbutton(
+-            api_detail_frame,
+-            text=TEXT["web_search"],
+-            variable=web_search_var,
+-            bg=COLORS["page"],
+-            fg=COLORS["text"],
+-            selectcolor=COLORS["page"],
+-            activebackground=COLORS["page"],
+-            activeforeground=COLORS["text"],
+-            font=("Microsoft YaHei UI", 10),
+-        )
+-        web_search_check.pack(anchor="w", pady=(0, 2))
++        web_search_var = tk.BooleanVar(value=False)
+         tk.Label(
+             api_detail_frame,
+-            text=TEXT["web_search_tip"],
++            text="\u6b63\u5f0f\u6a21\u5f0f\u7981\u7528\u8054\u7f51\u641c\u7d22\uff0c\u56de\u590d\u4ec5\u6765\u81ea\u672c\u5730\u77e5\u8bc6\u5e93\u3002",
+             bg=COLORS["page"],
+             fg=COLORS["muted"],
+             justify="left",
+             wraplength=560,
+             anchor="w",
+         ).pack(fill="x", pady=(0, 10))
+ 
++        managed_mode_var = tk.StringVar(value=self.settings.managed_mode)
++        tk.Label(
++            frame,
++            text="\u6258\u7ba1\u6a21\u5f0f",
++            bg=COLORS["page"],
++            fg=COLORS["muted"],
++            anchor="w",
++        ).pack(fill="x")
++        managed_mode_menu = tk.OptionMenu(
++            frame,
++            managed_mode_var,
++            *[mode for mode, _label in MANAGED_MODE_OPTIONS],
++        )
++        managed_mode_menu.configure(
++            bg=COLORS["panel"],
++            fg=COLORS["text"],
++            relief="flat",
++            borderwidth=0,
++            highlightthickness=0,
++        )
++        managed_mode_menu.pack(fill="x", ipady=3, pady=(3, 8))
++        tk.Label(
++            frame,
++            text="\u53d7\u63a7\u6a21\u5f0f\u5141\u8bb8\u7684\u804a\u5929\uff08\u6bcf\u884c\u6216\u9017\u53f7\u5206\u9694\uff09",
++            bg=COLORS["page"],
++            fg=COLORS["muted"],
++            anchor="w",
++        ).pack(fill="x")
++        managed_allowlist_editor = scrolledtext.ScrolledText(
++            frame,
++            height=3,
++            wrap="word",
++            relief="flat",
++            borderwidth=0,
++            bg=COLORS["panel"],
++            fg=COLORS["text"],
++            font=("Microsoft YaHei UI", 9),
++            padx=8,
++            pady=6,
++        )
++        managed_allowlist_editor.insert("1.0", "\n".join(self.settings.managed_allowed_chats))
++        managed_allowlist_editor.pack(fill="x", pady=(3, 10))
++
+         vision_detail_visible = tk.BooleanVar(value=False)
+         vision_detail_frame = tk.Frame(frame, bg=COLORS["page"])
+ 
+         def vision_summary() -> str:
+             provider = vision_provider_var.get() or "未选择"
+             model = vision_model_var.get().strip() or "未填模型"
+             key_state = "Key已填" if vision_api_var.get().strip() else "Key未填"
+             return f"{provider} / {model} / {key_state}"
+ 
+         def refresh_vision_summary() -> None:
+             vision_summary_var.set(vision_summary())
+             vision_arrow_var.set("▲" if vision_detail_visible.get() else "▼")
+ 
+         def toggle_vision_detail() -> None:
+             if vision_detail_visible.get():
+@@ -1353,31 +1401,31 @@ class ReplyAssistantUI:
+                     ("Office files", "*.docx *.xlsx *.xls"),
+                     ("Text files", "*.txt *.md *.csv *.tsv *.json *.html *.htm"),
+                 ],
+             )
+             if not source_path:
+                 return
+             try:
+                 selected_provider = provider_key_by_label.get(provider_var.get(), self.settings.api_provider)
+                 self.settings.api_provider = selected_provider
+                 self.settings.set_provider_api_key(selected_provider, api_var.get().strip())
+                 self.settings.base_url = base_var.get().strip()
+                 self.settings.model = model_var.get().strip() or self.settings.model
+                 self.settings.custom_headers = headers_var.get().strip()
+                 self.settings.custom_body = body_editor.get("1.0", "end").strip()
+                 self.settings.custom_response_path = response_path_var.get().strip()
+-                self.settings.enable_web_search = web_search_var.get()
++                self.settings.enable_web_search = False
+                 self.settings.save()
+                 result = self.callbacks["analyze_sop_training"](source_path)
+             except Exception as exc:
+                 messagebox.showerror(TEXT["import_failed"], str(exc), parent=parent_window or dialog)
+                 return
+             self.set_status(result.splitlines()[0] if result else TEXT["phrasebook_saved"])
+             if self._open_sop_html_report(parent_window or dialog):
+                 if body_widget is not None:
+                     body_widget.configure(state="normal")
+                     body_widget.delete("1.0", "end")
+                     body_widget.insert("1.0", "已生成话术流程分析 HTML 报告，并在浏览器中打开。")
+                     body_widget.configure(state="disabled")
+                 return
+             if body_widget is not None:
+                 body_widget.configure(state="normal")
+@@ -1420,31 +1468,35 @@ class ReplyAssistantUI:
+             selected_provider = provider_key_by_label.get(provider_var.get(), self.settings.api_provider)
+             self.settings.api_provider = selected_provider
+             self.settings.set_provider_api_key(selected_provider, api_var.get().strip())
+             self.settings.base_url = base_var.get().strip()
+             self.settings.model = model_var.get().strip() or self.settings.model
+             self.settings.vision_provider = vision_key_by_label.get(
+                 vision_provider_var.get(),
+                 self.settings.vision_provider,
+             )
+             self.settings.vision_api_key = vision_api_var.get().strip()
+             self.settings.vision_base_url = vision_base_var.get().strip()
+             self.settings.vision_model = vision_model_var.get().strip() or self.settings.vision_model
+             self.settings.custom_headers = headers_var.get().strip()
+             self.settings.custom_body = body_editor.get("1.0", "end").strip()
+             self.settings.custom_response_path = response_path_var.get().strip()
+-            self.settings.enable_web_search = web_search_var.get()
++            self.settings.enable_web_search = False
++            self.settings.managed_allowed_chats = parse_managed_allowed_chats(
++                managed_allowlist_editor.get("1.0", "end")
++            )
++            self._set_managed_mode(managed_mode_var.get(), persist=False)
+             self.settings.save()
+             self.set_status(TEXT["saved"])
+             dialog.destroy()
+ 
+         self._primary_button(button_row, TEXT["save"], save, width=8).pack(side="right")
+ 
+     def _show_sop_document_dialog(self, parent: tk.Toplevel, document: str, analyze_current_callback=None, import_analyze_callback=None) -> None:
+         dialog = tk.Toplevel(parent)
+         dialog.title(TEXT["analyze_sop"])
+         dialog.geometry("760x620")
+         dialog.minsize(620, 460)
+         dialog.configure(bg=COLORS["page"])
+         dialog.attributes("-topmost", True)
+         dialog.transient(parent)
+ 
+
+===== CURRENT CUMULATIVE DIFF: tests\test_persistence.py =====
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-3-baseline\\tests__test_persistence.py" "b/tests\\test_persistence.py"
+index 07013e2..ab903cb 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-3-baseline\\tests__test_persistence.py"	
++++ "b/tests\\test_persistence.py"
+@@ -1,22 +1,42 @@
+ import json
++import os
+ import sys
++from pathlib import Path
+ 
+ import pytest
+ 
+ import app_paths
+ from atomic_json import JsonDataError, atomic_write_json, load_json
++import settings as settings_module
++
++
++class FakeCredentialStore:
++    def __init__(self, initial=None, *, save_error=None, load_error=None):
++        self.values = dict(initial or {})
++        self.save_error = save_error
++        self.load_error = load_error
++
++    def load(self):
++        if self.load_error is not None:
++            raise self.load_error
++        return dict(self.values)
++
++    def save(self, keys):
++        if self.save_error is not None:
++            raise self.save_error
++        self.values = dict(keys)
+ 
+ 
+ def test_source_and_frozen_use_same_explicit_data_root(tmp_path, monkeypatch):
+     monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(tmp_path))
+     assert app_paths.config_path() == tmp_path / "settings.json"
+     assert app_paths.memory_path() == tmp_path / "memory.json"
+     assert app_paths.vector_path() == tmp_path / "vector_memory.json"
+ 
+ 
+ def test_default_root_is_appdata_even_when_frozen(tmp_path, monkeypatch):
+     monkeypatch.delenv("WECHAT_ASSISTANT_DATA_DIR", raising=False)
+     monkeypatch.setenv("APPDATA", str(tmp_path))
+     monkeypatch.setattr(sys, "frozen", True, raising=False)
+     assert app_paths.data_dir() == tmp_path / "WeChatStyleReplyAssistant"
+ 
+@@ -113,15 +133,353 @@ def test_atomic_replace_failure_leaves_original_primary_readable(tmp_path, monke
+     with pytest.raises(OSError, match="simulated replace failure"):
+         atomic_write_json(path, {"config_version": 3}, _require_numeric_config_version)
+ 
+     assert json.loads(path.read_text(encoding="utf-8")) == {"config_version": 2}
+ 
+ 
+ def test_load_json_all_invalid_candidates_raises_without_creating_file(tmp_path):
+     path = tmp_path / "memory.json"
+     (tmp_path / "memory.json.bak.1").write_text("[]", encoding="utf-8")
+ 
+     with pytest.raises(JsonDataError) as error:
+         load_json(path, _require_examples_dict)
+ 
+     assert not path.exists()
+     assert "memory.json" in str(error.value)
++
++
++@pytest.mark.parametrize("field", ["managed_auto_reply", "auto_recognize", "training_mode"])
++def test_string_false_is_rejected(field, tmp_path):
++    path = tmp_path / "settings.json"
++    path.write_text(json.dumps({"config_version": 2, field: "false"}), encoding="utf-8")
++
++    with pytest.raises(settings_module.SettingsValidationError):
++        settings_module.AppSettings(
++            config_path=path,
++            credential_store=FakeCredentialStore(),
++        ).load()
++
++
++@pytest.mark.parametrize(
++    ("field", "low", "high"),
++    [
++        ("poll_interval_ms", 250, 10000),
++        ("group_poll_interval_ms", 250, 10000),
++        ("auto_reply_delay_seconds", 0.5, 10),
++        ("capture_cooldown_seconds", 0.5, 60),
++        ("search_max_results", 1, 6),
++    ],
++)
++def test_settings_numeric_bounds_are_inclusive_and_reject_outside_values(field, low, high, tmp_path):
++    for accepted in (low, high):
++        path = tmp_path / f"{field}-{accepted}.json"
++        path.write_text(json.dumps({"config_version": 2, field: accepted}), encoding="utf-8")
++        loaded = settings_module.AppSettings(
++            config_path=path,
++            credential_store=FakeCredentialStore(),
++        ).load()
++        assert getattr(loaded, field) == accepted
++
++    for rejected in (low - 0.01, high + 0.01, "1", True):
++        path = tmp_path / f"{field}-invalid-{rejected}.json"
++        path.write_text(json.dumps({"config_version": 2, field: rejected}), encoding="utf-8")
++        with pytest.raises(settings_module.SettingsValidationError):
++            settings_module.AppSettings(
++                config_path=path,
++                credential_store=FakeCredentialStore(),
++            ).load()
++
++
++@pytest.mark.parametrize(
++    "area",
++    [
++        {"x_left": -0.01, "x_right": 0.9, "y_top": 0.1, "y_bottom": 0.9},
++        {"x_left": 0.1, "x_right": 1.01, "y_top": 0.1, "y_bottom": 0.9},
++        {"x_left": 0.4, "x_right": 0.4, "y_top": 0.1, "y_bottom": 0.9},
++        {"x_left": 0.7, "x_right": 0.4, "y_top": 0.1, "y_bottom": 0.9},
++        {"x_left": 0.1, "x_right": 0.9, "y_top": 0.9, "y_bottom": 0.9},
++        {"x_left": 0.1, "x_right": 0.9, "y_top": 0.95, "y_bottom": 0.9},
++        {"x_left": "0.1", "x_right": 0.9, "y_top": 0.1, "y_bottom": 0.9},
++    ],
++)
++def test_chat_area_requires_numeric_unit_coordinates_in_visual_order(area, tmp_path):
++    path = tmp_path / "settings.json"
++    path.write_text(json.dumps({"config_version": 2, "chat_area": area}), encoding="utf-8")
++
++    with pytest.raises(settings_module.SettingsValidationError):
++        settings_module.AppSettings(
++            config_path=path,
++            credential_store=FakeCredentialStore(),
++        ).load()
++
++
++def test_formal_settings_forbid_generation_and_search():
++    with pytest.raises(settings_module.SettingsValidationError):
++        settings_module.AppSettings(reply_source_mode="model").validate()
++    with pytest.raises(settings_module.SettingsValidationError):
++        settings_module.AppSettings(enable_web_search=True).validate()
++
++
++def test_legacy_managed_true_migrates_only_to_observe(tmp_path):
++    path = tmp_path / "settings.json"
++    path.write_text(json.dumps({"managed_auto_reply": True}), encoding="utf-8")
++
++    loaded = settings_module.AppSettings(
++        config_path=path,
++        credential_store=FakeCredentialStore(),
++    ).load()
++
++    assert loaded.managed_mode == "observe"
++    assert loaded.managed_auto_reply is False
++    persisted = json.loads(path.read_text(encoding="utf-8"))
++    assert persisted["config_version"] == 2
++    assert persisted["managed_mode"] == "observe"
++    assert "managed_auto_reply" not in persisted
++
++
++def test_credential_store_round_trip_uses_injected_protection(tmp_path):
++    from secure_store import CredentialStore
++
++    def protect(payload):
++        return b"protected:" + payload[::-1]
++
++    def unprotect(blob):
++        assert blob.startswith(b"protected:")
++        return blob[len(b"protected:") :][::-1]
++
++    path = tmp_path / "credentials.dat"
++    store = CredentialStore(path=path, protect=protect, unprotect=unprotect)
++    store.save({"deepseek": "secret-value", "vision:zhipu": "vision-secret"})
++
++    assert store.load() == {"deepseek": "secret-value", "vision:zhipu": "vision-secret"}
++    assert b"secret-value" not in path.read_bytes()
++
++
++def test_credential_store_binary_write_fsyncs_replaces_and_keeps_five_valid_backups(tmp_path, monkeypatch):
++    import secure_store
++
++    path = tmp_path / "credentials.dat"
++    store = secure_store.CredentialStore(
++        path=path,
++        protect=lambda payload: b"sealed:" + payload,
++        unprotect=lambda blob: blob.removeprefix(b"sealed:"),
++    )
++    fsync_calls = []
++    replace_destinations = []
++    real_fsync = secure_store.os.fsync
++    real_replace = secure_store.os.replace
++
++    def track_fsync(fd):
++        fsync_calls.append(fd)
++        return real_fsync(fd)
++
++    def track_replace(source, destination):
++        assert Path(source).parent == Path(destination).parent == tmp_path
++        replace_destinations.append(Path(destination).name)
++        return real_replace(source, destination)
++
++    monkeypatch.setattr(secure_store.os, "fsync", track_fsync)
++    monkeypatch.setattr(secure_store.os, "replace", track_replace)
++    for value in range(7):
++        store.save({"deepseek": f"secret-{value}"})
++
++    assert fsync_calls
++    assert "credentials.dat" in replace_destinations
++    assert [
++        secure_store.CredentialStore(
++            path=tmp_path / f"credentials.dat.bak.{index}",
++            protect=lambda payload: b"sealed:" + payload,
++            unprotect=lambda blob: blob.removeprefix(b"sealed:"),
++        ).load()["deepseek"]
++        for index in range(1, 6)
++    ] == ["secret-5", "secret-4", "secret-3", "secret-2", "secret-1"]
++
++
++def test_credential_store_skips_undecryptable_primary_and_loads_valid_backup(tmp_path):
++    from secure_store import CredentialStore
++
++    def unprotect(blob):
++        if not blob.startswith(b"sealed:"):
++            raise RuntimeError("simulated DPAPI rejection")
++        return blob.removeprefix(b"sealed:")
++
++    path = tmp_path / "credentials.dat"
++    store = CredentialStore(
++        path=path,
++        protect=lambda payload: b"sealed:" + payload,
++        unprotect=unprotect,
++    )
++    store.save({"deepseek": "older"})
++    store.save({"deepseek": "current"})
++    path.write_bytes(b"not-a-dpapi-blob")
++
++    assert store.load() == {"deepseek": "older"}
++
++
++def test_legacy_plaintext_keys_are_removed_only_after_encrypted_round_trip(tmp_path):
++    path = tmp_path / "settings.json"
++    path.write_text(
++        json.dumps(
++            {
++                "api_provider": "deepseek",
++                "api_key": "legacy-text",
++                "provider_api_keys": {"zhipu": "legacy-zhipu"},
++                "vision_provider": "zhipu",
++                "vision_api_key": "legacy-vision",
++            }
++        ),
++        encoding="utf-8",
++    )
++    credential_store = FakeCredentialStore()
++
++    loaded = settings_module.AppSettings(
++        config_path=path,
++        credential_store=credential_store,
++    ).load()
++
++    assert loaded.get_provider_api_key("deepseek") == "legacy-text"
++    assert loaded.get_provider_api_key("zhipu") == "legacy-zhipu"
++    assert loaded.vision_api_key == "legacy-vision"
++    assert credential_store.values == {
++        "deepseek": "legacy-text",
++        "zhipu": "legacy-zhipu",
++        "vision:zhipu": "legacy-vision",
++    }
++    persisted = path.read_text(encoding="utf-8")
++    assert "legacy-text" not in persisted
++    assert "legacy-zhipu" not in persisted
++    assert "legacy-vision" not in persisted
++    persisted_fields = json.loads(persisted)
++    assert "api_key" not in persisted_fields
++    assert "provider_api_keys" not in persisted_fields
++    assert "vision_api_key" not in persisted_fields
++
++
++def test_legacy_migration_purges_plaintext_keys_from_primary_and_all_settings_backups(tmp_path):
++    path = tmp_path / "settings.json"
++    path.write_text(
++        json.dumps({"api_provider": "deepseek", "api_key": "primary-secret"}),
++        encoding="utf-8",
++    )
++    (tmp_path / "settings.json.bak.1").write_text(
++        json.dumps({"provider_api_keys": {"zhipu": "backup-provider-secret"}}),
++        encoding="utf-8",
++    )
++    (tmp_path / "settings.json.bak.2").write_text(
++        json.dumps({"vision_api_key": "backup-vision-secret"}),
++        encoding="utf-8",
++    )
++
++    settings_module.AppSettings(
++        config_path=path,
++        credential_store=FakeCredentialStore(),
++    ).load()
++
++    candidates = [path, *sorted(tmp_path.glob("settings.json.bak.*"))]
++    assert candidates
++    for candidate in candidates:
++        raw = candidate.read_text(encoding="utf-8")
++        document = json.loads(raw)
++        assert not {"api_key", "vision_api_key", "provider_api_keys"} & document.keys()
++        assert "primary-secret" not in raw
++        assert "backup-provider-secret" not in raw
++        assert "backup-vision-secret" not in raw
++
++
++@pytest.mark.parametrize(
++    ("field", "literal_value"),
++    [
++        ("custom_headers", '{"Authorization":"Bearer sk-live-literal"}'),
++        ("custom_headers", '{"X-Token":"literal-header-token"}'),
++        ("custom_body", '{"token":"literal-body-token","prompt":"{prompt}"}'),
++        ("custom_body", '{"auth":"literal-body-secret","prompt":"{prompt}"}'),
++        ("custom_body", '{"api_key":"literal-body-key","prompt":"{prompt}"}'),
++    ],
++)
++def test_settings_reject_literal_credentials_in_custom_request_templates(field, literal_value, tmp_path):
++    settings = settings_module.AppSettings(
++        config_path=tmp_path / "settings.json",
++        credential_store=FakeCredentialStore(),
++    )
++    setattr(settings, field, literal_value)
++
++    with pytest.raises(settings_module.SettingsValidationError):
++        settings.save()
++
++    assert not settings.config_path.exists()
++
++
++def test_settings_allow_api_key_placeholder_in_custom_request_templates(tmp_path):
++    path = tmp_path / "settings.json"
++    settings = settings_module.AppSettings(config_path=path, credential_store=FakeCredentialStore())
++    settings.custom_headers = '{"Authorization":"Bearer {api_key}","X-Key":"{api_key}"}'
++    settings.custom_body = '{"model":"{model}","prompt":"{prompt}","credential":"{api_key}"}'
++
++    settings.save()
++    loaded = settings_module.AppSettings(
++        config_path=path,
++        credential_store=FakeCredentialStore(),
++    ).load()
++
++    assert loaded.custom_headers == settings.custom_headers
++    assert loaded.custom_body == settings.custom_body
++
++
++def test_settings_load_uses_valid_backup_when_primary_persisted_string_type_is_corrupt(tmp_path):
++    path = tmp_path / "settings.json"
++    path.write_text(
++        json.dumps({"config_version": 2, "api_provider": ["not", "a", "string"]}),
++        encoding="utf-8",
++    )
++    (tmp_path / "settings.json.bak.1").write_text(
++        json.dumps({"config_version": 2, "api_provider": "deepseek", "model": "backup-model"}),
++        encoding="utf-8",
++    )
++
++    loaded = settings_module.AppSettings(
++        config_path=path,
++        credential_store=FakeCredentialStore(),
++    ).load()
++
++    assert loaded.api_provider == "deepseek"
++    assert loaded.model == "backup-model"
++
++
++@pytest.mark.parametrize("failure_mode", ["save", "load"])
++def test_failed_legacy_credential_migration_preserves_original_bytes_and_forces_managed_off(
++    failure_mode, tmp_path
++):
++    path = tmp_path / "settings.json"
++    original = b'{\n  "api_key": "legacy-secret",\n  "managed_auto_reply": true\n}\n'
++    path.write_bytes(original)
++    credential_store = FakeCredentialStore(
++        save_error=RuntimeError("encrypt failed") if failure_mode == "save" else None,
++        load_error=RuntimeError("read-back failed") if failure_mode == "load" else None,
++    )
++
++    loaded = settings_module.AppSettings(
++        config_path=path,
++        credential_store=credential_store,
++    ).load()
++
++    assert path.read_bytes() == original
++    assert loaded.managed_mode == "off"
++    assert loaded.managed_auto_reply is False
++
++
++def test_save_uses_explicit_allowlist_without_runtime_objects_or_key_fields(tmp_path):
++    path = tmp_path / "settings.json"
++    credential_store = FakeCredentialStore()
++    settings = settings_module.AppSettings(config_path=path, credential_store=credential_store)
++    settings.set_provider_api_key("deepseek", "secret-value")
++    settings.vision_api_key = "vision-value"
++    settings.runtime_socket = object()
++    settings.save()
++
++    saved = json.loads(path.read_text(encoding="utf-8"))
++    assert saved["config_version"] == 2
++    assert "config_path" not in saved
++    assert "credential_store" not in saved
++    assert "runtime_socket" not in saved
++    assert not any("key" in field.casefold() for field in saved)
++    assert "secret-value" not in path.read_text(encoding="utf-8")
++    assert "vision-value" not in path.read_text(encoding="utf-8")
+
+===== CURRENT CUMULATIVE DIFF: tests\test_core.py =====
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-3-baseline\\tests__test_core.py" "b/tests\\test_core.py"
+index 34275f4..c0d4dc8 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-3-baseline\\tests__test_core.py"	
++++ "b/tests\\test_core.py"
+@@ -2977,30 +2977,204 @@ class VisibleContentTests(unittest.TestCase):
+                             )
+                         }
+                     }
+                 ]
+             }
+             post.return_value.raise_for_status.return_value = None
+ 
+             visible = VisibleContentAnalyzer(settings).analyze("", image=image)
+ 
+         self.assertNotIn(summary, visible.summary)
+         self.assertTrue(visible.should_skip_reply)
+         self.assertEqual(visible.confidence, "low")
+ 
+ 
+ class SettingsTests(unittest.TestCase):
++    def test_formal_ui_exposes_only_knowledge_source_and_all_managed_modes(self):
++        import float_ui
++
++        self.assertEqual([value for value, _label in float_ui.SOURCE_MODE_OPTIONS], ["knowledge_only"])
++        self.assertEqual(
++            [value for value, _label in float_ui.MANAGED_MODE_OPTIONS],
++            ["off", "observe", "controlled", "full"],
++        )
++
++    def test_managed_allowlist_parser_deduplicates_in_display_order(self):
++        import float_ui
++
++        self.assertEqual(
++            float_ui.parse_managed_allowed_chats("客户甲\n客户乙, 客户甲；客户丙"),
++            ["客户甲", "客户乙", "客户丙"],
++        )
++
++    def test_managed_mode_callback_preserves_new_mode_with_legacy_boolean_callback(self):
++        from float_ui import ReplyAssistantUI
++
++        class FakeVar:
++            def __init__(self, value=None):
++                self.value = value
++
++            def get(self):
++                return self.value
++
++            def set(self, value):
++                self.value = value
++
++        callback_values = []
++        ui = ReplyAssistantUI.__new__(ReplyAssistantUI)
++        ui.settings = AppSettings()
++        ui.managed_var = FakeVar("off")
++        ui.auto_var = FakeVar(False)
++        ui.callbacks = {"managed_changed": callback_values.append}
++
++        ui._set_managed_mode("controlled")
++
++        self.assertEqual(ui.settings.managed_mode, "controlled")
++        self.assertTrue(ui.settings.auto_recognize)
++        self.assertEqual(callback_values, [False])
++
++    def test_source_mode_callback_cannot_enable_free_generation(self):
++        from float_ui import ReplyAssistantUI
++
++        class FakeVar:
++            def __init__(self):
++                self.value = None
++
++            def set(self, value):
++                self.value = value
++
++        callback_values = []
++        ui = ReplyAssistantUI.__new__(ReplyAssistantUI)
++        ui.settings = AppSettings()
++        ui.source_mode_var = FakeVar()
++        ui.source_mode_label_var = FakeVar()
++        ui.callbacks = {"source_mode_changed": callback_values.append}
++        ui._refresh_source_menu = lambda: None
++
++        ui._set_source_mode("model")
++
++        self.assertEqual(ui.settings.reply_source_mode, "knowledge_only")
++        self.assertEqual(callback_values, [])
++
++    def test_fixed_source_mode_ignores_real_legacy_callback_and_remains_reloadable(self):
++        import main as main_module
++        from float_ui import ReplyAssistantUI
++
++        class FakeVar:
++            def __init__(self):
++                self.value = None
++
++            def set(self, value):
++                self.value = value
++
++        with tempfile.TemporaryDirectory() as tmp:
++            path = Path(tmp) / "settings.json"
++            settings = AppSettings(config_path=path)
++            legacy_app = types.SimpleNamespace(
++                settings=settings,
++                ui=types.SimpleNamespace(set_status=lambda _text: None),
++            )
++            ui = ReplyAssistantUI.__new__(ReplyAssistantUI)
++            ui.settings = settings
++            ui.source_mode_var = FakeVar()
++            ui.source_mode_label_var = FakeVar()
++            ui._refresh_source_menu = lambda: None
++            ui.callbacks = {
++                "source_mode_changed": lambda mode: main_module.WeChatStyleReplyAssistant._source_mode_changed(
++                    legacy_app,
++                    mode,
++                )
++            }
++
++            ui._set_source_mode("model")
++            loaded = AppSettings(config_path=path).load()
++
++            self.assertEqual(settings.reply_source_mode, "knowledge_only")
++            self.assertEqual(loaded.reply_source_mode, "knowledge_only")
++
++    def test_observe_and_controlled_survive_real_legacy_managed_callback_on_disk(self):
++        import main as main_module
++        from float_ui import ReplyAssistantUI
++
++        class FakeVar:
++            def __init__(self, value=None):
++                self.value = value
++
++            def get(self):
++                return self.value
++
++            def set(self, value):
++                self.value = value
++
++        for mode in ("observe", "controlled"):
++            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
++                path = Path(tmp) / "settings.json"
++                settings = AppSettings(config_path=path)
++                legacy_app = types.SimpleNamespace(
++                    settings=settings,
++                    ui=types.SimpleNamespace(set_status=lambda _text: None),
++                )
++                ui = ReplyAssistantUI.__new__(ReplyAssistantUI)
++                ui.settings = settings
++                ui.managed_var = FakeVar("off")
++                ui.auto_var = FakeVar(False)
++                ui.callbacks = {
++                    "managed_changed": lambda enabled: main_module.WeChatStyleReplyAssistant._managed_changed(
++                        legacy_app,
++                        enabled,
++                    )
++                }
++
++                ui._set_managed_mode(mode)
++                loaded = AppSettings(config_path=path).load()
++
++                self.assertEqual(settings.managed_mode, mode)
++                self.assertEqual(loaded.managed_mode, mode)
++
++    def test_settings_dialog_managed_mode_path_uses_same_callback_safe_transition(self):
++        import main as main_module
++        from float_ui import ReplyAssistantUI
++
++        class FakeVar:
++            def __init__(self, value=None):
++                self.value = value
++
++            def set(self, value):
++                self.value = value
++
++        with tempfile.TemporaryDirectory() as tmp:
++            path = Path(tmp) / "settings.json"
++            settings = AppSettings(config_path=path)
++            legacy_app = types.SimpleNamespace(
++                settings=settings,
++                ui=types.SimpleNamespace(set_status=lambda _text: None),
++            )
++            ui = ReplyAssistantUI.__new__(ReplyAssistantUI)
++            ui.settings = settings
++            ui.managed_var = FakeVar("off")
++            ui.auto_var = FakeVar(False)
++            ui.callbacks = {
++                "managed_changed": lambda enabled: main_module.WeChatStyleReplyAssistant._managed_changed(
++                    legacy_app,
++                    enabled,
++                )
++            }
++
++            ui._set_managed_mode("controlled", persist=False)
++            settings.save()
++
++            self.assertEqual(AppSettings(config_path=path).load().managed_mode, "controlled")
+     def test_model_prompt_is_readable_chinese_and_forbids_invented_data(self):
+         settings = AppSettings()
+         settings.reply_source_mode = "model"
+         settings.enable_web_search = False
+         engine = ReplyEngine(settings, StyleMemory())
+ 
+         prompt = engine._build_prompt(
+             "[对方] 这个活动大概能带来多少订单\n[我] 这个要看商家情况\n[对方] 那你估计能有多少",
+             "客户",
+         )
+ 
+         self.assertIn("不能编造", prompt)
+         self.assertIn("不知道", prompt)
+         self.assertIn("不能自己编数字", prompt)
+         self.assertNotIn("鍥炲", prompt)
+@@ -3471,43 +3645,43 @@ class SettingsTests(unittest.TestCase):
+                 "[对方] [图片]",
+                 "[可见内容理解] 类型：image；置信度：high；来源：zhipu_vision；一张花色衣服照片",
+             ]
+         )
+ 
+         allowed, reason = main._managed_send_preflight_allows(window, window, generated_context, latest_context)
+ 
+         self.assertIn("一张花色衣服照片", latest_context)
+         self.assertTrue(allowed, reason)
+ 
+     def test_text_provider_settings_roundtrip_supports_custom_http(self):
+         with tempfile.TemporaryDirectory() as tmp:
+             path = Path(tmp) / "settings.json"
+             settings = AppSettings(config_path=path)
+             settings.api_provider = "custom_http"
+-            settings.reply_source_mode = "memory"
++            settings.reply_source_mode = "knowledge_only"
+             settings.api_key = "test-key"
+             settings.base_url = "https://example.com/generate"
+             settings.model = "custom-model"
+             settings.custom_headers = '{"Authorization":"Bearer {api_key}"}'
+             settings.custom_body = '{"model":"{model}","prompt":"{prompt}"}'
+             settings.custom_response_path = "data.answer"
+             settings.save()
+ 
+             loaded = AppSettings(config_path=path).load()
+ 
+             self.assertEqual(loaded.api_provider, "custom_http")
+-            self.assertEqual(loaded.reply_source_mode, "memory")
++            self.assertEqual(loaded.reply_source_mode, "knowledge_only")
+             self.assertEqual(loaded.custom_headers, '{"Authorization":"Bearer {api_key}"}')
+             self.assertEqual(loaded.custom_body, '{"model":"{model}","prompt":"{prompt}"}')
+             self.assertEqual(loaded.custom_response_path, "data.answer")
+ 
+     def test_supported_provider_help_lists_common_text_interfaces(self):
+         help_text = supported_provider_help()
+ 
+         for provider in ["Zhipu", "DeepSeek", "Qwen", "Doubao", "Moonshot", "SiliconFlow", "Custom HTTP"]:
+             self.assertIn(provider, help_text)
+ 
+     def test_deepseek_request_uses_provider_base_without_forcing_zhipu(self):
+         settings = AppSettings()
+         settings.api_provider = "deepseek"
+         settings.api_key = "deepseek-key"
+         settings.base_url = "https://api.deepseek.com"
+
+===== FIX REPORT TAIL =====
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py tests\test_core.py -k "settings or credential or string_false" -v
+```
+
+原始摘要：`17 failed, 87 passed, 180 deselected in 2.97s`。失败原因命中预期缺口：无 `SettingsValidationError` / `credential_store` 注入、无 `secure_store`、字符串伪布尔被接受、无严格数值边界、无 UI 模式常量/allowlist/managed callback，以及来源仍可切换到 model。原始输出：`artifacts/formal-hardening/2026-08-12/03-settings-credentials-red.txt`。
+
+补充有效备份 RED：`test_credential_store_skips_undecryptable_primary_and_loads_valid_backup` 为 `1 failed`，证明原实现未捕获 DPAPI 解密层的通用失败；最小修复后该测试 `1 passed`。
+
+### GREEN
+
+简报目标命令原始摘要：`103 passed, 182 deselected in 1.95s`。
+
+完整 persistence：`32 passed in 0.63s`。
+
+完整回归：`333 passed, 74 warnings, 4 subtests passed in 7.51s`。
+
+GREEN 原始输出：`artifacts/formal-hardening/2026-08-12/03-settings-credentials-green.txt`；完整回归输出：`artifacts/formal-hardening/2026-08-12/03-settings-credentials-full.txt`。
+
+## 覆盖的关键行为
+
+- 字符串 `"false"` 对 `managed_auto_reply`、`auto_recognize`、`training_mode` 均被拒绝。
+- `poll_interval_ms`、`group_poll_interval_ms`、`auto_reply_delay_seconds`、`capture_cooldown_seconds`、`search_max_results` 的上下界包含性、越界值、字符串和布尔伪数值均覆盖。
+- `chat_area` 的 `0..1` 范围、`left < right`、`top < bottom` 与字符串伪数值均覆盖。
+- model 来源和 web search 均由正式设置验证拒绝。
+- legacy managed true 迁移到 observe，旧兼容发送门保持关闭。
+- 注入 fake protect/unprotect 的凭据往返、密文中无明文、同目录临时写、`fsync`、`replace`、五份有效备份和不可解密主文件回退均覆盖。
+- v1 明文三类 key 的成功迁移，以及加密失败/读回失败时原字节不变且 managed off 均覆盖。
+- 持久化白名单排除运行时对象、动态对象及所有 key 字段；UI knowledge-only、四模式、allowlist 去重顺序及旧回调兼容均覆盖。
+
+## 最终验证
+
+- 目标测试：`103 passed, 182 deselected`。
+- `tests/test_persistence.py`：`32 passed`。
+- 真实 Windows DPAPI 临时凭据往返：`REAL_DPAPI_ROUND_TRIP=PASS`，未输出真实密钥。
+- 编译：`.\.venv\Scripts\python.exe -m compileall -q -f secure_store.py settings.py float_ui.py`，退出码 0。
+- 全量测试：`333 passed, 74 warnings, 4 subtests passed in 7.51s`。
+
+## Checkpoint
+
+文件：`artifacts/formal-hardening/2026-08-12/03-settings-credentials.sha256.json`
+
+- `secure_store.py`: `5DD70DCD1D5C5B33F4622687CC9862102A8CF5BBA25C12B8F4D3FCD848D49BBA`
+- `settings.py`: `6BA801B39D66D4ABFD3A1D5AB5701697612053C3693681902F41900651671DBE`
+- `float_ui.py`: `7EAF64D2CDBC99270689B42E24DD759A8A836E66A4F5330987E525E85C8A6FFE`
+
+## 文件清单
+
+- 新增：`secure_store.py`
+- 修改：`settings.py`
+- 修改：`float_ui.py`
+- 修改：`tests/test_persistence.py`
+- 修改：`tests/test_core.py`
+- 新增：本报告及 `artifacts/formal-hardening/2026-08-12/03-settings-credentials-*.txt/json`
+
+## 自检与顾虑
+
+- 确认未修改 `main.py`。本阶段通过兼容属性保证 observe/controlled 不会进入旧自动发送路径；四模式的完整 runtime 行为和 allowlist 执行必须由后续任务接入，不能在本任务内提前决定。
+- DPAPI 密文绑定当前 Windows 用户/机器上下文；五份备份同样只能在可解密该密文的上下文恢复，这是 DPAPI 的预期安全边界。
+- UI 行为由无桌面依赖的回调/选项测试覆盖；未进行人工可视化布局验收。若后续 UI 布局调整，应在可交互 Windows 桌面补充视觉检查。
+- 全量测试中的 Pillow `Image.getdata` 弃用警告属于既有 `conversation_list.py`，与本任务无关。
+
+## Fix Round 1（1 Critical + 4 Important）
+
+### 修复结果
+
+1. **Critical：迁移后清除 settings 主文件及全部备份中的明文凭据。** `_persist_settings()` 现使用迁移/持久化专用 `_validate_redacted_document()`；该 validator 对 v1/v2 均拒绝 `api_key`、`vision_api_key`、`provider_api_keys`。Task 2 的原子轮换因此只保留无密钥有效快照，并删除含密钥的旧备份。
+2. **Important 1：自定义请求模板拒绝字面凭据。** `custom_headers` / `custom_body` 中，`auth/authorization/key/token/secret/password/credential` 类字段只允许 `{api_key}`、`Bearer {api_key}` 或 `Basic {api_key}`；任意位置的字面 Bearer token 也被拒绝。普通非凭据常量和既有请求模板仍可持久化。
+3. **Important 2：固定来源不再调用旧 source callback。** `_set_source_mode()` 固定保存 `knowledge_only` 后不触发旧 `source_mode_changed`，避免 `main.py` 旧回调改成 `model_memory` 并留下无效内存状态。
+4. **Important 3：统一 managed mode 变更入口。** `_set_managed_mode(mode, persist=...)` 是主界面和设置对话框的共同入口；旧 bool 回调返回后恢复所选模式，并由当前入口执行唯一一次最终保存。`observe` / `controlled` 从新建 `AppSettings` 重载仍保持。
+5. **Important 4：raw validator 完整检查持久化字符串字段。** 传入 `load_json()` 的 validator 现在在选中候选前检查全部持久化字符串字段，并继续检查版本、布尔、数值、模式、allowlist 和 chat area；损坏主文件不再阻断有效 `bak.1` 接管。
+
+### 新增或更新的行为测试
+
+- `test_legacy_migration_purges_plaintext_keys_from_primary_and_all_settings_backups`
+- `test_settings_reject_literal_credentials_in_custom_request_templates`（5 个参数：literal Bearer、header token、body token、body auth secret、body api_key）
+- `test_settings_allow_api_key_placeholder_in_custom_request_templates`
+- `test_settings_load_uses_valid_backup_when_primary_persisted_string_type_is_corrupt`
+- `test_source_mode_callback_cannot_enable_free_generation`（更新为固定来源不调用旧 callback）
+- `test_fixed_source_mode_ignores_real_legacy_callback_and_remains_reloadable`
+- `test_observe_and_controlled_survive_real_legacy_managed_callback_on_disk`（2 个 subtests）
+- `test_settings_dialog_managed_mode_path_uses_same_callback_safe_transition`
+
+### RED 原始证据
+
+首轮聚焦命令：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py tests\test_core.py -k "legacy_migration_purges or literal_credentials_in_custom or allow_api_key_placeholder or persisted_string_type_is_corrupt or source_mode_callback_cannot or fixed_source_mode_ignores or survive_real_legacy_managed or settings_dialog_managed_mode" -v
+```
+
+实际输出：`11 failed, 2 passed, 284 deselected in 2.07s`；其中 `observe`、`controlled` 两个失败 subtests 均显示磁盘重载为 `off`。允许 `{api_key}` 的正向护栏和一个既有路径先通过。原始日志：`artifacts/formal-hardening/2026-08-12/03-settings-credentials-fix1-red.txt`。
+
+补充 `auth` 字段边界 RED：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py::test_settings_reject_literal_credentials_in_custom_request_templates -v
+```
+
+实际输出：`1 failed, 4 passed in 0.33s`，失败项为 `custom_body={"auth":"literal-body-secret",...}` 未被拒绝；修复字段名分词识别后，同命令为 `5 passed in 0.17s`。
+
+### GREEN 原始证据
+
+聚焦修复集合：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py tests\test_core.py -k "legacy_migration_purges or literal_credentials_in_custom or allow_api_key_placeholder or persisted_string_type_is_corrupt or source_mode_callback_cannot or fixed_source_mode_ignores or survive_real_legacy_managed or settings_dialog_managed_mode" -q
+```
+
+准确输出：`12 passed, 284 deselected, 2 subtests passed in 1.03s`。日志：`artifacts/formal-hardening/2026-08-12/03-settings-credentials-fix1-green-focused.txt`。
+
+目标 settings/credential/mode 集合：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py tests\test_core.py -k "settings or credential or source_mode or managed_mode" -q
+```
+
+准确输出：`114 passed, 182 deselected, 2 subtests passed in 1.91s`。日志：`artifacts/formal-hardening/2026-08-12/03-settings-credentials-fix1-green-target.txt`。
+
+完整 persistence：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py -q
+```
+
+准确输出：`40 passed in 0.61s`。日志：`artifacts/formal-hardening/2026-08-12/03-settings-credentials-fix1-green-persistence.txt`。
+
+完整测试：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests -q
+```
+
+准确输出：`344 passed, 74 warnings, 6 subtests passed in 5.43s`。74 个 warning 仍是既有 Pillow `Image.getdata` 弃用警告。日志：`artifacts/formal-hardening/2026-08-12/03-settings-credentials-fix1-green-full.txt`。
+
+编译与真实 DPAPI：
+
+- `.\.venv\Scripts\python.exe -m compileall -q -f secure_store.py settings.py float_ui.py`：`COMPILEALL=PASS`。
+- 独立临时 `WECHAT_ASSISTANT_DATA_DIR` 下真实 DPAPI 写入/读回：`REAL_DPAPI_ROUND_TRIP=PASS`。
+
+### Fix Round 1 Checkpoint
+
+`artifacts/formal-hardening/2026-08-12/03-settings-credentials.sha256.json` 已更新；以下哈希取代本报告前文的初始实现 checkpoint：
+
+- `secure_store.py`: `5DD70DCD1D5C5B33F4622687CC9862102A8CF5BBA25C12B8F4D3FCD848D49BBA`
+- `settings.py`: `EA55E873498482C1BBD5052DDF13110C33993968ED21A3F9F0FE9E8E585316C2`
+- `float_ui.py`: `FDBC5362B06F2D4ECDDA11D6790FD9B2109CA947C9740DC438538B3F2A68E5BB`
+
+### Fix Round 1 顾虑
+
+- 凭据模板校验依据语义字段名与 Bearer 形式识别；语义中性的普通业务常量允许保留。若未来新增新的凭据字段命名，需同步扩展该字段分类并先加拒绝测试。
+- 未修改 `main.py`。本轮通过 UI 兼容边界隔离旧 callback；四种 managed mode 的完整 runtime 执行仍属于后续任务。
+
+===== CHECKPOINT =====
+[
+    {
+        "Algorithm":  "SHA256",
+        "Hash":  "5DD70DCD1D5C5B33F4622687CC9862102A8CF5BBA25C12B8F4D3FCD848D49BBA",
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\secure_store.py"
+    },
+    {
+        "Algorithm":  "SHA256",
+        "Hash":  "EA55E873498482C1BBD5052DDF13110C33993968ED21A3F9F0FE9E8E585316C2",
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\settings.py"
+    },
+    {
+        "Algorithm":  "SHA256",
+        "Hash":  "FDBC5362B06F2D4ECDDA11D6790FD9B2109CA947C9740DC438538B3F2A68E5BB",
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\float_ui.py"
+    }
+]

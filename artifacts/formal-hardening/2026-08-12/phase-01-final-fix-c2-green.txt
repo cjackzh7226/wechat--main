@@ -1,0 +1,22 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- D:\Vibe C\客服\wechat--main\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\Vibe C\客服\wechat--main
+collecting ... collected 20 items / 6 deselected / 14 selected
+
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[consistent-string-false] PASSED [  7%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[consistent-string-true] PASSED [ 14%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[consistent-zero] PASSED [ 21%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[consistent-one] PASSED [ 28%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[chosen-float] PASSED [ 35%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[chosen-bool] PASSED [ 42%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[chosen-string] PASSED [ 50%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[extra-key] PASSED [ 57%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[missing-consistent] PASSED [ 64%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[missing-chosen] PASSED [ 71%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[explicit-inconsistent] PASSED [ 78%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[parse-error] PASSED [ 85%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_returns_only_selected_knowledge_answer_for_exact_valid_json PASSED [ 92%]
+tests/test_phase1_final_fix.py::test_invalid_consistency_json_reaches_fake_sender_only_as_exact_no_answer PASSED [100%]
+
+====================== 14 passed, 6 deselected in 1.02s =======================

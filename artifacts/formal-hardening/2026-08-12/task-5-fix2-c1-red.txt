@@ -1,0 +1,98 @@
+﻿COMMAND=.venv\Scripts\python.exe -m pytest tests/test_persistence.py::test_runtime_schema_rejects_legal_shape_smuggling_hashes_record_id_and_ignores_caller_timestamp -q
+EXIT_CODE=1
+FF                                                                       [100%]
+================================== FAILURES ===================================
+_ test_runtime_schema_rejects_legal_shape_smuggling_hashes_record_id_and_ignores_caller_timestamp[False] _
+
+debug = False
+
+    @pytest.mark.parametrize("debug", [False, True])
+    def test_runtime_schema_rejects_legal_shape_smuggling_hashes_record_id_and_ignores_caller_timestamp(debug):
+        from runtime_logging import redact_event
+    
+        salt = b"installation-local-test-salt-32b"
+        event = {
+            "event": "sk-secret-token",
+            "state": "customer-message",
+            "error_category": "access-token",
+            "org_scope": "john.smith",
+            "record_id": "123e4567-e89b-12d3-a456-426614174000",
+            "score": 101,
+            "timestamp": "2026-08-12T00:00:00+00:00",
+            "api_key": "credential-secret",
+            "Authorization": "Bearer credential-token",
+            "nested": {"content": "private-content", "access_token": "nested-token"},
+        }
+    
+        redacted = redact_event(event, salt=salt, debug=debug)
+        serialized = json.dumps(redacted, ensure_ascii=False)
+    
+        for forbidden in (
+            "sk-secret-token",
+            "customer-message",
+            "access-token",
+            "john.smith",
+            "123e4567-e89b-12d3-a456-426614174000",
+            "2026-08-12T00:00:00+00:00",
+            "credential-secret",
+            "credential-token",
+            "private-content",
+            "nested-token",
+        ):
+>           assert forbidden not in serialized
+E           assert 'sk-secret-token' not in '{"error_cat...0:00+00:00"}'
+E             
+E             'sk-secret-token' is contained here:
+E               "event": "sk-secret-token", "org_scope": "john.smith", "record_id": "123e4567-e89b-12d3-a456-426614174000", "score": 101, "state": "customer-message", "timestamp": "2026-08-12T00:00:00+00:00"}
+E             ?           +++++++++++++++
+
+tests\test_persistence.py:249: AssertionError
+_ test_runtime_schema_rejects_legal_shape_smuggling_hashes_record_id_and_ignores_caller_timestamp[True] _
+
+debug = True
+
+    @pytest.mark.parametrize("debug", [False, True])
+    def test_runtime_schema_rejects_legal_shape_smuggling_hashes_record_id_and_ignores_caller_timestamp(debug):
+        from runtime_logging import redact_event
+    
+        salt = b"installation-local-test-salt-32b"
+        event = {
+            "event": "sk-secret-token",
+            "state": "customer-message",
+            "error_category": "access-token",
+            "org_scope": "john.smith",
+            "record_id": "123e4567-e89b-12d3-a456-426614174000",
+            "score": 101,
+            "timestamp": "2026-08-12T00:00:00+00:00",
+            "api_key": "credential-secret",
+            "Authorization": "Bearer credential-token",
+            "nested": {"content": "private-content", "access_token": "nested-token"},
+        }
+    
+        redacted = redact_event(event, salt=salt, debug=debug)
+        serialized = json.dumps(redacted, ensure_ascii=False)
+    
+        for forbidden in (
+            "sk-secret-token",
+            "customer-message",
+            "access-token",
+            "john.smith",
+            "123e4567-e89b-12d3-a456-426614174000",
+            "2026-08-12T00:00:00+00:00",
+            "credential-secret",
+            "credential-token",
+            "private-content",
+            "nested-token",
+        ):
+>           assert forbidden not in serialized
+E           assert 'sk-secret-token' not in '{"error_cat...0:00+00:00"}'
+E             
+E             'sk-secret-token' is contained here:
+E               "event": "sk-secret-token", "org_scope": "john.smith", "record_id": "123e4567-e89b-12d3-a456-426614174000", "score": 101, "state": "customer-message", "timestamp": "2026-08-12T00:00:00+00:00"}
+E             ?           +++++++++++++++
+
+tests\test_persistence.py:249: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_persistence.py::test_runtime_schema_rejects_legal_shape_smuggling_hashes_record_id_and_ignores_caller_timestamp[False]
+FAILED tests/test_persistence.py::test_runtime_schema_rejects_legal_shape_smuggling_hashes_record_id_and_ignores_caller_timestamp[True]
+2 failed in 0.79s

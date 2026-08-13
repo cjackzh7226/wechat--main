@@ -1,0 +1,275 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- D:\Vibe C\客服\wechat--main\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\Vibe C\客服\wechat--main
+collecting ... collected 256 items / 220 deselected / 36 selected
+
+tests/test_core.py::MemoryTests::test_enterprise_ambiguous_runtime_and_phrasebook_both_refuse_to_send PASSED [  2%]
+tests/test_core.py::MemoryTests::test_enterprise_answers_do_not_leak_into_generic_model_memory_prompt PASSED [  5%]
+tests/test_core.py::MemoryTests::test_enterprise_candidates_rank_fuzzy_historical_lookup_above_current_year_edit PASSED [  8%]
+tests/test_core.py::MemoryTests::test_enterprise_candidates_recall_similar_login_question_with_source_metadata PASSED [ 11%]
+tests/test_core.py::MemoryTests::test_enterprise_decision_accepts_clear_margin_below_legacy_76_gate PASSED [ 13%]
+tests/test_core.py::MemoryTests::test_enterprise_exact_question_outranks_overlapping_later_questions PASSED [ 16%]
+tests/test_core.py::MemoryTests::test_enterprise_imperative_request_ambiguous_returns_no_answer_without_api FAILED [ 19%]
+tests/test_core.py::MemoryTests::test_enterprise_phrasebook_test_uses_the_same_top_candidate_as_runtime PASSED [ 22%]
+tests/test_core.py::MemoryTests::test_enterprise_semantic_scope_without_annual_report_word_returns_official_answer PASSED [ 25%]
+tests/test_core.py::MemoryTests::test_llm_import_enterprise_workbook_marks_source PASSED [ 27%]
+tests/test_core.py::ChatTrainingTests::test_complex_enterprise_annual_report_xlsx_preserves_hierarchy_and_org_type PASSED [ 30%]
+tests/test_core.py::ChatTrainingTests::test_enterprise_import_is_isolated_from_generic_training_and_replaces_only_its_own_library PASSED [ 33%]
+tests/test_core.py::ChatTrainingTests::test_enterprise_import_preserves_official_answer_line_breaks PASSED [ 36%]
+tests/test_core.py::ChatTrainingTests::test_missing_xls_reader_is_installed_on_demand_in_source_mode PASSED [ 38%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_ambiguous_candidate_does_not_use_model_selector FAILED [ 41%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_ambiguous_local_match_returns_explicit_no_answer_without_selector PASSED [ 44%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_fuzzy_history_lookup_returns_official_answer_without_api_key PASSED [ 47%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_generation_uses_current_target_turn_not_stale_history PASSED [ 50%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_judgement_failure_returns_no_answer FAILED [ 52%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_judgement_inconsistent_returns_no_answer FAILED [ 55%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_low_score_returns_no_answer_without_api_in_model_memory FAILED [ 58%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_ratio_phrase_disambiguates_rectify_question PASSED [ 61%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_rectify_question_returns_official_answer_without_model PASSED [ 63%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_scope_accepts_branch_agency_questions PASSED [ 66%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_scope_accepts_rectify_governance_question PASSED [ 69%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_score_between_20_and_40_with_margin_is_sendable PASSED [ 72%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_tie_arbitration_failure_returns_none PASSED [ 75%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_tie_arbitration_picks_chosen_candidate PASSED [ 77%]
+tests/test_core.py::ReplyParsingTests::test_enterprise_tie_managed_send_arbitrates_chosen_candidate PASSED [ 80%]
+tests/test_core.py::ReplyParsingTests::test_low_confidence_enterprise_selector_returns_no_answer_without_general_model_fallback FAILED [ 83%]
+tests/test_core.py::SettingsTests::test_fixed_source_mode_ignores_real_legacy_callback_and_remains_reloadable PASSED [ 86%]
+tests/test_core.py::SettingsTests::test_reply_engine_calls_api_for_ack_when_key_is_configured PASSED [ 88%]
+tests/test_core.py::SettingsTests::test_reply_engine_reports_api_failure_instead_of_silent_fallback PASSED [ 91%]
+tests/test_core.py::SettingsTests::test_reply_engine_reports_empty_api_response_text PASSED [ 94%]
+tests/test_core.py::SettingsTests::test_reply_engine_reports_http_error_body_from_text_api PASSED [ 97%]
+tests/test_core.py::SettingsTests::test_source_mode_callback_cannot_enable_free_generation PASSED [100%]
+
+================================== FAILURES ===================================
+_ MemoryTests.test_enterprise_imperative_request_ambiguous_returns_no_answer_without_api _
+
+self = <test_core.MemoryTests testMethod=test_enterprise_imperative_request_ambiguous_returns_no_answer_without_api>
+
+    def test_enterprise_imperative_request_ambiguous_returns_no_answer_without_api(self):
+        settings = AppSettings(api_key="configured", reply_source_mode="model_memory")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        memory = StyleMemory(Path(tmp.name) / "memory.json")
+        memory.learn_from_training_examples(_enterprise_history_lookup_examples("历史报告请到公示页面查询。"))
+        engine = ReplyEngine(settings, memory)
+    
+        with patch("reply_engine.requests.post") as post:
+            result = engine.generate("[对方] 帮我查一下年检时间", "客户")
+    
+        # 23 分 < 30（新低分阈值）：命中评分不足 → 直接回企业未命中文案，不调模型
+>       self.assertEqual(result, ["未在当前企业年报知识库中找到对应答案。"])
+E       AssertionError: Lists differ: ['暂未查到对应答案'] != ['未在当前企业年报知识库中找到对应答案。']
+E       
+E       First differing element 0:
+E       '暂未查到对应答案'
+E       '未在当前企业年报知识库中找到对应答案。'
+E       
+E       - ['暂未查到对应答案']
+E       + ['未在当前企业年报知识库中找到对应答案。']
+
+tests\test_core.py:398: AssertionError
+_ ReplyParsingTests.test_enterprise_ambiguous_candidate_does_not_use_model_selector _
+
+self = <test_core.ReplyParsingTests testMethod=test_enterprise_ambiguous_candidate_does_not_use_model_selector>
+
+    def test_enterprise_ambiguous_candidate_does_not_use_model_selector(self):
+        settings = AppSettings()
+        settings.api_provider = "deepseek"
+        settings.api_key = "configured"
+        settings.base_url = "https://api.deepseek.com"
+        settings.model = "deepseek-chat"
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        memory = StyleMemory(Path(tmp.name) / "memory.json")
+        official_answer = (
+            "请使用社会组织法人账号登录年度报告系统，并确认经办人已经完成组织关联授权；"
+            "如仍无法登录，请核对法人类型和账号绑定状态后再联系平台客服处理。"
+        )
+        memory.learn_from_training_examples(
+            [
+                {
+                    "source": "enterprise_annual_report_kb",
+                    "question": "年度报告从哪里登录？",
+                    "cue": "企业年报 / 社会团体 / 年检 / 登录 / 年度报告从哪里登录？",
+                    "reply": official_answer,
+                    "module": "年检",
+                    "subcategory": "登录",
+                    "organization_type": "社会团体",
+                    "source_cell": "C2",
+                },
+                {
+                    "source": "enterprise_annual_report_kb",
+                    "question": "忘记密码怎么办？",
+                    "cue": "企业年报 / 社会团体 / 年检 / 登录 / 忘记密码怎么办？",
+                    "reply": "请在登录页选择忘记密码后按提示找回。",
+                    "module": "年检",
+                    "subcategory": "登录",
+                    "organization_type": "社会团体",
+                    "source_cell": "C3",
+                },
+            ]
+        )
+        engine = ReplyEngine(settings, memory)
+        with patch("reply_engine.requests.post") as post:
+            result = engine.generate("[对方] 年度工作报告怎么进去填？", "客户")
+    
+        # 27 分 < 30（新低分阈值）：命中评分不足 → 未命中文案，不调用模型 selector 自由生成
+>       self.assertEqual(result, ["未在当前企业年报知识库中找到对应答案。"])
+E       AssertionError: Lists differ: ['暂未查到对应答案'] != ['未在当前企业年报知识库中找到对应答案。']
+E       
+E       First differing element 0:
+E       '暂未查到对应答案'
+E       '未在当前企业年报知识库中找到对应答案。'
+E       
+E       - ['暂未查到对应答案']
+E       + ['未在当前企业年报知识库中找到对应答案。']
+
+tests\test_core.py:1829: AssertionError
+____ ReplyParsingTests.test_enterprise_judgement_failure_returns_no_answer ____
+
+self = <test_core.ReplyParsingTests testMethod=test_enterprise_judgement_failure_returns_no_answer>
+
+    def test_enterprise_judgement_failure_returns_no_answer(self):
+        settings = AppSettings(api_key="configured", reply_source_mode="model_memory")
+        settings.enable_web_search = False
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        memory = StyleMemory(Path(tmp.name) / "memory.json")
+        memory.learn_from_training_examples(_enterprise_history_lookup_examples("历史报告请到公示页面查询。"))
+        engine = ReplyEngine(settings, memory)
+    
+        # 判断调用失败（异常/乱码）→ 安全降级为未命中文案，绝不误发
+        with patch("reply_engine.requests.post", side_effect=RuntimeError("timeout")):
+            result = engine.generate("[对方] 想查一下之前的年报", "客户")
+    
+>       self.assertEqual(result, ["未在当前企业年报知识库中找到对应答案。"])
+E       AssertionError: Lists differ: ['暂未查到对应答案'] != ['未在当前企业年报知识库中找到对应答案。']
+E       
+E       First differing element 0:
+E       '暂未查到对应答案'
+E       '未在当前企业年报知识库中找到对应答案。'
+E       
+E       - ['暂未查到对应答案']
+E       + ['未在当前企业年报知识库中找到对应答案。']
+
+tests\test_core.py:2057: AssertionError
+_ ReplyParsingTests.test_enterprise_judgement_inconsistent_returns_no_answer __
+
+self = <test_core.ReplyParsingTests testMethod=test_enterprise_judgement_inconsistent_returns_no_answer>
+
+    def test_enterprise_judgement_inconsistent_returns_no_answer(self):
+        settings = AppSettings(api_key="configured", reply_source_mode="model_memory")
+        settings.enable_web_search = False
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        memory = StyleMemory(Path(tmp.name) / "memory.json")
+        memory.learn_from_training_examples(_enterprise_history_lookup_examples("历史报告请到公示页面查询。"))
+        engine = ReplyEngine(settings, memory)
+    
+        # 高置信命中但大模型判定不一致 → 未命中文案，不发送
+        with patch("reply_engine.requests.post") as post:
+            post.return_value.status_code = 200
+            post.return_value.raise_for_status.return_value = None
+            post.return_value.json.return_value = {"choices": [{"message": {"content": '{"chosen": 1, "consistent": false}'}}]}
+            result = engine.generate("[对方] 想查一下之前的年报", "客户")
+    
+>       self.assertEqual(result, ["未在当前企业年报知识库中找到对应答案。"])
+E       AssertionError: Lists differ: ['暂未查到对应答案'] != ['未在当前企业年报知识库中找到对应答案。']
+E       
+E       First differing element 0:
+E       '暂未查到对应答案'
+E       '未在当前企业年报知识库中找到对应答案。'
+E       
+E       - ['暂未查到对应答案']
+E       + ['未在当前企业年报知识库中找到对应答案。']
+
+tests\test_core.py:2041: AssertionError
+_ ReplyParsingTests.test_enterprise_low_score_returns_no_answer_without_api_in_model_memory _
+
+self = <test_core.ReplyParsingTests testMethod=test_enterprise_low_score_returns_no_answer_without_api_in_model_memory>
+
+    def test_enterprise_low_score_returns_no_answer_without_api_in_model_memory(self):
+        # model_memory 模式：低分（<20）企业范围问法直接回未命中文案，不再让模型生成
+        settings = AppSettings(api_key="configured", reply_source_mode="model_memory")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        memory = StyleMemory(Path(tmp.name) / "memory.json")
+        memory.learn_from_training_examples(_enterprise_history_lookup_examples("历史报告请到公示页面查询。"))
+        engine = ReplyEngine(settings, memory)
+    
+        with patch("reply_engine.requests.post") as post:
+            result = engine.generate("[对方] 社会组织", "客户")
+    
+        post.assert_not_called()
+>       self.assertEqual(result, ["未在当前企业年报知识库中找到对应答案。"])
+E       AssertionError: Lists differ: ['暂未查到对应答案'] != ['未在当前企业年报知识库中找到对应答案。']
+E       
+E       First differing element 0:
+E       '暂未查到对应答案'
+E       '未在当前企业年报知识库中找到对应答案。'
+E       
+E       - ['暂未查到对应答案']
+E       + ['未在当前企业年报知识库中找到对应答案。']
+
+tests\test_core.py:2121: AssertionError
+_ ReplyParsingTests.test_low_confidence_enterprise_selector_returns_no_answer_without_general_model_fallback _
+
+self = <test_core.ReplyParsingTests testMethod=test_low_confidence_enterprise_selector_returns_no_answer_without_general_model_fallback>
+
+    def test_low_confidence_enterprise_selector_returns_no_answer_without_general_model_fallback(self):
+        settings = AppSettings()
+        settings.api_provider = "deepseek"
+        settings.api_key = "configured"
+        settings.base_url = "https://api.deepseek.com"
+        settings.model = "deepseek-chat"
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        memory = StyleMemory(Path(tmp.name) / "memory.json")
+        official_answer = "请使用社会组织法人账号登录年度报告系统。"
+        memory.learn_from_training_examples(
+            [
+                {
+                    "source": "enterprise_annual_report_kb",
+                    "question": "年度报告从哪里登录？",
+                    "cue": "企业年报 / 社会团体 / 年检 / 登录 / 年度报告从哪里登录？",
+                    "reply": official_answer,
+                    "module": "年检",
+                    "organization_type": "社会团体",
+                    "source_cell": "C2",
+                },
+                {
+                    "source": "enterprise_annual_report_kb",
+                    "question": "年度报告从哪里进去填报？",
+                    "cue": "企业年报 / 社会团体 / 年检 / 填报 / 年度报告从哪里进去填报？",
+                    "reply": "请先登录系统再进入填报页面。",
+                    "module": "年检",
+                    "organization_type": "社会团体",
+                    "source_cell": "C3",
+                },
+            ]
+        )
+        engine = ReplyEngine(settings, memory)
+        with patch("reply_engine.requests.post") as post:
+            result = engine.generate("[对方] 社会组织", "客户")
+    
+        self.assertNotIn(official_answer, result)
+>       self.assertEqual(result, ["未在当前企业年报知识库中找到对应答案。"])
+E       AssertionError: Lists differ: ['暂未查到对应答案'] != ['未在当前企业年报知识库中找到对应答案。']
+E       
+E       First differing element 0:
+E       '暂未查到对应答案'
+E       '未在当前企业年报知识库中找到对应答案。'
+E       
+E       - ['暂未查到对应答案']
+E       + ['未在当前企业年报知识库中找到对应答案。']
+
+tests\test_core.py:1871: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_core.py::MemoryTests::test_enterprise_imperative_request_ambiguous_returns_no_answer_without_api
+FAILED tests/test_core.py::ReplyParsingTests::test_enterprise_ambiguous_candidate_does_not_use_model_selector
+FAILED tests/test_core.py::ReplyParsingTests::test_enterprise_judgement_failure_returns_no_answer
+FAILED tests/test_core.py::ReplyParsingTests::test_enterprise_judgement_inconsistent_returns_no_answer
+FAILED tests/test_core.py::ReplyParsingTests::test_enterprise_low_score_returns_no_answer_without_api_in_model_memory
+FAILED tests/test_core.py::ReplyParsingTests::test_low_confidence_enterprise_selector_returns_no_answer_without_general_model_fallback
+================ 6 failed, 30 passed, 220 deselected in 2.89s =================

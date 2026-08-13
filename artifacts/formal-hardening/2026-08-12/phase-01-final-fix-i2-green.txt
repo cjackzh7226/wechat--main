@@ -1,0 +1,34 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- D:\Vibe C\客服\wechat--main\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\Vibe C\客服\wechat--main
+collecting ... collected 57 items / 31 deselected / 26 selected
+
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[1-write] PASSED [  3%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[1-fsync] PASSED [  7%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[1-replace] PASSED [ 11%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[2-write] PASSED [ 15%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[2-fsync] PASSED [ 19%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[2-replace] PASSED [ 23%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[3-write] PASSED [ 26%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[3-fsync] PASSED [ 30%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[3-replace] PASSED [ 34%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[4-write] PASSED [ 38%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[4-fsync] PASSED [ 42%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[4-replace] PASSED [ 46%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[5-write] PASSED [ 50%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[5-fsync] PASSED [ 53%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[5-replace] PASSED [ 57%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[1] PASSED [ 61%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[2] PASSED [ 65%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[3] PASSED [ 69%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[4] PASSED [ 73%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[5] PASSED [ 76%]
+tests/test_phase1_final_fix.py::test_atomic_json_final_primary_replace_fault_restores_every_old_candidate_byte_for_byte PASSED [ 80%]
+tests/test_phase1_final_fix.py::test_atomic_json_real_backup_replace_failure_never_partially_commits PASSED [ 84%]
+tests/test_phase1_final_fix.py::test_load_json_automatically_recovers_transaction_left_by_process_crash PASSED [ 88%]
+tests/test_phase1_final_fix.py::test_secure_store_uses_same_transaction_and_restores_all_old_candidates PASSED [ 92%]
+tests/test_phase1_final_fix.py::test_secure_store_real_backup_replace_failure_never_partially_commits PASSED [ 96%]
+tests/test_phase1_final_fix.py::test_backup_count_is_strictly_fixed_to_five PASSED [100%]
+
+====================== 26 passed, 31 deselected in 4.19s ======================

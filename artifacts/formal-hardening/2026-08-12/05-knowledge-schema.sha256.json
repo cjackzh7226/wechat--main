@@ -1,0 +1,13 @@
+{
+  "algorithm": "SHA256",
+  "files": [
+    {
+      "path": "knowledge_base.py",
+      "sha256": "c13bc91267fd8c14f5742db1a202c396fc86ca2b5f7b05038a11f0aaf8c4da15"
+    },
+    {
+      "path": "tests/test_knowledge_contract.py",
+      "sha256": "b244594ababe1034e22e5f110486ab7411182d63d587905896226c8ffe2debb7"
+    }
+  ]
+}

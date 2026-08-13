@@ -1,0 +1,12 @@
+﻿[
+    {
+        "Algorithm":  "SHA256",
+        "Hash":  "3EB04AD35BE57B66A961013889CC20586E480F7DBC3FE99848B712DD7B7A4C6B",
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\memory.py"
+    },
+    {
+        "Algorithm":  "SHA256",
+        "Hash":  "CE12A768DFB3469F7AC7572EC48C94D413D22860FE1FECA4D34D445B54A13E03",
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\tests\\test_persistence.py"
+    }
+]

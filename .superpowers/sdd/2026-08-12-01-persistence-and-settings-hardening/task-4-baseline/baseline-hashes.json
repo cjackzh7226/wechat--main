@@ -1,0 +1,14 @@
+﻿[
+    {
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\memory.py",
+        "Hash":  "1A03CE8B389A97A8F850207B01E9508231C71C62697113EFEB7518FA690E7822"
+    },
+    {
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\tests\\test_persistence.py",
+        "Hash":  "59BA9113D4A47A1E1CF26B926C1DA6850C77AE324851FE0783DEB28C94532FC8"
+    },
+    {
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\tests\\test_core.py",
+        "Hash":  "08EED6CDE3FDB4A696602742B72C4F14538D59A8C693EB9FAA0480364F4EF4FC"
+    }
+]

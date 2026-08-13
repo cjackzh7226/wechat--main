@@ -1,0 +1,382 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- D:\Vibe C\客服\wechat--main\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\Vibe C\客服\wechat--main
+collecting ... collected 57 items / 31 deselected / 26 selected
+
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[1-write] PASSED [  3%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[1-fsync] PASSED [  7%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[1-replace] PASSED [ 11%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[2-write] PASSED [ 15%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[2-fsync] PASSED [ 19%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[2-replace] PASSED [ 23%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[3-write] PASSED [ 26%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[3-fsync] PASSED [ 30%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[3-replace] PASSED [ 34%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[4-write] PASSED [ 38%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[4-fsync] PASSED [ 42%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[4-replace] PASSED [ 46%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[5-write] PASSED [ 50%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[5-fsync] PASSED [ 53%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[5-replace] PASSED [ 57%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[1] FAILED [ 61%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[2] FAILED [ 65%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[3] FAILED [ 69%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[4] FAILED [ 73%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[5] FAILED [ 76%]
+tests/test_phase1_final_fix.py::test_atomic_json_final_primary_replace_fault_restores_every_old_candidate_byte_for_byte FAILED [ 80%]
+tests/test_phase1_final_fix.py::test_atomic_json_real_backup_replace_failure_never_partially_commits FAILED [ 84%]
+tests/test_phase1_final_fix.py::test_load_json_automatically_recovers_transaction_left_by_process_crash FAILED [ 88%]
+tests/test_phase1_final_fix.py::test_secure_store_uses_same_transaction_and_restores_all_old_candidates FAILED [ 92%]
+tests/test_phase1_final_fix.py::test_secure_store_real_backup_replace_failure_never_partially_commits FAILED [ 96%]
+tests/test_phase1_final_fix.py::test_backup_count_is_strictly_fixed_to_five PASSED [100%]
+
+================================== FAILURES ===================================
+_ test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[1] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-128/test_atomic_json_backup_delete0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F0FF6D5190>
+slot = 1
+
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path, valid_count=slot - 1)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, "delete", f"backup:{slot}", OSError(f"fault delete {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       AssertionError: Regex pattern did not match.
+E         Expected regex: 'fault'
+E         Actual message: '[Errno 5] could not flush directory: C:\\Users\\14913\\AppData\\Local\\Temp\\pytest-of-14913\\pytest-128\\test_atomic_json_backup_delete0\\.settings.json.transaction.prep-1715b79f20dc45b885a8b77e7d7e73b1'
+
+tests\test_phase1_final_fix.py:360: AssertionError
+_ test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[2] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-128/test_atomic_json_backup_delete1')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F0FF6BC410>
+slot = 2
+
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path, valid_count=slot - 1)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, "delete", f"backup:{slot}", OSError(f"fault delete {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       AssertionError: Regex pattern did not match.
+E         Expected regex: 'fault'
+E         Actual message: '[Errno 5] could not flush directory: C:\\Users\\14913\\AppData\\Local\\Temp\\pytest-of-14913\\pytest-128\\test_atomic_json_backup_delete1\\.settings.json.transaction.prep-52ab7ddf536e437ab8ebce11fa7e0be2'
+
+tests\test_phase1_final_fix.py:360: AssertionError
+_ test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[3] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-128/test_atomic_json_backup_delete2')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F0FF7E5890>
+slot = 3
+
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path, valid_count=slot - 1)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, "delete", f"backup:{slot}", OSError(f"fault delete {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       AssertionError: Regex pattern did not match.
+E         Expected regex: 'fault'
+E         Actual message: '[Errno 5] could not flush directory: C:\\Users\\14913\\AppData\\Local\\Temp\\pytest-of-14913\\pytest-128\\test_atomic_json_backup_delete2\\.settings.json.transaction.prep-9d316befa0d145b9b7019631fdf5125f'
+
+tests\test_phase1_final_fix.py:360: AssertionError
+_ test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[4] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-128/test_atomic_json_backup_delete3')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F0FF7D2310>
+slot = 4
+
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path, valid_count=slot - 1)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, "delete", f"backup:{slot}", OSError(f"fault delete {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       AssertionError: Regex pattern did not match.
+E         Expected regex: 'fault'
+E         Actual message: '[Errno 5] could not flush directory: C:\\Users\\14913\\AppData\\Local\\Temp\\pytest-of-14913\\pytest-128\\test_atomic_json_backup_delete3\\.settings.json.transaction.prep-39296489060c4a688822138e688818a0'
+
+tests\test_phase1_final_fix.py:360: AssertionError
+_ test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[5] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-128/test_atomic_json_backup_delete4')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F0FF7E3F90>
+slot = 5
+
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path, valid_count=slot - 1)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, "delete", f"backup:{slot}", OSError(f"fault delete {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       AssertionError: Regex pattern did not match.
+E         Expected regex: 'fault'
+E         Actual message: '[Errno 5] could not flush directory: C:\\Users\\14913\\AppData\\Local\\Temp\\pytest-of-14913\\pytest-128\\test_atomic_json_backup_delete4\\.settings.json.transaction.prep-cdfb96fb0ae54641b10ac703e80226dc'
+
+tests\test_phase1_final_fix.py:360: AssertionError
+_ test_atomic_json_final_primary_replace_fault_restores_every_old_candidate_byte_for_byte _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-128/test_atomic_json_final_primary0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F0FF7E5790>
+
+    def test_atomic_json_final_primary_replace_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, "replace", "primary", OSError("fault primary replace"))
+    
+>       with pytest.raises(OSError, match="fault primary replace"):
+E       AssertionError: Regex pattern did not match.
+E         Expected regex: 'fault primary replace'
+E         Actual message: '[Errno 5] could not flush directory: C:\\Users\\14913\\AppData\\Local\\Temp\\pytest-of-14913\\pytest-128\\test_atomic_json_final_primary0\\.settings.json.transaction.prep-1625ea36e4c34d50871c94c2ec4c676b'
+
+tests\test_phase1_final_fix.py:374: AssertionError
+____ test_atomic_json_real_backup_replace_failure_never_partially_commits _____
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-128/test_atomic_json_real_backup_r0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F0FF7D1FD0>
+
+    def test_atomic_json_real_backup_replace_failure_never_partially_commits(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path)
+        before = _candidate_bytes(path)
+        failed = False
+>       real_replace = atomic_json.os.replace
+                       ^^^^^^^^^^^^^^
+E       AttributeError: module 'atomic_json' has no attribute 'os'
+
+tests\test_phase1_final_fix.py:387: AttributeError
+___ test_load_json_automatically_recovers_transaction_left_by_process_crash ___
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-128/test_load_json_automatically_r0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F0FF71A890>
+
+    def test_load_json_automatically_recovers_transaction_left_by_process_crash(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, "replace", "primary", _SimulatedCrash("process terminated"))
+    
+        with pytest.raises(_SimulatedCrash):
+>           atomic_json.atomic_write_json(path, {"version": 99}, _require_version_object)
+
+tests\test_phase1_final_fix.py:416: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+atomic_json.py:127: in atomic_write_json
+    atomic_write_bytes(path, payload, _valid_snapshots(path, validator))
+atomic_json.py:105: in atomic_write_bytes
+    transactional_replace_with_backups(
+file_transaction.py:237: in transactional_replace_with_backups
+    _flush_directory(prep)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-128/test_load_json_automatically_r0/.settings.json.transaction.prep-e044443713e04038a1910ccb2e037e52')
+
+    def _flush_directory(path: Path) -> None:
+        if os.name != "nt":
+            descriptor = os.open(str(path), os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            return
+    
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            str(path),
+            0x80000000,
+            0x00000001 | 0x00000002 | 0x00000004,
+            None,
+            3,
+            0x02000000,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle in (None, invalid_handle):
+            raise OSError(ctypes.get_last_error(), f"could not open directory for flush: {path}")
+        try:
+            if not kernel32.FlushFileBuffers(ctypes.c_void_p(handle)):
+>               raise OSError(ctypes.get_last_error(), f"could not flush directory: {path}")
+E               OSError: [Errno 5] could not flush directory: C:\Users\14913\AppData\Local\Temp\pytest-of-14913\pytest-128\test_load_json_automatically_r0\.settings.json.transaction.prep-e044443713e04038a1910ccb2e037e52
+
+file_transaction.py:130: OSError
+___ test_secure_store_uses_same_transaction_and_restores_all_old_candidates ___
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-128/test_secure_store_uses_same_tr0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F0FF7F21D0>
+
+    def test_secure_store_uses_same_transaction_and_restores_all_old_candidates(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "credentials.dat"
+        store = secure_store.CredentialStore(path=path, protect=_protect_for_test, unprotect=_unprotect_for_test)
+        for index in range(6):
+>           store.save({"provider": f"old-secret-{index}"})
+
+tests\test_phase1_final_fix.py:442: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+secure_store.py:122: in save
+    atomic_json.atomic_write_bytes(self.path, protected, snapshots)
+atomic_json.py:105: in atomic_write_bytes
+    transactional_replace_with_backups(
+file_transaction.py:237: in transactional_replace_with_backups
+    _flush_directory(prep)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-128/test_secure_store_uses_same_tr0/.credentials.dat.transaction.prep-cd012be5dcf3458f9b27b0541e7a411a')
+
+    def _flush_directory(path: Path) -> None:
+        if os.name != "nt":
+            descriptor = os.open(str(path), os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            return
+    
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            str(path),
+            0x80000000,
+            0x00000001 | 0x00000002 | 0x00000004,
+            None,
+            3,
+            0x02000000,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle in (None, invalid_handle):
+            raise OSError(ctypes.get_last_error(), f"could not open directory for flush: {path}")
+        try:
+            if not kernel32.FlushFileBuffers(ctypes.c_void_p(handle)):
+>               raise OSError(ctypes.get_last_error(), f"could not flush directory: {path}")
+E               OSError: [Errno 5] could not flush directory: C:\Users\14913\AppData\Local\Temp\pytest-of-14913\pytest-128\test_secure_store_uses_same_tr0\.credentials.dat.transaction.prep-cd012be5dcf3458f9b27b0541e7a411a
+
+file_transaction.py:130: OSError
+____ test_secure_store_real_backup_replace_failure_never_partially_commits ____
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-128/test_secure_store_real_backup_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F0FF8010D0>
+
+    def test_secure_store_real_backup_replace_failure_never_partially_commits(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "credentials.dat"
+        store = secure_store.CredentialStore(path=path, protect=_protect_for_test, unprotect=_unprotect_for_test)
+        for index in range(6):
+>           store.save({"provider": f"old-secret-{index}"})
+
+tests\test_phase1_final_fix.py:463: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+secure_store.py:122: in save
+    atomic_json.atomic_write_bytes(self.path, protected, snapshots)
+atomic_json.py:105: in atomic_write_bytes
+    transactional_replace_with_backups(
+file_transaction.py:237: in transactional_replace_with_backups
+    _flush_directory(prep)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-128/test_secure_store_real_backup_0/.credentials.dat.transaction.prep-facc958c8bd04e60aa6de90b498ebcb1')
+
+    def _flush_directory(path: Path) -> None:
+        if os.name != "nt":
+            descriptor = os.open(str(path), os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            return
+    
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            str(path),
+            0x80000000,
+            0x00000001 | 0x00000002 | 0x00000004,
+            None,
+            3,
+            0x02000000,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle in (None, invalid_handle):
+            raise OSError(ctypes.get_last_error(), f"could not open directory for flush: {path}")
+        try:
+            if not kernel32.FlushFileBuffers(ctypes.c_void_p(handle)):
+>               raise OSError(ctypes.get_last_error(), f"could not flush directory: {path}")
+E               OSError: [Errno 5] could not flush directory: C:\Users\14913\AppData\Local\Temp\pytest-of-14913\pytest-128\test_secure_store_real_backup_0\.credentials.dat.transaction.prep-facc958c8bd04e60aa6de90b498ebcb1
+
+file_transaction.py:130: OSError
+=========================== short test summary info ===========================
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[1]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[2]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[3]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[4]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[5]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_final_primary_replace_fault_restores_every_old_candidate_byte_for_byte
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_real_backup_replace_failure_never_partially_commits
+FAILED tests/test_phase1_final_fix.py::test_load_json_automatically_recovers_transaction_left_by_process_crash
+FAILED tests/test_phase1_final_fix.py::test_secure_store_uses_same_transaction_and_restores_all_old_candidates
+FAILED tests/test_phase1_final_fix.py::test_secure_store_real_backup_replace_failure_never_partially_commits
+================ 10 failed, 16 passed, 31 deselected in 2.77s =================

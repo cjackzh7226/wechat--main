@@ -1,0 +1,37 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- D:\Vibe C\客服\wechat--main\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\Vibe C\客服\wechat--main
+collecting ... collected 20 items / 19 deselected / 1 selected
+
+tests/test_phase1_final_fix.py::test_invalid_consistency_json_reaches_fake_sender_only_as_exact_no_answer FAILED [100%]
+
+================================== FAILURES ===================================
+__ test_invalid_consistency_json_reaches_fake_sender_only_as_exact_no_answer __
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-118/test_invalid_consistency_json_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x00000292DC238E50>
+
+    def test_invalid_consistency_json_reaches_fake_sender_only_as_exact_no_answer(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _judgement_engine(tmp_path, monkeypatch, {"chosen": 1, "consistent": "false"})
+        candidates = [{"question": "如何办理？", "reply": "APPROVED_KB_ANSWER", "record_id": "r1"}]
+        context = "[对方] 如何办理？"
+        replies = engine._enterprise_answer_via_judgement("如何办理？", candidates)
+    
+>       assert _send_personal_reply(engine, context, replies) == [EXACT_NO_ANSWER]
+E       AssertionError: assert ['APPROVED_KB_ANSWER'] == ['暂未查到对应答案']
+E         
+E         At index 0 diff: 'APPROVED_KB_ANSWER' != '暂未查到对应答案'
+E         
+E         Full diff:
+E           [
+E         -     '暂未查到对应答案',
+E         +     'APPROVED_KB_ANSWER',
+E           ]
+
+tests\test_phase1_final_fix.py:216: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_phase1_final_fix.py::test_invalid_consistency_json_reaches_fake_sender_only_as_exact_no_answer
+====================== 1 failed, 19 deselected in 1.13s =======================

@@ -1,0 +1,235 @@
+﻿Task 1 non-Git review package
+Plan: docs/superpowers/plans/2026-08-12-01-persistence-and-settings-hardening.md
+Baseline: implementation-prechange task snapshot plus verified prechange ZIP
+Report: 
+D:\Vibe C\客服\wechat--main\.superpowers\sdd\2026-08-12-01-persistence-and-settings-hardening\task-1-report.md
+
+
+===== DIFF: settings.py =====
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-1-baseline\\settings.py" b/settings.py
+index c71be06..4517134 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-1-baseline\\settings.py"	
++++ b/settings.py
+@@ -1,29 +1,22 @@
+ from __future__ import annotations
+ 
+ import json
+ import os
+-import sys
+ from dataclasses import asdict, dataclass, field
+ from pathlib import Path
+ 
+-
+-APP_NAME = "WeChatStyleReplyAssistant"
++from app_paths import config_path
+ 
+ 
+ def default_config_path() -> Path:
+-    if getattr(sys, "frozen", False):
+-        return Path(sys.executable).resolve().parent / "user_data" / "settings.json"
+-    base = os.environ.get("APPDATA")
+-    if base:
+-        return Path(base) / APP_NAME / "settings.json"
+-    return Path.home() / ".wechat_style_reply_assistant" / "settings.json"
++    return config_path()
+ 
+ 
+ @dataclass
+ class ChatArea:
+     x_left: float = 0.31
+     x_right: float = 0.98
+     y_top: float = 0.09
+     y_bottom: float = 0.91
+ 
+ 
+
+===== DIFF: memory.py =====
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-1-baseline\\memory.py" b/memory.py
+index 65a8d54..dd9595c 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-1-baseline\\memory.py"	
++++ b/memory.py
+@@ -1,25 +1,24 @@
+ from __future__ import annotations
+ 
+ import hashlib
+ import json
+ import os
+ import re
+ import shutil
+-import sys
+ import time
+ from collections import Counter
+ from dataclasses import dataclass, field
+ from datetime import datetime, timezone
+ from pathlib import Path
+ 
+-from settings import APP_NAME
++from app_paths import memory_path
+ 
+ 
+ ENTERPRISE_ANNUAL_REPORT_SOURCE = "enterprise_annual_report_kb"
+ ENTERPRISE_LOCAL_CONFIDENT_MARGIN = 8
+ ENTERPRISE_LOCAL_MIN_SCORE = 8
+ # 企业年报"可直接发送"的可靠底线：第一名分数不低于该值且明显领先第二名（>=8 分）且无冲突。
+ # 2026-08-05 用户要求低分阈值 20 -> 30：命中评分 < 30 时回复企业未命中文案。
+ ENTERPRISE_LOCAL_CONFIDENT_FLOOR = 30
+ 
+ # 普通话术库共享打分的最低匹配值：低于该值视为知识库未准备该问题，
+@@ -100,26 +99,21 @@ _ENTERPRISE_SCOPE_TERMS = (
+     "主任委员",
+     "副主任委员",
+     "学组",
+     "会费",
+     "专项基金",
+     "印章",
+ )
+ 
+ 
+ def default_memory_path() -> Path:
+-    if getattr(sys, "frozen", False):
+-        return Path(sys.executable).resolve().parent / "user_data" / "memory.json"
+-    base = os.environ.get("APPDATA")
+-    if base:
+-        return Path(base) / APP_NAME / "memory.json"
+-    return Path.home() / ".wechat_style_reply_assistant" / "memory.json"
++    return memory_path()
+ 
+ 
+ @dataclass
+ class StyleMemory:
+     path: Path = field(default_factory=default_memory_path)
+     style_summary: str = "偏短句、微信口语、少解释、少承诺。"
+     examples: list[dict[str, str]] = field(default_factory=list)
+     common_phrases: Counter = field(default_factory=Counter)
+     max_examples: int = 3000
+ 
+
+===== DIFF: app_paths.py =====
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-1-baseline\\__empty__" b/app_paths.py
+index e69de29..d244acc 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-1-baseline\\__empty__"	
++++ b/app_paths.py
+@@ -0,0 +1,42 @@
++from __future__ import annotations
++
++import os
++from pathlib import Path
++
++
++APP_NAME = "WeChatStyleReplyAssistant"
++TEST_OVERRIDE = "WECHAT_ASSISTANT_DATA_DIR"
++
++
++def data_dir() -> Path:
++    override = os.environ.get(TEST_OVERRIDE, "").strip()
++    if override:
++        return Path(override).resolve()
++    appdata = os.environ.get("APPDATA", "").strip()
++    if appdata:
++        return Path(appdata) / APP_NAME
++    return Path.home() / ".wechat_style_reply_assistant"
++
++
++def config_path() -> Path:
++    return data_dir() / "settings.json"
++
++
++def memory_path() -> Path:
++    return data_dir() / "memory.json"
++
++
++def vector_path() -> Path:
++    return data_dir() / "vector_memory.json"
++
++
++def credential_path() -> Path:
++    return data_dir() / "credentials.dat"
++
++
++def ledger_path() -> Path:
++    return data_dir() / "send_ledger.json"
++
++
++def logs_dir() -> Path:
++    return data_dir() / "logs"
+
+===== DIFF: tests\test_persistence.py =====
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-1-baseline\\__empty__" "b/tests\\test_persistence.py"
+index e69de29..acae0ee 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-1-baseline\\__empty__"	
++++ "b/tests\\test_persistence.py"
+@@ -0,0 +1,17 @@
++import sys
++
++import app_paths
++
++
++def test_source_and_frozen_use_same_explicit_data_root(tmp_path, monkeypatch):
++    monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(tmp_path))
++    assert app_paths.config_path() == tmp_path / "settings.json"
++    assert app_paths.memory_path() == tmp_path / "memory.json"
++    assert app_paths.vector_path() == tmp_path / "vector_memory.json"
++
++
++def test_default_root_is_appdata_even_when_frozen(tmp_path, monkeypatch):
++    monkeypatch.delenv("WECHAT_ASSISTANT_DATA_DIR", raising=False)
++    monkeypatch.setenv("APPDATA", str(tmp_path))
++    monkeypatch.setattr(sys, "frozen", True, raising=False)
++    assert app_paths.data_dir() == tmp_path / "WeChatStyleReplyAssistant"
+
+===== DIFF: tests\test_core.py =====
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-1-baseline\\test_core.py" "b/tests\\test_core.py"
+index 3c65682..34275f4 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-1-baseline\\test_core.py"	
++++ "b/tests\\test_core.py"
+@@ -1,11 +1,12 @@
+ import json
++import os
+ import sys
+ import types
+ import tempfile
+ import unittest
+ import zipfile
+ from pathlib import Path
+ from unittest.mock import patch
+ 
+ import chat_training
+ import memory as memory_module
+@@ -4530,29 +4531,33 @@ class SettingsTests(unittest.TestCase):
+                     }
+                 ),
+                 encoding="utf-8",
+             )
+ 
+             loaded = AppSettings(config_path=path).load()
+ 
+             self.assertEqual(loaded.api_key, "deepseek-key")
+             self.assertEqual(loaded.get_provider_api_key("deepseek"), "deepseek-key")
+ 
+-    def test_frozen_portable_defaults_store_data_next_to_exe(self):
++    def test_frozen_defaults_store_data_in_appdata(self):
+         with tempfile.TemporaryDirectory() as tmp:
+             exe_path = Path(tmp) / "聊小智.exe"
+-            with patch.object(sys, "frozen", True, create=True), patch.object(sys, "executable", str(exe_path)):
++            with patch.dict(
++                os.environ,
++                {"APPDATA": tmp, "WECHAT_ASSISTANT_DATA_DIR": ""},
++                clear=False,
++            ), patch.object(sys, "frozen", True, create=True), patch.object(sys, "executable", str(exe_path)):
+                 config_path = settings_module.default_config_path()
+                 memory_path = memory_module.default_memory_path()
+ 
+-            self.assertEqual(config_path, Path(tmp) / "user_data" / "settings.json")
+-            self.assertEqual(memory_path, Path(tmp) / "user_data" / "memory.json")
++            self.assertEqual(config_path, Path(tmp) / "WeChatStyleReplyAssistant" / "settings.json")
++            self.assertEqual(memory_path, Path(tmp) / "WeChatStyleReplyAssistant" / "memory.json")
+ 
+ 
+ class BuildReleaseTests(unittest.TestCase):
+     def test_build_release_collects_dynamic_training_import_dependencies(self):
+         import build_release
+ 
+         required = set(build_release.REQUIRED_IMPORTS) | set(build_release.COLLECT_ALL_PACKAGES)
+ 
+         self.assertIn("xlrd", required)
+         self.assertIn("enterprise_kb", required)

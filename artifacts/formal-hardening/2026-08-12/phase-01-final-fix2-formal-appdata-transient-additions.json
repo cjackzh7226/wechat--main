@@ -1,0 +1,26 @@
+{
+  "status": "quarantined_recoverably",
+  "attribution": "unknown",
+  "inference": "The files are unique runtime_logging initialization outputs and their captured timestamps fall between Round 2 R1 GREEN attempts, so test or standalone-probe pollution is likely, but no creator PID or command was captured.",
+  "baseline_file_count": 32,
+  "transient_file_count": 34,
+  "transient_mismatch_count": 2,
+  "final_file_count_after_quarantine": 32,
+  "files": [
+    {
+      "original_path": "C:\\Users\\14913\\AppData\\Roaming\\WeChatStyleReplyAssistant\\logs\\.runtime-salt",
+      "quarantine_path": "D:\\Vibe C\\客服\\wechat--main\\artifacts\\formal-hardening\\2026-08-12\\phase-01-final-fix2-formal-appdata-additions-quarantine\\.runtime-salt",
+      "size": 32,
+      "sha256": "e83b2ae3395e29d7ced86f0ad681c547f4bd9f6dcc21ff133e2abe212f13788f",
+      "captured_original_ctime_mtime_utc": "2026-08-12T01:19:42.4475569Z"
+    },
+    {
+      "original_path": "C:\\Users\\14913\\AppData\\Roaming\\WeChatStyleReplyAssistant\\logs\\runtime.log",
+      "quarantine_path": "D:\\Vibe C\\客服\\wechat--main\\artifacts\\formal-hardening\\2026-08-12\\phase-01-final-fix2-formal-appdata-additions-quarantine\\runtime.log",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "captured_original_ctime_mtime_utc": "2026-08-12T01:19:42.4572213Z"
+    }
+  ],
+  "evidence_gap": "The first 34-file after/current manifests were overwritten by the final 32-file recalculation. The exact added bytes remain in quarantine and this append-only manifest records the captured metadata."
+}

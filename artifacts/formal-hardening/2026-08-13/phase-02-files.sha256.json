@@ -1,0 +1,148 @@
+﻿{
+    "schema_version":  1,
+    "created_at":  "2026-08-13T06:30:40.0393992+08:00",
+    "reason":  "Phase 2 final recovery, migration-integrity, and delivery evidence checkpoint",
+    "file_count":  28,
+    "files":  [
+                  {
+                      "relative_path":  "knowledge_base.py",
+                      "size":  25690,
+                      "sha256":  "b04ff35e33ecfc7cc45c2eeb5a5dcebd7bb75a455695b07ea6c3fd12dabca6c3"
+                  },
+                  {
+                      "relative_path":  "candidate_judge.py",
+                      "size":  4786,
+                      "sha256":  "efd0b1656fd7527301b270ec53b35bd99058e21c2962729ff40bfa686181da01"
+                  },
+                  {
+                      "relative_path":  "managed_reply.py",
+                      "size":  5213,
+                      "sha256":  "045c925cc23d48cb3e5d7592532211f83c1b143693e7e4213b30f89c7bd37ca5"
+                  },
+                  {
+                      "relative_path":  "knowledge_import.py",
+                      "size":  28005,
+                      "sha256":  "aaf4da59241135f00be924a629596dba54a5ec61bf28d5f412d0780cc38c031d"
+                  },
+                  {
+                      "relative_path":  "memory.py",
+                      "size":  55841,
+                      "sha256":  "31602a316a5175d2eacc3fd94149813a61f1595e7d7cbfe7290478913079620c"
+                  },
+                  {
+                      "relative_path":  "reply_engine.py",
+                      "size":  55480,
+                      "sha256":  "5ba9a1fa9a58b419548f0633225610426de9af86c758e424dc13cdfe51174773"
+                  },
+                  {
+                      "relative_path":  "main.py",
+                      "size":  112589,
+                      "sha256":  "1adabc604760bb26f13ad697faed44d5096cc65c3c9314d66a83252e4e4dbb6f"
+                  },
+                  {
+                      "relative_path":  "float_ui.py",
+                      "size":  83860,
+                      "sha256":  "d62780c9cb0c19128b38fc88c0f71fa40570f179c892508e949b5b89b4eb7e57"
+                  },
+                  {
+                      "relative_path":  "chat_training.py",
+                      "size":  33588,
+                      "sha256":  "dd8a7f96ccd305ecbe4a03f44dc221434dc1745e98a4e705f38062b5529d531e"
+                  },
+                  {
+                      "relative_path":  "build_release.py",
+                      "size":  8192,
+                      "sha256":  "230d9665e126927ec2740095129860e431aa9044bc0dca8a113123fb59c27ad8"
+                  },
+                  {
+                      "relative_path":  "requirements.txt",
+                      "size":  162,
+                      "sha256":  "a838cff41fa2d9cf080eef1ba619a3e1e4e59a5f830de62aada829255a9b7dd3"
+                  },
+                  {
+                      "relative_path":  "tools/migrate_formal_knowledge.py",
+                      "size":  26389,
+                      "sha256":  "87430c67616ec256fa0aaa22963a2640d60791a9ccfc22fd4ff8aef2c5b8480f"
+                  },
+                  {
+                      "relative_path":  "tests/test_knowledge_contract.py",
+                      "size":  56646,
+                      "sha256":  "bb9bd36ee686a9beb6fce3f8e53b8f6d67b98f24181068e5357098de5af37fa5"
+                  },
+                  {
+                      "relative_path":  "tests/test_migration.py",
+                      "size":  17617,
+                      "sha256":  "4ce9c4bb2d98a7aef83546d250d42c809b41bee9b810f70e23a23dfe198153f8"
+                  },
+                  {
+                      "relative_path":  "tests/test_core.py",
+                      "size":  234826,
+                      "sha256":  "c3bf5ebce80c9217bcedde80815a81650deb3ddb67012c9eec3fb3b3f542108b"
+                  },
+                  {
+                      "relative_path":  "tests/test_persistence.py",
+                      "size":  72852,
+                      "sha256":  "404d48298550cf22fb46b2cb0802dc5be14a50ae337df3f349554050acbd9149"
+                  },
+                  {
+                      "relative_path":  "tests/test_phase1_final_fix.py",
+                      "size":  64521,
+                      "sha256":  "be0cc9e024d72734375706d6b9d64ad7efcbd896643f782fcadd85133021f157"
+                  },
+                  {
+                      "relative_path":  "artifacts/formal-hardening/2026-08-13/knowledge-migration-dry-run.json",
+                      "size":  738984,
+                      "sha256":  "2c85349839c45c3211811a61177b60876b4bf68ee215e1eb4c534b70d3379d00"
+                  },
+                  {
+                      "relative_path":  "artifacts/formal-hardening/2026-08-13/phase-02-knowledge.xml",
+                      "size":  110907,
+                      "sha256":  "cf051b5b44f4d50da96bd961cb949338c60afcd59ca7a9f2ee4065216c4bc704"
+                  },
+                  {
+                      "relative_path":  "artifacts/formal-hardening/2026-08-13/phase-02-full-pytest.txt",
+                      "size":  1793,
+                      "sha256":  "56bfd712c9f79c3fd69a251b1cca4d25f516156ff3d885d53f57f9aa30992557"
+                  },
+                  {
+                      "relative_path":  "artifacts/formal-hardening/2026-08-13/phase-02-pycompile.txt",
+                      "size":  229,
+                      "sha256":  "cf012c13b3f96fdbe03de463f462c653a4cc22df1539d8c41bef3f4ceb4dc81a"
+                  },
+                  {
+                      "relative_path":  "artifacts/formal-hardening/2026-08-13/phase-02-formal-appdata-before.json",
+                      "size":  6836,
+                      "sha256":  "dce85a645edbf5371d1b65536ef082ca253da7317a15fae5377602bb8beb42e8"
+                  },
+                  {
+                      "relative_path":  "artifacts/formal-hardening/2026-08-13/phase-02-formal-appdata-after.json",
+                      "size":  6836,
+                      "sha256":  "dce85a645edbf5371d1b65536ef082ca253da7317a15fae5377602bb8beb42e8"
+                  },
+                  {
+                      "relative_path":  "artifacts/formal-hardening/2026-08-13/phase-02-formal-appdata-comparison.json",
+                      "size":  599,
+                      "sha256":  "580e217c0b355f3460cd019458688de963c11e142c56bee890394a3aecbaf0ee"
+                  },
+                  {
+                      "relative_path":  ".superpowers/sdd/2026-08-12-02-managed-knowledge-contract-and-migration/task-6-report.md",
+                      "size":  3518,
+                      "sha256":  "b268a10716bb98ce593ffc5c6cbd474be4a50b94745e048a8b3fcf9b5a31fed9"
+                  },
+                  {
+                      "relative_path":  ".superpowers/sdd/2026-08-12-02-managed-knowledge-contract-and-migration/phase-02-review.md",
+                      "size":  7789,
+                      "sha256":  "137371fc76b38bd5e2f415615c5ab9d030378babfcb97da4691a37f8ea319389"
+                  },
+                  {
+                      "relative_path":  ".superpowers/sdd/2026-08-12-02-managed-knowledge-contract-and-migration/progress.md",
+                      "size":  13031,
+                      "sha256":  "9078ec0279bb74481b75c4ae5ff0639203742f919bad31394e961d6b42f3ca50"
+                  },
+                  {
+                      "relative_path":  ".workbuddy/memory/2026-08-13.md",
+                      "size":  11479,
+                      "sha256":  "ae3523b538c0813f27b7b52e11c8965c186a2d86af2f47fc5c7fb96660783d35"
+                  }
+              ]
+}

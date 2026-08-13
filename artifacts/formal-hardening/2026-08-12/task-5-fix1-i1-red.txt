@@ -1,0 +1,223 @@
+﻿COMMAND=.venv\Scripts\python.exe -m pytest tests/test_persistence.py::test_corrupt_credentials_in_v1_or_v2_produce_visible_typed_startup_block_without_byte_changes tests/test_persistence.py::test_illegal_utf8_settings_produce_visible_typed_startup_block_without_replacement tests/test_persistence.py::test_settings_read_oserror_produces_visible_typed_startup_block -q
+EXIT_CODE=1
+FFFF                                                                     [100%]
+================================== FAILURES ===================================
+_ test_corrupt_credentials_in_v1_or_v2_produce_visible_typed_startup_block_without_byte_changes[1] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-95/test_corrupt_credentials_in_v10')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x0000021FFAB3F710>
+version = 1
+
+    @pytest.mark.parametrize("version", [1, 2])
+    def test_corrupt_credentials_in_v1_or_v2_produce_visible_typed_startup_block_without_byte_changes(
+        tmp_path,
+        monkeypatch,
+        version,
+    ):
+        from main import load_startup_state_for_test
+    
+        data_root = tmp_path / f"credential-v{version}"
+        monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(data_root))
+        data_root.mkdir(parents=True)
+        if version == 1:
+            settings_payload = {"config_version": 1, "managed_auto_reply": True, "api_key": "legacy-secret"}
+        else:
+            settings_payload = {"config_version": 2, "managed_mode": "full"}
+        settings_bytes = json.dumps(settings_payload).encode("utf-8")
+        credential_bytes = b"not-a-valid-dpapi-credential"
+        settings_path = data_root / "settings.json"
+        credential_path = data_root / "credentials.dat"
+        settings_path.write_bytes(settings_bytes)
+        credential_path.write_bytes(credential_bytes)
+    
+        state = load_startup_state_for_test()
+    
+        assert state.managed_mode == "off"
+>       assert state.error_type is not None
+E       AssertionError: assert None is not None
+E        +  where None = StartupState(settings=AppSettings(config_path=WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-95...max_examples=3000, vector_ready=False, last_vector_error=None), managed_mode='off', blocking_error='', error_type=None).error_type
+
+tests\test_persistence.py:383: AssertionError
+_ test_corrupt_credentials_in_v1_or_v2_produce_visible_typed_startup_block_without_byte_changes[2] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-95/test_corrupt_credentials_in_v11')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x0000021FFA54A650>
+version = 2
+
+    @pytest.mark.parametrize("version", [1, 2])
+    def test_corrupt_credentials_in_v1_or_v2_produce_visible_typed_startup_block_without_byte_changes(
+        tmp_path,
+        monkeypatch,
+        version,
+    ):
+        from main import load_startup_state_for_test
+    
+        data_root = tmp_path / f"credential-v{version}"
+        monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(data_root))
+        data_root.mkdir(parents=True)
+        if version == 1:
+            settings_payload = {"config_version": 1, "managed_auto_reply": True, "api_key": "legacy-secret"}
+        else:
+            settings_payload = {"config_version": 2, "managed_mode": "full"}
+        settings_bytes = json.dumps(settings_payload).encode("utf-8")
+        credential_bytes = b"not-a-valid-dpapi-credential"
+        settings_path = data_root / "settings.json"
+        credential_path = data_root / "credentials.dat"
+        settings_path.write_bytes(settings_bytes)
+        credential_path.write_bytes(credential_bytes)
+    
+>       state = load_startup_state_for_test()
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_persistence.py:380: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+main.py:154: in load_startup_state_for_test
+    settings.load()
+settings.py:478: in load
+    self._apply_credentials(self.credential_store.load())
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <secure_store.CredentialStore object at 0x0000021FF76D6A10>
+
+    def load(self) -> dict[str, str]:
+        existing = False
+        reasons: list[str] = []
+        for candidate in self._candidates():
+            try:
+                blob = candidate.read_bytes()
+                existing = True
+                return self._decode_blob(blob)
+            except FileNotFoundError:
+                continue
+            except Exception as error:
+                existing = True
+                reasons.append(f"{candidate.name}: {type(error).__name__}: {error}")
+        if not existing:
+            return {}
+>       raise CredentialStoreError("No valid credential blob: " + "; ".join(reasons))
+E       secure_store.CredentialStoreError: No valid credential blob: credentials.dat: error: (87, 'CryptUnprotectData', '��������')
+
+secure_store.py:106: CredentialStoreError
+_ test_illegal_utf8_settings_produce_visible_typed_startup_block_without_replacement _
+
+self = AppSettings(config_path=WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-95/test_illegal_utf8_set..._account_name='', group_poll_interval_ms=800, chat_area=ChatArea(x_left=0.31, x_right=0.98, y_top=0.09, y_bottom=0.91))
+
+    def _load_document(self) -> dict[str, object]:
+        try:
+>           return load_json(self.config_path, self._validate_raw_document).data
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+settings.py:318: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-95/test_illegal_utf8_settings_pro0/invalid-utf8/settings.json')
+validator = <bound method AppSettings._validate_raw_document of AppSettings(config_path=WindowsPath('C:/Users/14913/AppData/Local/...account_name='', group_poll_interval_ms=800, chat_area=ChatArea(x_left=0.31, x_right=0.98, y_top=0.09, y_bottom=0.91))>
+
+    def load_json(path: Path, validator: JsonValidator) -> JsonLoadResult:
+        """Load the primary JSON file or the newest valid backup."""
+        path = Path(path)
+        candidates = [path, *(path.with_name(f"{path.name}.bak.{index}") for index in range(1, 6))]
+        reasons: list[tuple[Path, str]] = []
+        for candidate in candidates:
+            try:
+                return JsonLoadResult(
+                    data=_read_valid_json(candidate, validator),
+                    source=candidate,
+                    recovered=candidate != path,
+                )
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+                reasons.append((candidate, f"{type(error).__name__}: {error}"))
+>       raise JsonDataError(path, reasons)
+E       atomic_json.JsonDataError: No valid JSON data for C:\Users\14913\AppData\Local\Temp\pytest-of-14913\pytest-95\test_illegal_utf8_settings_pro0\invalid-utf8\settings.json: C:\Users\14913\AppData\Local\Temp\pytest-of-14913\pytest-95\test_illegal_utf8_settings_pro0\invalid-utf8\settings.json: UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte; C:\Users\14913\AppData\Local\Temp\pytest-of-14913\pytest-95\test_illegal_utf8_settings_pro0\invalid-utf8\settings.json.bak.1: FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\14913\\AppData\\Local\\Temp\\pytest-of-14913\\pytest-95\\test_illegal_utf8_settings_pro0\\invalid-utf8\\settings.json.bak.1'; C:\Users\14913\AppData\Local\Temp\pytest-of-14913\pytest-95\test_illegal_utf8_settings_pro0\invalid-utf8\settings.json.bak.2: FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\14913\\AppData\\Local\\Temp\\pytest-of-14913\\pytest-95\\test_illegal_utf8_settings_pro0\\invalid-utf8\\settings.json.bak.2'; C:\Users\14913\AppData\Local\Temp\pytest-of-14913\pytest-95\test_illegal_utf8_settings_pro0\invalid-utf8\settings.json.bak.3: FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\14913\\AppData\\Local\\Temp\\pytest-of-14913\\pytest-95\\test_illegal_utf8_settings_pro0\\invalid-utf8\\settings.json.bak.3'; C:\Users\14913\AppData\Local\Temp\pytest-of-14913\pytest-95\test_illegal_utf8_settings_pro0\invalid-utf8\settings.json.bak.4: FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\14913\\AppData\\Local\\Temp\\pytest-of-14913\\pytest-95\\test_illegal_utf8_settings_pro0\\invalid-utf8\\settings.json.bak.4'; C:\Users\14913\AppData\Local\Temp\pytest-of-14913\pytest-95\test_illegal_utf8_settings_pro0\invalid-utf8\settings.json.bak.5: FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\14913\\AppData\\Local\\Temp\\pytest-of-14913\\pytest-95\\test_illegal_utf8_settings_pro0\\invalid-utf8\\settings.json.bak.5'
+
+atomic_json.py:55: JsonDataError
+
+During handling of the above exception, another exception occurred:
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-95/test_illegal_utf8_settings_pro0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x0000021FFF6C3ED0>
+
+    def test_illegal_utf8_settings_produce_visible_typed_startup_block_without_replacement(tmp_path, monkeypatch):
+        from main import load_startup_state_for_test
+    
+        data_root = tmp_path / "invalid-utf8"
+        monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(data_root))
+        data_root.mkdir(parents=True)
+        settings_path = data_root / "settings.json"
+        original = b"\xff\xfe\xfa"
+        settings_path.write_bytes(original)
+    
+>       state = load_startup_state_for_test()
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_persistence.py:400: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+main.py:154: in load_startup_state_for_test
+    settings.load()
+settings.py:474: in load
+    data = self._load_document()
+           ^^^^^^^^^^^^^^^^^^^^^
+settings.py:321: in _load_document
+    value = json.loads(self.config_path.read_text(encoding="utf-8"))
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\14913\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1059: in read_text
+    return f.read()
+           ^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <encodings.utf_8.IncrementalDecoder object at 0x0000021FFF66EBD0>
+input = b'\xff\xfe\xfa', final = True
+
+>   ???
+E   UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte
+
+<frozen codecs>:322: UnicodeDecodeError
+_______ test_settings_read_oserror_produces_visible_typed_startup_block _______
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-95/test_settings_read_oserror_pro0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x0000021FF83737D0>
+
+    def test_settings_read_oserror_produces_visible_typed_startup_block(tmp_path, monkeypatch):
+        from main import load_startup_state_for_test
+    
+        data_root = tmp_path / "settings-io"
+        monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(data_root))
+        data_root.mkdir(parents=True)
+        settings_path = data_root / "settings.json"
+        original = json.dumps({"config_version": 2, "managed_mode": "full"}).encode("utf-8")
+        settings_path.write_bytes(original)
+    
+        def denied_read(*args, **kwargs):
+            raise OSError("permission denied")
+    
+        monkeypatch.setattr(settings_module, "load_json", denied_read)
+>       state = load_startup_state_for_test()
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_persistence.py:422: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+main.py:154: in load_startup_state_for_test
+    settings.load()
+settings.py:474: in load
+    data = self._load_document()
+           ^^^^^^^^^^^^^^^^^^^^^
+settings.py:318: in _load_document
+    return load_json(self.config_path, self._validate_raw_document).data
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+args = (WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-95/test_settings_read_oserror_pro0/settings-io/...ccount_name='', group_poll_interval_ms=800, chat_area=ChatArea(x_left=0.31, x_right=0.98, y_top=0.09, y_bottom=0.91))>)
+kwargs = {}
+
+    def denied_read(*args, **kwargs):
+>       raise OSError("permission denied")
+E       OSError: permission denied
+
+tests\test_persistence.py:419: OSError
+=========================== short test summary info ===========================
+FAILED tests/test_persistence.py::test_corrupt_credentials_in_v1_or_v2_produce_visible_typed_startup_block_without_byte_changes[1]
+FAILED tests/test_persistence.py::test_corrupt_credentials_in_v1_or_v2_produce_visible_typed_startup_block_without_byte_changes[2]
+FAILED tests/test_persistence.py::test_illegal_utf8_settings_produce_visible_typed_startup_block_without_replacement
+FAILED tests/test_persistence.py::test_settings_read_oserror_produces_visible_typed_startup_block
+4 failed in 1.54s

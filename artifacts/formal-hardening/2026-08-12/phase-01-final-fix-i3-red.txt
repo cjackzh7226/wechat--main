@@ -1,0 +1,133 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- D:\Vibe C\客服\wechat--main\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\Vibe C\客服\wechat--main
+collecting ... collected 67 items / 59 deselected / 8 selected
+
+tests/test_phase1_final_fix.py::test_send_ledger_uncertain_turn_survives_restart_and_persists_only_hashes FAILED [ 12%]
+tests/test_phase1_final_fix.py::test_send_ledger_failed_turn_can_be_prepared_for_retry FAILED [ 25%]
+tests/test_phase1_final_fix.py::test_send_ledger_corruption_and_write_failure_are_typed_blocking_errors FAILED [ 37%]
+tests/test_phase1_final_fix.py::test_two_single_instance_guards_allow_only_one_runtime FAILED [ 50%]
+tests/test_phase1_final_fix.py::test_personal_uncertain_ledger_prevents_resend_after_restart FAILED [ 62%]
+tests/test_phase1_final_fix.py::test_corrupt_or_unwritable_ledger_blocks_personal_sender FAILED [ 75%]
+tests/test_phase1_final_fix.py::test_startup_baseline_suppresses_visible_old_turn FAILED [ 87%]
+tests/test_phase1_final_fix.py::test_group_send_failure_is_retryable_and_is_not_marked_handled_before_send FAILED [100%]
+
+================================== FAILURES ===================================
+__ test_send_ledger_uncertain_turn_survives_restart_and_persists_only_hashes __
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-134/test_send_ledger_uncertain_tur0')
+
+    def test_send_ledger_uncertain_turn_survives_restart_and_persists_only_hashes(tmp_path: Path) -> None:
+        path = tmp_path / "send_ledger.json"
+>       first = SendLedger(path).load()
+                ^^^^^^^^^^^^^^^^
+E       TypeError: SendLedger() takes no arguments
+
+tests\test_phase1_final_fix.py:514: TypeError
+___________ test_send_ledger_failed_turn_can_be_prepared_for_retry ____________
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-134/test_send_ledger_failed_turn_c0')
+
+    def test_send_ledger_failed_turn_can_be_prepared_for_retry(tmp_path: Path) -> None:
+>       ledger = SendLedger(tmp_path / "send_ledger.json").load()
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: SendLedger() takes no arguments
+
+tests\test_phase1_final_fix.py:539: TypeError
+___ test_send_ledger_corruption_and_write_failure_are_typed_blocking_errors ___
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-134/test_send_ledger_corruption_an0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x0000026AD8360050>
+
+    def test_send_ledger_corruption_and_write_failure_are_typed_blocking_errors(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        corrupt_path = tmp_path / "corrupt-ledger.json"
+        corrupt_path.write_text("{broken", encoding="utf-8")
+        with pytest.raises(LedgerBlockingError):
+>           SendLedger(corrupt_path).load()
+            ^^^^^^^^^^^^^^^^^^^^^^^^
+E           TypeError: SendLedger() takes no arguments
+
+tests\test_phase1_final_fix.py:555: TypeError
+___________ test_two_single_instance_guards_allow_only_one_runtime ____________
+
+    def test_two_single_instance_guards_allow_only_one_runtime() -> None:
+        api = _FakeMutexApi()
+>       first = single_instance.SingleInstance(single_instance.MUTEX_NAME, api=api)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: SingleInstance() takes no arguments
+
+tests\test_phase1_final_fix.py:589: TypeError
+________ test_personal_uncertain_ledger_prevents_resend_after_restart _________
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-134/test_personal_uncertain_ledger0')
+
+    def test_personal_uncertain_ledger_prevents_resend_after_restart(tmp_path: Path) -> None:
+        engine = _empty_engine(tmp_path)
+        context = "[对方] 这个怎么办？"
+        replies = engine.generate(context, "客户")
+        ledger_path = tmp_path / "send_ledger.json"
+    
+        first_sender = _FakeSender()
+>       first_app, _window = _new_managed_app(engine, SendLedger(ledger_path).load(), first_sender)
+                                                      ^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: SendLedger() takes no arguments
+
+tests\test_phase1_final_fix.py:627: TypeError
+__________ test_corrupt_or_unwritable_ledger_blocks_personal_sender ___________
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-134/test_corrupt_or_unwritable_led0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x0000026AD9440C10>
+
+    def test_corrupt_or_unwritable_ledger_blocks_personal_sender(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _empty_engine(tmp_path)
+        context = "[对方] 这个怎么办？"
+        replies = engine.generate(context, "客户")
+    
+        corrupt_path = tmp_path / "corrupt-send-ledger.json"
+        corrupt_path.write_text("{broken", encoding="utf-8")
+        corrupt_sender = _FakeSender()
+>       corrupt_app, _window = _new_managed_app(engine, SendLedger(corrupt_path), corrupt_sender)
+                                                        ^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: SendLedger() takes no arguments
+
+tests\test_phase1_final_fix.py:655: TypeError
+______________ test_startup_baseline_suppresses_visible_old_turn ______________
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-134/test_startup_baseline_suppress0')
+
+    def test_startup_baseline_suppresses_visible_old_turn(tmp_path: Path) -> None:
+        engine = _empty_engine(tmp_path)
+        context = "[对方] 启动前旧问题？"
+        sender = _FakeSender()
+>       app, window = _new_managed_app(engine, SendLedger(tmp_path / "send_ledger.json").load(), sender)
+                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: SendLedger() takes no arguments
+
+tests\test_phase1_final_fix.py:682: TypeError
+_ test_group_send_failure_is_retryable_and_is_not_marked_handled_before_send __
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-134/test_group_send_failure_is_ret0')
+
+    def test_group_send_failure_is_retryable_and_is_not_marked_handled_before_send(tmp_path: Path) -> None:
+        engine = _empty_engine(tmp_path)
+        sender = _ScriptedSender([False, True])
+>       app, _personal_window = _new_managed_app(engine, SendLedger(tmp_path / "send_ledger.json").load(), sender)
+                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: SendLedger() takes no arguments
+
+tests\test_phase1_final_fix.py:696: TypeError
+=========================== short test summary info ===========================
+FAILED tests/test_phase1_final_fix.py::test_send_ledger_uncertain_turn_survives_restart_and_persists_only_hashes
+FAILED tests/test_phase1_final_fix.py::test_send_ledger_failed_turn_can_be_prepared_for_retry
+FAILED tests/test_phase1_final_fix.py::test_send_ledger_corruption_and_write_failure_are_typed_blocking_errors
+FAILED tests/test_phase1_final_fix.py::test_two_single_instance_guards_allow_only_one_runtime
+FAILED tests/test_phase1_final_fix.py::test_personal_uncertain_ledger_prevents_resend_after_restart
+FAILED tests/test_phase1_final_fix.py::test_corrupt_or_unwritable_ledger_blocks_personal_sender
+FAILED tests/test_phase1_final_fix.py::test_startup_baseline_suppresses_visible_old_turn
+FAILED tests/test_phase1_final_fix.py::test_group_send_failure_is_retryable_and_is_not_marked_handled_before_send
+====================== 8 failed, 59 deselected in 1.35s =======================

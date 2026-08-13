@@ -1,0 +1,98 @@
+﻿[
+    {
+        "path":  "app_paths.py",
+        "size":  875,
+        "sha256":  "f8f5ff09720facc8b5384d302ae1f6a9083042a573cea5ecbde2060d1a530440",
+        "mtime_utc":  "2026-08-11T20:53:32.2165401Z"
+    },
+    {
+        "path":  "atomic_json.py",
+        "size":  4159,
+        "sha256":  "db2707257a7b155625a2916991e7e7e4037297a94a14f81acb6bf2799d8ecb2a",
+        "mtime_utc":  "2026-08-12T00:29:28.2124595Z"
+    },
+    {
+        "path":  "file_transaction.py",
+        "size":  9677,
+        "sha256":  "815d34ed4f15cff985eaef7df5e37051296cf3f1e5ab3dfbfc23d8cacf11759a",
+        "mtime_utc":  "2026-08-12T00:30:19.7423129Z"
+    },
+    {
+        "path":  "secure_store.py",
+        "size":  4325,
+        "sha256":  "e0ca03f77cec619d76d902244661338efccbce4fc1140ee07dade3a41c6806b3",
+        "mtime_utc":  "2026-08-12T00:29:47.1569830Z"
+    },
+    {
+        "path":  "settings.py",
+        "size":  24632,
+        "sha256":  "4688e828e4060da9a011012699da6a0ce6cebde1b2fe78585233434c40a4862c",
+        "mtime_utc":  "2026-08-12T00:44:40.9839579Z"
+    },
+    {
+        "path":  "memory.py",
+        "size":  48910,
+        "sha256":  "3eb04ad35be57b66a961013889cc20586e480f7dbc3fe99848b712dd7b7a4c6b",
+        "mtime_utc":  "2026-08-11T22:27:25.8059856Z"
+    },
+    {
+        "path":  "reply_engine.py",
+        "size":  54910,
+        "sha256":  "02c5c135c10a163a31f54879cc6583b9ad3dbd48d5e7981688567768f3077dd1",
+        "mtime_utc":  "2026-08-12T00:20:52.6903380Z"
+    },
+    {
+        "path":  "runtime_logging.py",
+        "size":  7183,
+        "sha256":  "59538aa18a6c9271e3a3b8a02142864eb5a00b6e3b4a877acfe5b1a41700551f",
+        "mtime_utc":  "2026-08-12T00:51:06.5083620Z"
+    },
+    {
+        "path":  "float_ui.py",
+        "size":  83719,
+        "sha256":  "99ba9a12dba8931d86c82dc1923fdad1ac542f47042511337bedd81a3bc52eeb",
+        "mtime_utc":  "2026-08-12T00:45:13.2175225Z"
+    },
+    {
+        "path":  "main.py",
+        "size":  104644,
+        "sha256":  "bd9d106e0bc0267614bc14bf452ce166d73e5f65981fe47ba76f9395df4336ce",
+        "mtime_utc":  "2026-08-12T00:54:49.0667275Z"
+    },
+    {
+        "path":  "send_ledger.py",
+        "size":  8964,
+        "sha256":  "214d8cb95e9a40906693546a8574b3f83490b3dc5e36a546abefa4c786f21855",
+        "mtime_utc":  "2026-08-12T00:36:37.1775521Z"
+    },
+    {
+        "path":  "single_instance.py",
+        "size":  3208,
+        "sha256":  "de36246ddcb2b94dfff4de7fd37937ab63115b2a43a8e9ccdbe10f0a1b8d2de3",
+        "mtime_utc":  "2026-08-12T00:49:06.4345928Z"
+    },
+    {
+        "path":  "tests\\conftest.py",
+        "size":  2469,
+        "sha256":  "5c1c67648a5c77c3d6a7dbf34dd3770a436c6f3ca6f4e4720aaf1864ebf3d2a8",
+        "mtime_utc":  "2026-08-11T23:16:25.3116560Z"
+    },
+    {
+        "path":  "tests\\test_core.py",
+        "size":  233703,
+        "sha256":  "76e64b101a2541647400b9eb9a3c027b85e9a02f6e8282d4886ba5792efe8c3b",
+        "mtime_utc":  "2026-08-12T00:51:02.2568176Z"
+    },
+    {
+        "path":  "tests\\test_persistence.py",
+        "size":  71761,
+        "sha256":  "c7707e1060da5ff885c77097f1580c1a661f5e9ce5b69c5615f444639122e6e4",
+        "mtime_utc":  "2026-08-12T00:51:06.5114206Z"
+    },
+    {
+        "path":  "tests\\test_phase1_final_fix.py",
+        "size":  33201,
+        "sha256":  "7c7f9d87daf620ba2c90a7017315d85ba2028e0b2a5ae31a4c89199d23bdefd9",
+        "mtime_utc":  "2026-08-12T00:54:30.0871517Z"
+    }
+]

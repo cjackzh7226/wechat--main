@@ -1,0 +1,146 @@
+﻿COMMAND=.venv\Scripts\python.exe -m pytest tests/test_persistence.py -q
+EXIT_CODE=1
+.....F.................................................................. [ 56%]
+....................................................FF.                  [100%]
+================================== FAILURES ===================================
+____ test_runtime_logger_rotates_at_exact_limit_and_writes_parseable_jsonl ____
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-101/test_runtime_logger_rotates_at0')
+
+    def test_runtime_logger_rotates_at_exact_limit_and_writes_parseable_jsonl(tmp_path):
+        from runtime_logging import build_runtime_logger
+    
+        logger = build_runtime_logger(tmp_path)
+        handlers = [handler for handler in logger.handlers if isinstance(handler, logging.handlers.RotatingFileHandler)]
+        assert len(handlers) == 1
+        handler = handlers[0]
+        assert handler.maxBytes == 2_000_000
+        assert handler.backupCount == 5
+    
+        for index in range(5):
+            logger.info(
+                "rotation-check",
+                extra={
+                    "event_data": {
+                        "event": "rotation-check",
+                        "record_id": f"r{index}",
+                        "state": "x" * 700_000,
+                    }
+                },
+            )
+        handler.flush()
+    
+        log_files = sorted(tmp_path.glob("runtime.log*"))
+>       assert 2 <= len(log_files) <= 6
+E       AssertionError: assert 2 <= 1
+E        +  where 1 = len([WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-101/test_runtime_logger_rotates_at0/runtime.log')])
+
+tests\test_persistence.py:240: AssertionError
+_ test_failed_legacy_credential_migration_preserves_original_bytes_and_forces_managed_off[save] _
+
+self = <test_persistence.FakeCredentialStore object at 0x000002B8EC0E9250>
+keys = {'zhipu': 'legacy-secret'}
+
+    def save(self, keys):
+        if self.save_error is not None:
+>           raise self.save_error
+E           RuntimeError: encrypt failed
+
+tests\test_persistence.py:65: RuntimeError
+
+The above exception was the direct cause of the following exception:
+
+failure_mode = 'save'
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-101/test_failed_legacy_credential_0')
+
+    @pytest.mark.parametrize("failure_mode", ["save", "load"])
+    def test_failed_legacy_credential_migration_preserves_original_bytes_and_forces_managed_off(
+        failure_mode, tmp_path
+    ):
+        path = tmp_path / "settings.json"
+        original = b'{\n  "api_key": "legacy-secret",\n  "managed_auto_reply": true\n}\n'
+        path.write_bytes(original)
+        credential_store = FakeCredentialStore(
+            save_error=RuntimeError("encrypt failed") if failure_mode == "save" else None,
+            load_error=RuntimeError("read-back failed") if failure_mode == "load" else None,
+        )
+    
+        loaded = settings_module.AppSettings(
+            config_path=path,
+            credential_store=credential_store,
+>       ).load()
+          ^^^^^^
+
+tests\test_persistence.py:1816: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+settings.py:509: in load
+    self._save_credentials(encrypted)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = AppSettings(config_path=WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-101/test_failed_legacy_c..._account_name='', group_poll_interval_ms=800, chat_area=ChatArea(x_left=0.31, x_right=0.98, y_top=0.09, y_bottom=0.91))
+credentials = {'zhipu': 'legacy-secret'}
+
+    def _save_credentials(self, credentials: dict[str, str]) -> None:
+        try:
+            self.credential_store.save(credentials)
+        except Exception as error:
+>           raise SettingsPersistenceError("credential store could not be written") from error
+E           settings.SettingsPersistenceError: credential store could not be written
+
+settings.py:345: SettingsPersistenceError
+_ test_failed_legacy_credential_migration_preserves_original_bytes_and_forces_managed_off[load] _
+
+self = <test_persistence.FakeCredentialStore object at 0x000002B8EA128650>
+
+    def load(self):
+        if self.load_error is not None:
+>           raise self.load_error
+E           RuntimeError: read-back failed
+
+tests\test_persistence.py:60: RuntimeError
+
+The above exception was the direct cause of the following exception:
+
+failure_mode = 'load'
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-101/test_failed_legacy_credential_1')
+
+    @pytest.mark.parametrize("failure_mode", ["save", "load"])
+    def test_failed_legacy_credential_migration_preserves_original_bytes_and_forces_managed_off(
+        failure_mode, tmp_path
+    ):
+        path = tmp_path / "settings.json"
+        original = b'{\n  "api_key": "legacy-secret",\n  "managed_auto_reply": true\n}\n'
+        path.write_bytes(original)
+        credential_store = FakeCredentialStore(
+            save_error=RuntimeError("encrypt failed") if failure_mode == "save" else None,
+            load_error=RuntimeError("read-back failed") if failure_mode == "load" else None,
+        )
+    
+        loaded = settings_module.AppSettings(
+            config_path=path,
+            credential_store=credential_store,
+>       ).load()
+          ^^^^^^
+
+tests\test_persistence.py:1816: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+settings.py:504: in load
+    encrypted = self._load_credentials()
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = AppSettings(config_path=WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-101/test_failed_legacy_c..._account_name='', group_poll_interval_ms=800, chat_area=ChatArea(x_left=0.31, x_right=0.98, y_top=0.09, y_bottom=0.91))
+
+    def _load_credentials(self) -> dict[str, str]:
+        try:
+            return self.credential_store.load()
+        except Exception as error:
+>           raise SettingsPersistenceError("credential store could not be read") from error
+E           settings.SettingsPersistenceError: credential store could not be read
+
+settings.py:339: SettingsPersistenceError
+=========================== short test summary info ===========================
+FAILED tests/test_persistence.py::test_runtime_logger_rotates_at_exact_limit_and_writes_parseable_jsonl
+FAILED tests/test_persistence.py::test_failed_legacy_credential_migration_preserves_original_bytes_and_forces_managed_off[save]
+FAILED tests/test_persistence.py::test_failed_legacy_credential_migration_preserves_original_bytes_and_forces_managed_off[load]
+3 failed, 124 passed in 5.93s

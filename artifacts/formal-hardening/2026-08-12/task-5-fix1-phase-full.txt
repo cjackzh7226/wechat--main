@@ -1,0 +1,251 @@
+﻿COMMAND=.venv\Scripts\python.exe -m pytest tests/test_persistence.py tests/test_core.py -q --junitxml=artifacts/formal-hardening/2026-08-12/phase-01-persistence.xml
+EXIT_CODE=1
+........................................................................ [ 18%]
+........................................................................ [ 37%]
+..................................................................F..... [ 56%]
+........................................................................ [ 75%]
+........................F....F..F..................................... [ 93%]
+.........................                                            [100%]
+================================== FAILURES ===================================
+_ ReplyParsingTests.test_enterprise_tie_managed_send_arbitrates_chosen_candidate _
+
+self = <test_core.ReplyParsingTests testMethod=test_enterprise_tie_managed_send_arbitrates_chosen_candidate>
+
+    def test_enterprise_tie_managed_send_arbitrates_chosen_candidate(self):
+        import main as main_module
+    
+        class _FakeQueue:
+            def __init__(self):
+                self.items = []
+    
+            def put(self, item):
+                self.items.append(item)
+    
+        settings = AppSettings(api_key="configured", reply_source_mode="model_memory")
+        settings.enable_web_search = False
+        settings.managed_auto_reply = True
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        memory = StyleMemory(Path(tmp.name) / "memory.json")
+        memory.learn_from_training_examples(_enterprise_history_lookup_examples("��ʷ�����뵽��ʾҳ���ѯ��"))
+        engine = ReplyEngine(settings, memory)
+        app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
+        app.engine = engine
+        app.settings = settings
+        app.current_window = types.SimpleNamespace(title="���Դ���")
+        app.queue = _FakeQueue()
+        app.managed_last_handled_turn_key = ""
+        app.managed_last_handled_turn_messages = []
+        app.last_auto_reply_signature = ""
+        app.pending_auto_reply_signature = ""
+        app.handled_auto_reply_signatures = set()
+        app.managed_send_inflight = False
+        app.managed_waiting_for_own_echo = False
+    
+        context = "[�Է�] ��ȹ���������������"
+        # generate �׶����ɴ�ģ�����"��ѡ����"��һ�� �� ���ͱ�ѡ�д𰸣�
+        with patch("reply_engine.requests.post") as post:
+            post.return_value.status_code = 200
+            post.return_value.raise_for_status.return_value = None
+            post.return_value.json.return_value = {"choices": [{"message": {"content": '{"chosen": 1, "consistent": true}'}}]}
+            replies = engine.generate(context, "�ͻ�")
+        self.assertIn("��ģ��ȷ��һ��", engine.last_source)
+    
+        with patch("main.threading.Thread") as thread_cls:
+            app._maybe_managed_send(context, replies)
+    
+>       self.assertTrue(app.pending_auto_reply_signature)
+E       AssertionError: '' is not true
+
+tests\test_core.py:2103: AssertionError
+_ SettingsTests.test_managed_send_falls_back_to_discovered_same_chat_when_foreground_unavailable _
+
+self = <test_core.SettingsTests testMethod=test_managed_send_falls_back_to_discovered_same_chat_when_foreground_unavailable>
+
+    def test_managed_send_falls_back_to_discovered_same_chat_when_foreground_unavailable(self):
+        import queue
+        import time
+        import main
+    
+        app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+        app.settings = AppSettings()
+        app.settings.managed_auto_reply = True
+        app.settings.auto_reply_delay_seconds = 0
+        app.engine = types.SimpleNamespace(last_error="", last_source="DeepSeek API")
+        app.queue = queue.Queue()
+        app.sender = types.SimpleNamespace(
+            calls=[],
+            send=lambda window, text: app.sender.calls.append((window.hwnd, text)) or (True, "sent"),
+        )
+        app.current_window = ChatWindow(
+            hwnd=9,
+            title="΢�� contact",
+            rect=WindowRect(10, 20, 970, 660),
+            platform=ChatPlatform.for_key("wechat"),
+        )
+        discovered = ChatWindow(
+            hwnd=29,
+            title="΢�� contact",
+            rect=WindowRect(10, 20, 970, 660),
+            platform=ChatPlatform.for_key("wechat"),
+        )
+        app.detector = types.SimpleNamespace(
+            foreground_chat=lambda: None,
+            any_chat_window=lambda: discovered,
+        )
+        context = "[�Է�] �������4����"
+        app._managed_preflight_context = lambda _window: context
+        app.last_auto_reply_signature = ""
+        app.pending_auto_reply_signature = ""
+        app.handled_auto_reply_signatures = set()
+        app.managed_send_inflight = False
+        app.managed_waiting_for_own_echo = False
+        app.last_managed_sent_text = ""
+        app.managed_last_handled_turn_messages = []
+        app.managed_last_handled_turn_key = ""
+        app.managed_last_sent_at = 0.0
+        app.managed_last_handled_partner = ""
+    
+        app._maybe_managed_send(context, ["�ԣ�����������������ĸ���"])
+        time.sleep(0.05)
+    
+>       self.assertEqual(app.sender.calls, [(29, "�ԣ�����������������ĸ���")])
+E       AssertionError: Lists differ: [] != [(29, '�ԣ�����������������ĸ���')]
+E       
+E       Second list contains 1 additional elements.
+E       First extra element 0:
+E       (29, '�ԣ�����������������ĸ���')
+E       
+E       - []
+E       + [(29, '�ԣ�����������������ĸ���')]
+
+tests\test_core.py:3507: AssertionError
+_ SettingsTests.test_managed_send_preflight_uses_current_foreground_chat_without_hwnd_lock _
+
+self = <test_core.SettingsTests testMethod=test_managed_send_preflight_uses_current_foreground_chat_without_hwnd_lock>
+
+    def test_managed_send_preflight_uses_current_foreground_chat_without_hwnd_lock(self):
+        import queue
+        import time
+        import main
+    
+        app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+        app.settings = AppSettings()
+        app.settings.managed_auto_reply = True
+        app.settings.auto_reply_delay_seconds = 0
+        app.engine = types.SimpleNamespace(last_error="", last_source="DeepSeek API")
+        app.queue = queue.Queue()
+        app.sender = types.SimpleNamespace(
+            calls=[],
+            send=lambda window, text: app.sender.calls.append((window.hwnd, text)) or (True, "sent"),
+        )
+        app.current_window = ChatWindow(
+            hwnd=9,
+            title="QQ contact",
+            rect=WindowRect(10, 20, 970, 660),
+            platform=ChatPlatform.for_key("qq"),
+        )
+        foreground = ChatWindow(
+            hwnd=19,
+            title="QQ contact",
+            rect=WindowRect(10, 20, 970, 660),
+            platform=ChatPlatform.for_key("qq"),
+        )
+        app.detector = types.SimpleNamespace(
+            foreground_chat=lambda: foreground,
+            window_from_hwnd=lambda _hwnd: (_ for _ in ()).throw(AssertionError("hwnd lookup should not be used")),
+        )
+        other = "[" + chr(0x5BF9) + chr(0x65B9) + "] "
+        target = chr(0x8FD9) + chr(0x4E2A) + chr(0x653E) + chr(0x54EA) + chr(0x91CC)
+        context = other + target
+        app._managed_preflight_context = lambda _window: context
+        app.last_auto_reply_signature = ""
+        app.pending_auto_reply_signature = ""
+        app.handled_auto_reply_signatures = set()
+        app.managed_send_inflight = False
+        app.managed_waiting_for_own_echo = False
+        app.last_managed_sent_text = ""
+        app.managed_last_handled_turn_messages = []
+        app.managed_last_handled_turn_key = ""
+        app.managed_last_sent_at = 0.0
+        app.managed_last_handled_partner = ""
+    
+        app._maybe_managed_send(context, ["���鷿����"])
+        time.sleep(0.05)
+    
+>       self.assertEqual(app.sender.calls, [(19, "���鷿����")])
+E       AssertionError: Lists differ: [] != [(19, '���鷿����')]
+E       
+E       Second list contains 1 additional elements.
+E       First extra element 0:
+E       (19, '���鷿����')
+E       
+E       - []
+E       + [(19, '���鷿����')]
+
+tests\test_core.py:3458: AssertionError
+_ SettingsTests.test_managed_send_uses_current_context_when_preflight_ocr_is_temporarily_empty _
+
+self = <test_core.SettingsTests testMethod=test_managed_send_uses_current_context_when_preflight_ocr_is_temporarily_empty>
+
+    def test_managed_send_uses_current_context_when_preflight_ocr_is_temporarily_empty(self):
+        import queue
+        import time
+        import main
+    
+        app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+        app.settings = AppSettings()
+        app.settings.managed_auto_reply = True
+        app.settings.auto_reply_delay_seconds = 0
+        app.engine = types.SimpleNamespace(last_error="", last_source="DeepSeek API")
+        app.queue = queue.Queue()
+        app.sender = types.SimpleNamespace(
+            calls=[],
+            send=lambda window, text: app.sender.calls.append((window.hwnd, text)) or (True, "sent"),
+        )
+        window = ChatWindow(
+            hwnd=9,
+            title="\u5bf0\ue1bb\u4fca contact",
+            rect=WindowRect(10, 20, 970, 660),
+            platform=ChatPlatform.for_key("wechat"),
+        )
+        app.current_window = window
+        app.current_context = "[" + chr(0x5BF9) + chr(0x65B9) + "] " + (
+            chr(0x8FD9) + chr(0x4E2A) + chr(0x600E) + chr(0x4E48) + chr(0x653E)
+        )
+        app.detector = types.SimpleNamespace(
+            foreground_chat=lambda: window,
+            any_chat_window=lambda: None,
+        )
+        app._managed_preflight_context = lambda _window: ""
+        app.last_auto_reply_signature = ""
+        app.pending_auto_reply_signature = ""
+        app.handled_auto_reply_signatures = set()
+        app.managed_send_inflight = False
+        app.managed_waiting_for_own_echo = False
+        app.last_managed_sent_text = ""
+        app.managed_last_handled_turn_messages = []
+        app.managed_last_handled_turn_key = ""
+        app.managed_last_sent_at = 0.0
+        app.managed_last_handled_partner = ""
+    
+        app._maybe_managed_send(app.current_context, ["�ſ����ɾ���λ�þ���"])
+        time.sleep(0.05)
+    
+>       self.assertEqual(app.sender.calls, [(9, "�ſ����ɾ���λ�þ���")])
+E       AssertionError: Lists differ: [] != [(9, '�ſ����ɾ���λ�þ���')]
+E       
+E       Second list contains 1 additional elements.
+E       First extra element 0:
+E       (9, '�ſ����ɾ���λ�þ���')
+E       
+E       - []
+E       + [(9, '�ſ����ɾ���λ�þ���')]
+
+tests\test_core.py:3553: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_core.py::ReplyParsingTests::test_enterprise_tie_managed_send_arbitrates_chosen_candidate
+FAILED tests/test_core.py::SettingsTests::test_managed_send_falls_back_to_discovered_same_chat_when_foreground_unavailable
+FAILED tests/test_core.py::SettingsTests::test_managed_send_preflight_uses_current_foreground_chat_without_hwnd_lock
+FAILED tests/test_core.py::SettingsTests::test_managed_send_uses_current_context_when_preflight_ocr_is_temporarily_empty
+4 failed, 379 passed, 6 subtests passed in 19.54s

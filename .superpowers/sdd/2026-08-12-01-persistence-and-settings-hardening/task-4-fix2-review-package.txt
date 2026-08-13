@@ -1,0 +1,2372 @@
+﻿Task 4 fix round 2 non-Git scoped package
+Open finding: validator-accepted one-character example omitted from vector index marked ready.
+
+
+===== CURRENT WITH LINE NUMBERS: memory.py =====
+    1: from __future__ import annotations
+    2: 
+    3: import hashlib
+    4: import json
+    5: import math
+    6: import re
+    7: from collections import Counter
+    8: from dataclasses import dataclass, field
+    9: from datetime import datetime, timezone
+   10: from pathlib import Path
+   11: 
+   12: from app_paths import memory_path, vector_path
+   13: from atomic_json import JsonDataError, JsonLoadResult, atomic_write_json, load_json
+   14: 
+   15: 
+   16: ENTERPRISE_ANNUAL_REPORT_SOURCE = "enterprise_annual_report_kb"
+   17: ENTERPRISE_LOCAL_CONFIDENT_MARGIN = 8
+   18: ENTERPRISE_LOCAL_MIN_SCORE = 8
+   19: MEMORY_SCHEMA_VERSION = 2
+   20: VECTOR_SCHEMA_VERSION = 1
+   21: VECTOR_DIMENSION = 384
+   22: 
+   23: _MEMORY_EXAMPLE_STRING_FIELDS = {
+   24:     "partner",
+   25:     "cue",
+   26:     "reply",
+   27:     "source",
+   28:     "created_at",
+   29:     "conversation_hash",
+   30:     "scenario_id",
+   31:     "scenario_title",
+   32:     "why",
+   33:     "question",
+   34:     "module",
+   35:     "subcategory",
+   36:     "organization_type",
+   37:     "source_sheet",
+   38:     "source_cell",
+   39:     "source_file",
+   40:     "priority",
+   41: }
+   42: 
+   43: 
+   44: class VectorIndexError(RuntimeError):
+   45:     """Raised when the vector index is unavailable for managed replies."""
+   46: # 企业年报"可直接发送"的可靠底线：第一名分数不低于该值且明显领先第二名（>=8 分）且无冲突。
+   47: # 2026-08-05 用户要求低分阈值 20 -> 30：命中评分 < 30 时回复企业未命中文案。
+   48: ENTERPRISE_LOCAL_CONFIDENT_FLOOR = 30
+   49: 
+   50: # 普通话术库共享打分的最低匹配值：低于该值视为知识库未准备该问题，
+   51: # 运行时不会把低分候选发给用户，而是老实回答"暂时未查到对应答案"。
+   52: PHRASEBOOK_CONFIDENT_SCORE = 30
+   53: 
+   54: # 企业年报问题常见的同义表达。它们只用于本地召回排序，不会改写知识库原问题或原答案。
+   55: _ENTERPRISE_SEMANTIC_TERMS: dict[str, tuple[str, ...]] = {
+   56:     "topic_annual_report": ("年度工作报告", "年度报告", "年报"),
+   57:     "topic_annual_inspection": ("年检", "年审"),
+   58:     "time_historical": ("往年", "以前", "之前", "历史", "过往", "已提交"),
+   59:     "time_current": ("本年度", "本年", "今年", "当年", "当前"),
+   60:     "action_view": ("查看", "查询", "查找", "检索", "怎么查", "如何查", "哪里看", "在哪看", "怎么看", "看到"),
+   61:     "action_edit": ("修改", "更正", "修正", "编辑"),
+   62:     "action_fill": ("填报", "填写", "填表", "提交", "上报", "申报"),
+   63:     "action_print": ("打印", "导出"),
+   64:     "action_login": ("登录", "入口", "进入", "账号", "密码"),
+   65:     "status_returned": ("退回", "被退", "驳回"),
+   66:     "status_error": ("报错", "异常", "提示", "无法", "问题"),
+   67:     "action_handle": ("解决", "怎么办", "处理", "如何办", "整改"),
+   68: }
+   69: _ENTERPRISE_TAG_WEIGHTS = {
+   70:     "topic_annual_report": 18,
+   71:     "topic_annual_inspection": 16,
+   72:     "time_historical": 35,
+   73:     "time_current": 35,
+   74:     "action_view": 32,
+   75:     "action_edit": 30,
+   76:     "action_fill": 30,
+   77:     "action_print": 30,
+   78:     "action_login": 28,
+   79:     "status_returned": 26,
+   80:     "status_error": 12,
+   81:     "action_handle": 12,
+   82: }
+   83: _ENTERPRISE_TIME_TAGS = {"time_historical", "time_current"}
+   84: _ENTERPRISE_PRIMARY_ACTION_TAGS = {
+   85:     "action_view",
+   86:     "action_edit",
+   87:     "action_fill",
+   88:     "action_print",
+   89:     "action_login",
+   90: }
+   91: _ENTERPRISE_SCOPE_TERMS = (
+   92:     "年检",
+   93:     "年审",
+   94:     "年报",
+   95:     "年度报告",
+   96:     "年度工作报告",
+   97:     "报告",
+   98:     "社会组织",
+   99:     "社会团体",
+  100:     "民办非企业",
+  101:     "登记管理",
+  102:     # 企业年报知识库常见业务问法词（2026-08-04 补充），
+  103:     # 让"负责人超理事数1/3怎么整改"这类整改/治理问题也能进入企业库匹配。
+  104:     "整改",
+  105:     "理事",
+  106:     "负责人",
+  107:     "常务理事",
+  108:     "监事",
+  109:     "换届",
+  110:     "备案",
+  111:     "会员大会",
+  112:     "章程",
+  113:     # 分支机构/代表机构管理办法问答库（2026-08-09 补充），
+  114:     # 让"我们协会想设个分会"“分支机构能叫会长吗”这类问题在企业库
+  115:     # 未命中时被固定文案拦截，避免漏到大模型自由发挥。
+  116:     "分支",
+  117:     "分会",
+  118:     "代表机构",
+  119:     "办事处",
+  120:     "联络处",
+  121:     "专业委员会",
+  122:     "工作委员会",
+  123:     "专家委员会",
+  124:     "技术委员会",
+  125:     "主任委员",
+  126:     "副主任委员",
+  127:     "学组",
+  128:     "会费",
+  129:     "专项基金",
+  130:     "印章",
+  131: )
+  132: 
+  133: 
+  134: def default_memory_path() -> Path:
+  135:     return memory_path()
+  136: 
+  137: 
+  138: def validate_memory_document(value: object) -> None:
+  139:     if not isinstance(value, dict):
+  140:         raise ValueError("memory root must be an object")
+  141:     version = value.get("schema_version", 1)
+  142:     if type(version) is not int or version not in {1, MEMORY_SCHEMA_VERSION}:
+  143:         raise ValueError("unsupported memory schema_version")
+  144:     missing = {"style_summary", "examples", "common_phrases"} - value.keys()
+  145:     if missing:
+  146:         raise ValueError(f"memory fields missing: {', '.join(sorted(missing))}")
+  147:     if type(value["style_summary"]) is not str:
+  148:         raise ValueError("style_summary must be a string")
+  149:     examples = value["examples"]
+  150:     if type(examples) is not list:
+  151:         raise ValueError("examples must be a list")
+  152:     for index, item in enumerate(examples):
+  153:         if type(item) is not dict:
+  154:             raise ValueError(f"examples[{index}] must be an object")
+  155:         for key in _MEMORY_EXAMPLE_STRING_FIELDS:
+  156:             if key in item and type(item[key]) is not str:
+  157:                 raise ValueError(f"examples[{index}].{key} must be a string")
+  158:         missing_example = {"cue", "reply", "source", "conversation_hash"} - item.keys()
+  159:         if missing_example:
+  160:             raise ValueError(
+  161:                 f"examples[{index}] fields missing: {', '.join(sorted(missing_example))}"
+  162:             )
+  163:         normalized = _normalize_example(item)
+  164:         if not normalized or not normalized["reply"]:
+  165:             raise ValueError(f"examples[{index}].reply must normalize to non-empty text")
+  166:     phrases = value["common_phrases"]
+  167:     if type(phrases) is not dict:
+  168:         raise ValueError("common_phrases must be an object")
+  169:     if any(
+  170:         type(phrase) is not str
+  171:         or type(count) is not int
+  172:         or count < 0
+  173:         for phrase, count in phrases.items()
+  174:     ):
+  175:         raise ValueError("common_phrases must map strings to non-negative integers")
+  176: 
+  177: 
+  178: def _validate_vector_document(value: object) -> None:
+  179:     if not isinstance(value, dict):
+  180:         raise ValueError("vector root must be an object")
+  181:     if type(value.get("version")) is not int or value["version"] != VECTOR_SCHEMA_VERSION:
+  182:         raise ValueError("unsupported vector schema version")
+  183:     if type(value.get("dim")) is not int or value["dim"] != VECTOR_DIMENSION:
+  184:         raise ValueError("unsupported vector dimension")
+  185:     memory_hash = value.get("memory_hash")
+  186:     if type(memory_hash) is not str or re.fullmatch(r"[0-9a-f]{64}", memory_hash) is None:
+  187:         raise ValueError("memory_hash must be a SHA-256 hex digest")
+  188:     items = value.get("items")
+  189:     if type(items) is not list:
+  190:         raise ValueError("vector items must be a list")
+  191:     for index, item in enumerate(items):
+  192:         if type(item) is not dict:
+  193:             raise ValueError(f"vector items[{index}] must be an object")
+  194:         for key in ("conversation_hash", "source", "reply"):
+  195:             if type(item.get(key)) is not str:
+  196:                 raise ValueError(f"vector items[{index}].{key} must be a string")
+  197:         vector = item.get("vector")
+  198:         if type(vector) is not dict or not vector:
+  199:             raise ValueError(f"vector items[{index}].vector must be non-empty")
+  200:         for token, weight in vector.items():
+  201:             if (
+  202:                 type(token) is not str
+  203:                 or re.fullmatch(r"0|[1-9][0-9]*", token) is None
+  204:                 or not 0 <= int(token) < VECTOR_DIMENSION
+  205:             ):
+  206:                 raise ValueError(f"vector items[{index}] has an invalid bucket")
+  207:             if (
+  208:                 type(weight) not in {int, float}
+  209:                 or isinstance(weight, bool)
+  210:                 or not math.isfinite(float(weight))
+  211:                 or not 0 < float(weight) <= 1
+  212:             ):
+  213:                 raise ValueError(f"vector items[{index}] has an invalid weight")
+  214: 
+  215: 
+  216: @dataclass
+  217: class StyleMemory:
+  218:     path: Path = field(default_factory=default_memory_path)
+  219:     style_summary: str = "偏短句、微信口语、少解释、少承诺。"
+  220:     examples: list[dict[str, str]] = field(default_factory=list)
+  221:     common_phrases: Counter = field(default_factory=Counter)
+  222:     max_examples: int = 3000
+  223:     load_result: JsonLoadResult | None = field(default=None, init=False, repr=False)
+  224:     vector_ready: bool = field(default=False, init=False)
+  225:     last_vector_error: str | None = field(default=None, init=False)
+  226: 
+  227:     @property
+  228:     def vector_path(self) -> Path:
+  229:         return self.path.with_name(vector_path().name)
+  230: 
+  231:     @property
+  232:     def sop_library_path(self) -> Path:
+  233:         return self.path.with_name("sop_library.json")
+  234: 
+  235:     def load(self) -> "StyleMemory":
+  236:         backups = [self.path.with_name(f"{self.path.name}.bak.{index}") for index in range(1, 6)]
+  237:         if not self.path.exists() and not any(backup.exists() for backup in backups):
+  238:             return self
+  239:         self.load_result = load_json(self.path, validate_memory_document)
+  240:         data = self.load_result.data
+  241:         self.style_summary = str(data.get("style_summary", self.style_summary))
+  242:         raw_examples = list(data.get("examples", []))
+  243:         self.examples = []
+  244:         for item in raw_examples:
+  245:             normalized = _normalize_example(item)
+  246:             if normalized:
+  247:                 self.examples.append(normalized)
+  248:         self.common_phrases = Counter(data.get("common_phrases", {}))
+  249:         self._ensure_vector_index()
+  250:         return self
+  251: 
+  252:     def save(self) -> None:
+  253:         normalized_examples = []
+  254:         for index, item in enumerate(self.examples):
+  255:             if type(item) is not dict:
+  256:                 raise ValueError(f"examples[{index}] must be an object")
+  257:             for key in _MEMORY_EXAMPLE_STRING_FIELDS:
+  258:                 if key in item and type(item[key]) is not str:
+  259:                     raise ValueError(f"examples[{index}].{key} must be a string")
+  260:             normalized = _normalize_example(item)
+  261:             if not normalized:
+  262:                 raise ValueError(f"examples[{index}] must contain a non-empty reply")
+  263:             normalized_examples.append(normalized)
+  264:         document = {
+  265:             "schema_version": MEMORY_SCHEMA_VERSION,
+  266:             "style_summary": self.style_summary,
+  267:             "examples": _dedupe_memory_examples(normalized_examples),
+  268:             "common_phrases": dict(self.common_phrases.most_common(120)),
+  269:         }
+  270:         atomic_write_json(self.path, document, validate_memory_document, backup_count=5)
+  271:         self.examples = list(document["examples"])
+  272:         self.rebuild_vector_index()
+  273: 
+  274:     def content_hash(self) -> str:
+  275:         document = {
+  276:             "schema_version": MEMORY_SCHEMA_VERSION,
+  277:             "style_summary": self.style_summary,
+  278:             "examples": _dedupe_memory_examples(self.examples),
+  279:             "common_phrases": dict(self.common_phrases.most_common(120)),
+  280:         }
+  281:         payload = json.dumps(
+  282:             document,
+  283:             ensure_ascii=False,
+  284:             sort_keys=True,
+  285:             separators=(",", ":"),
+  286:         ).encode("utf-8")
+  287:         return hashlib.sha256(payload).hexdigest()
+  288: 
+  289:     def learn_from_chat_text(self, conversation_text: str) -> None:
+  290:         lines = [line.strip() for line in conversation_text.splitlines() if line.strip()]
+  291:         observed_examples: list[dict[str, str]] = []
+  292:         for index, line in enumerate(lines):
+  293:             if not _is_own_line(line):
+  294:                 continue
+  295:             reply = line.split("]", 1)[-1].strip()
+  296:             cue = "\n".join(lines[max(0, index - 8) : index])
+  297:             if cue and reply:
+  298:                 observed_examples.append(
+  299:                     _build_example(
+  300:                         partner="训练模式观察",
+  301:                         cue=cue,
+  302:                         reply=reply,
+  303:                         source="observed_chat",
+  304:                     )
+  305:                 )
+  306:         for item in observed_examples[-8:]:
+  307:             self.examples.append(item)
+  308:             for phrase in self._extract_phrases(item["reply"]):
+  309:                 self.common_phrases[phrase] += 1
+  310:         self._refresh_summary()
+  311:         self.save()
+  312: 
+  313:     def learn_from_sent_reply(
+  314:         self,
+  315:         partner: str,
+  316:         conversation_text: str,
+  317:         sent_reply: str,
+  318:         source: str = "manual_edit",
+  319:     ) -> None:
+  320:         cleaned = sent_reply.strip()
+  321:         if not cleaned:
+  322:             return
+  323:         self.examples.append(
+  324:             _build_example(
+  325:                 partner=partner,
+  326:                 cue=conversation_text,
+  327:                 reply=cleaned,
+  328:                 source=_clean_source(source),
+  329:             )
+  330:         )
+  331:         for phrase in self._extract_phrases(cleaned):
+  332:             self.common_phrases[phrase] += 3
+  333:         self._refresh_summary()
+  334:         self.save()
+  335: 
+  336:     def learn_from_training_examples(self, examples: list[dict[str, str]]) -> None:
+  337:         for item in examples:
+  338:             reply = str(item.get("reply", "")).strip()
+  339:             cue = str(item.get("cue", "")).strip()
+  340:             if not reply or not cue:
+  341:                 continue
+  342:             source = str(item.get("source", "chat_zip_training"))
+  343:             self.examples.append(
+  344:                 _with_training_metadata(
+  345:                     _build_example(
+  346:                         partner=str(item.get("partner", "聊天记录训练")),
+  347:                         cue=cue,
+  348:                         reply=reply,
+  349:                         source=source,
+  350:                         created_at=str(item.get("created_at", "")),
+  351:                     ),
+  352:                     item,
+  353:                 )
+  354:             )
+  355:             if source != ENTERPRISE_ANNUAL_REPORT_SOURCE:
+  356:                 for phrase in self._extract_phrases(reply):
+  357:                     self.common_phrases[phrase] += 2
+  358:         self._refresh_summary()
+  359:         self.save()
+  360: 
+  361:     def prompt_block(self, conversation_text: str = "", exclude_sources: set[str] | None = None) -> str:
+  362:         excluded = exclude_sources or set()
+  363:         if excluded:
+  364:             phrase_counter: Counter[str] = Counter()
+  365:             for item in self.examples:
+  366:                 if item.get("source") in excluded:
+  367:                     continue
+  368:                 for phrase in self._extract_phrases(str(item.get("reply", ""))):
+  369:                     phrase_counter[phrase] += 1
+  370:             phrases = "、".join(phrase for phrase, _ in phrase_counter.most_common(12))
+  371:         else:
+  372:             phrases = "、".join(phrase for phrase, _ in self.common_phrases.most_common(12))
+  373:         relevant = self.relevant_examples(conversation_text, limit=5) if conversation_text else self.examples[-5:]
+  374:         relevant = [item for item in relevant if item.get("source") not in excluded]
+  375:         examples = "\n".join(_format_prompt_example(index, item) for index, item in enumerate(relevant, 1))
+  376:         return (
+  377:             f"用户风格摘要：{self.style_summary}\n"
+  378:             f"常用表达：{phrases or '可以、我看下、晚点、确认下'}\n"
+  379:             "相似历史聊天片段与真实回复：\n"
+  380:             f"{examples or '- 暂无历史样例，可按当前上下文自然接话'}"
+  381:         )
+  382: 
+  383:     def relevant_examples(self, conversation_text: str, limit: int = 6) -> list[dict[str, str]]:
+  384:         relevant = self.strict_relevant_examples(conversation_text, limit=limit)
+  385:         return relevant or self.examples[-limit:]
+  386: 
+  387:     def strict_relevant_examples(self, conversation_text: str, limit: int = 6) -> list[dict[str, str]]:
+  388:         query_tokens = _text_tokens(conversation_text)
+  389:         if not query_tokens:
+  390:             return []
+  391:         last_other = _last_other_text(conversation_text)
+  392:         last_tokens = _text_tokens(last_other)
+  393:         scored = []
+  394:         for index, item in enumerate(self.examples):
+  395:             cue = str(item.get("cue", ""))
+  396:             reply = str(item.get("reply", ""))
+  397:             cue_tokens = _text_tokens(cue)
+  398:             reply_tokens = _text_tokens(reply)
+  399:             score = len(query_tokens & cue_tokens) * 3 + len(query_tokens & reply_tokens)
+  400:             if last_tokens:
+  401:                 score += len(last_tokens & cue_tokens) * 4
+  402:             score += _phrasebook_intent_bonus(conversation_text, item)
+  403:             if score:
+  404:                 score += _example_priority(item) / 10
+  405:                 scored.append((score, index, item))
+  406:         scored.sort(key=lambda row: (row[0], row[1]), reverse=True)
+  407:         selected = [item for _, _, item in scored[:limit]]
+  408:         if len(selected) < limit:
+  409:             seen = {item.get("conversation_hash", "") for item in selected}
+  410:             for item in self.vector_relevant_examples(conversation_text, limit=limit * 2):
+  411:                 key = item.get("conversation_hash", "")
+  412:                 if key and key not in seen:
+  413:                     selected.append(item)
+  414:                     seen.add(key)
+  415:                 if len(selected) >= limit:
+  416:                     break
+  417:         return selected[:limit]
+  418: 
+  419:     def enterprise_candidates(self, conversation_text: str, limit: int = 6) -> list[dict[str, str]]:
+  420:         """Return the shared local ranking used by enterprise runtime and phrasebook testing."""
+  421: 
+  422:         query = _last_other_text(conversation_text) or conversation_text
+  423:         query_tokens = _text_tokens(query)
+  424:         query_vector = _text_vector(query)
+  425:         if not query_tokens or not query_vector:
+  426:             return []
+  427: 
+  428:         scored: list[tuple[int, int, dict[str, str]]] = []
+  429:         normalized_query = _enterprise_question_key(query)
+  430:         query_tags = _enterprise_semantic_tags(query)
+  431:         for index, item in enumerate(self.examples):
+  432:             if item.get("source") != ENTERPRISE_ANNUAL_REPORT_SOURCE:
+  433:                 continue
+  434:             question = str(item.get("question", "")).strip() or str(item.get("cue", "")).split("/")[-1].strip()
+  435:             if not question:
+  436:                 continue
+  437:             searchable = "\n".join(
+  438:                 str(item.get(key, ""))
+  439:                 for key in ("question", "module", "subcategory", "organization_type", "cue")
+  440:                 if item.get(key)
+  441:             )
+  442:             token_hits = len(query_tokens & _text_tokens(searchable))
+  443:             vector_score = _cosine_sparse(query_vector, _text_vector(searchable))
+  444:             normalized_question = _enterprise_question_key(question)
+  445:             exact_question = bool(normalized_query and normalized_query == normalized_question)
+  446:             candidate_tags = _enterprise_semantic_tags(searchable)
+  447:             shared_tags = query_tags & candidate_tags
+  448:             semantic_bonus = sum(_ENTERPRISE_TAG_WEIGHTS[tag] for tag in shared_tags)
+  449:             conflict_penalty, conflicts = _enterprise_semantic_conflicts(query_tags, candidate_tags)
+  450:             containment_bonus = 0
+  451:             if normalized_question and normalized_question in normalized_query:
+  452:                 containment_bonus = 12
+  453:             elif normalized_query and normalized_query in normalized_question:
+  454:                 containment_bonus = 8
+  455:             # 数字比例/关键数字短语加分：让"负责人超理事数1/3"明确命中"理事数的1/3"，
+  456:             # 而不是与"常务理事数的1/2"并列。
+  457:             ratio_bonus = _enterprise_ratio_bonus(normalized_query, normalized_question)
+  458:             if exact_question:
+  459:                 score = 100
+  460:             else:
+  461:                 token_coverage = token_hits / max(len(query_tokens), 1)
+  462:                 base_score = int(round(token_coverage * 55 + vector_score * 25 + containment_bonus + ratio_bonus))
+  463:                 score = max(0, min(99, base_score + semantic_bonus - conflict_penalty))
+  464:             if score <= 0:
+  465:                 continue
+  466:             candidate = dict(item)
+  467:             candidate["question"] = question
+  468:             candidate["enterprise_local_score"] = score
+  469:             candidate["enterprise_exact_question"] = "1" if exact_question else ""
+  470:             candidate["enterprise_conflict_count"] = str(len(conflicts))
+  471:             candidate["enterprise_match_reasons"] = "、".join(
+  472:                 _enterprise_reason_labels(shared_tags, conflicts, exact_question)
+  473:             )
+  474:             scored.append((score, index, candidate))
+  475:         scored.sort(key=lambda row: (row[0], row[1]), reverse=True)
+  476:         candidates = [item for _score, _index, item in scored[:limit]]
+  477:         _annotate_enterprise_decision(candidates)
+  478:         return candidates
+  479: 
+  480:     def enterprise_scored_examples(self, conversation_text: str, limit: int = 50) -> list[dict[str, object]]:
+  481:         """Adapt the shared enterprise ranking for the phrasebook test UI."""
+  482: 
+  483:         rows: list[dict[str, object]] = []
+  484:         candidates = self.enterprise_candidates(conversation_text, limit=limit)
+  485:         decision_fields = {
+  486:             "enterprise_decision": str(candidates[0].get("enterprise_decision", "ambiguous")) if candidates else "",
+  487:             "enterprise_decision_label": str(candidates[0].get("enterprise_decision_label", "")) if candidates else "",
+  488:             "enterprise_decision_reason": str(candidates[0].get("enterprise_decision_reason", "")) if candidates else "",
+  489:             "enterprise_next_score": str(candidates[0].get("enterprise_next_score", "0")) if candidates else "0",
+  490:             "enterprise_score_margin": str(candidates[0].get("enterprise_score_margin", "0")) if candidates else "0",
+  491:         }
+  492:         for candidate in candidates:
+  493:             row: dict[str, object] = dict(candidate)
+  494:             row.update(
+  495:                 {
+  496:                     "library_key": ENTERPRISE_ANNUAL_REPORT_SOURCE,
+  497:                     "library_name": _library_name(ENTERPRISE_ANNUAL_REPORT_SOURCE),
+  498:                     "score": int(candidate.get("enterprise_local_score", 0) or 0),
+  499:                     "reasons": [
+  500:                         item
+  501:                         for item in str(candidate.get("enterprise_match_reasons", "")).split("、")
+  502:                         if item
+  503:                     ]
+  504:                     or ["关键词"],
+  505:                     **decision_fields,
+  506:                 }
+  507:             )
+  508:             rows.append(row)
+  509:         return rows
+  510: 
+  511:     def has_enterprise_annual_report_knowledge(self) -> bool:
+  512:         return any(item.get("source") == ENTERPRISE_ANNUAL_REPORT_SOURCE for item in self.examples)
+  513: 
+  514:     def is_enterprise_annual_report_query(self, conversation_text: str) -> bool:
+  515:         query = _last_other_text(conversation_text) or conversation_text
+  516:         compact = _enterprise_question_key(query)
+  517:         return bool(compact and any(term in compact for term in _ENTERPRISE_SCOPE_TERMS))
+  518: 
+  519:     def vector_relevant_examples(self, conversation_text: str, limit: int = 6) -> list[dict[str, str]]:
+  520:         query_vector = _text_vector(conversation_text)
+  521:         data = self._load_vector_document()
+  522:         if not query_vector or data is None:
+  523:             return []
+  524:         by_hash = {item.get("conversation_hash", ""): item for item in self.examples}
+  525:         scored: list[tuple[float, int, dict[str, str]]] = []
+  526:         for index, item in enumerate(data.get("items", [])):
+  527:             if not isinstance(item, dict):
+  528:                 continue
+  529:             key = str(item.get("conversation_hash", ""))
+  530:             example = by_hash.get(key)
+  531:             if not example:
+  532:                 continue
+  533:             score = _cosine_sparse(query_vector, item.get("vector", {}))
+  534:             if score >= 0.08:
+  535:                 scored.append((score, index, example))
+  536:         scored.sort(key=lambda row: (row[0], -row[1]), reverse=True)
+  537:         return [item for _, _, item in scored[:limit]]
+  538: 
+  539:     def library_summaries(self) -> list[dict[str, object]]:
+  540:         grouped: dict[str, list[dict[str, str]]] = {}
+  541:         for item in self.examples:
+  542:             key = str(item.get("source", "manual_edit") or "manual_edit")
+  543:             grouped.setdefault(key, []).append(item)
+  544:         summaries = []
+  545:         for key, items in grouped.items():
+  546:             summaries.append(
+  547:                 {
+  548:                     "key": key,
+  549:                     "name": _library_name(key),
+  550:                     "count": len(items),
+  551:                     "latest": max((str(item.get("created_at", "")) for item in items), default=""),
+  552:                 }
+  553:             )
+  554:         summaries.sort(key=lambda item: (int(item["count"]), str(item["latest"])), reverse=True)
+  555:         return summaries
+  556: 
+  557:     def examples_for_library(self, library_key: str = "", limit: int = 300) -> list[dict[str, str]]:
+  558:         items = self.examples
+  559:         if library_key:
+  560:             items = [item for item in items if item.get("source") == library_key]
+  561:         return [dict(item) for item in items[-limit:]][::-1]
+  562: 
+  563:     def scored_examples(self, conversation_text: str, library_key: str = "", limit: int = 50) -> list[dict[str, object]]:
+  564:         query_tokens = _text_tokens(conversation_text)
+  565:         query_vector = _text_vector(conversation_text)
+  566:         vector_by_hash = self._vector_by_hash()
+  567:         rows: list[dict[str, object]] = []
+  568:         for item in self.examples:
+  569:             if library_key and item.get("source") != library_key:
+  570:                 continue
+  571:             cue = str(item.get("cue", ""))
+  572:             reply = str(item.get("reply", ""))
+  573:             cue_tokens = _text_tokens(cue)
+  574:             reply_tokens = _text_tokens(reply)
+  575:             keyword_hits = len(query_tokens & cue_tokens)
+  576:             reply_hits = len(query_tokens & reply_tokens)
+  577:             vector_score = _cosine_sparse(query_vector, vector_by_hash.get(str(item.get("conversation_hash", "")), {}))
+  578:             priority = _example_priority(item)
+  579:             raw_score = keyword_hits * 16 + reply_hits * 8 + vector_score * 45
+  580:             raw_score += _phrasebook_intent_bonus(conversation_text, item) * 6
+  581:             if keyword_hits or reply_hits or vector_score >= 0.08:
+  582:                 raw_score += priority * 0.22
+  583:             score = max(0, min(100, int(round(raw_score))))
+  584:             reasons = []
+  585:             if keyword_hits:
+  586:                 reasons.append("keyword")
+  587:             if reply_hits:
+  588:                 reasons.append("reply")
+  589:             if vector_score >= 0.08:
+  590:                 reasons.append("vector")
+  591:             if _phrasebook_intent_bonus(conversation_text, item):
+  592:                 reasons.append("intent")
+  593:             if priority:
+  594:                 reasons.append(f"priority:{priority}")
+  595:             if not reasons:
+  596:                 reasons.append("recent")
+  597:             row = dict(item)
+  598:             row.update(
+  599:                 {
+  600:                     "library_key": item.get("source", ""),
+  601:                     "library_name": _library_name(str(item.get("source", ""))),
+  602:                     "score": score,
+  603:                     "reasons": reasons,
+  604:                     "priority": priority,
+  605:                     "vector_score": round(vector_score, 4),
+  606:                 }
+  607:             )
+  608:             rows.append(row)
+  609:         rows.sort(
+  610:             key=lambda item: (
+  611:                 int(item.get("score", 0)),
+  612:                 int(item.get("priority", 0) or 0),
+  613:                 str(item.get("created_at", "")),
+  614:             ),
+  615:             reverse=True,
+  616:         )
+  617:         return rows[:limit]
+  618: 
+  619:     def phrasebook_candidates(self, conversation_text: str, limit: int = 12) -> list[dict[str, object]]:
+  620:         """普通话术库共享排序入口：测试命中页和运行时消费同一份打分结果。
+  621: 
+  622:         内部先把对话收敛到"对方最后一句"再打分，与测试命中页输入一句问法的
+  623:         行为保持一致；企业年报源不参与普通话术库匹配。返回的每行带
+  624:         ``phrasebook_score``（与测试页 ``score`` 同源，即 keyword/reply/vector/intent 加权分）。
+  625:         """
+  626:         query = _last_other_text(conversation_text) or conversation_text
+  627:         rows = self.scored_examples(query, library_key="", limit=limit)
+  628:         rows = [
+  629:             row
+  630:             for row in rows
+  631:             if str(row.get("source", "")) != ENTERPRISE_ANNUAL_REPORT_SOURCE
+  632:         ]
+  633:         for row in rows:
+  634:             row["phrasebook_score"] = int(row.get("score", 0) or 0)
+  635:         return rows
+  636: 
+  637:     def has_phrasebook_entries(self) -> bool:
+  638:         """是否存在普通话术库条目（非企业年报源）。"""
+  639:         return any(
+  640:             item.get("source") != ENTERPRISE_ANNUAL_REPORT_SOURCE
+  641:             for item in self.examples
+  642:         )
+  643: 
+  644:     def update_example(self, conversation_hash: str, cue: str | None = None, reply: str | None = None) -> bool:
+  645:         target = str(conversation_hash or "")
+  646:         if not target:
+  647:             return False
+  648:         for index, item in enumerate(self.examples):
+  649:             if str(item.get("conversation_hash", "")) != target:
+  650:                 continue
+  651:             new_cue = _normalize_context(cue if cue is not None else str(item.get("cue", "")))
+  652:             new_reply = _normalize_reply(reply if reply is not None else str(item.get("reply", "")))
+  653:             if not new_reply:
+  654:                 return False
+  655:             updated = dict(item)
+  656:             updated["cue"] = new_cue
+  657:             updated["reply"] = new_reply
+  658:             updated["conversation_hash"] = _conversation_hash(new_cue, new_reply)
+  659:             updated["created_at"] = _utc_now()
+  660:             self.examples[index] = updated
+  661:             self.save()
+  662:             return True
+  663:         return False
+  664: 
+  665:     def _vector_by_hash(self) -> dict[str, dict[str, float]]:
+  666:         data = self._load_vector_document()
+  667:         if data is None:
+  668:             return {}
+  669:         result: dict[str, dict[str, float]] = {}
+  670:         for item in data.get("items", []):
+  671:             if isinstance(item, dict):
+  672:                 key = str(item.get("conversation_hash", ""))
+  673:                 vector = item.get("vector", {})
+  674:                 if key and isinstance(vector, dict):
+  675:                     result[key] = vector
+  676:         return result
+  677: 
+  678:     def suggest_replies(self, conversation_text: str, limit: int = 3) -> list[str]:
+  679:         return self.suggest_replies_strict(conversation_text, limit=limit) or _unique_replies(
+  680:             self.relevant_examples(conversation_text, limit=limit * 4),
+  681:             limit,
+  682:         )
+  683: 
+  684:     def suggest_replies_strict(self, conversation_text: str, limit: int = 3) -> list[str]:
+  685:         return _unique_replies(self.strict_relevant_examples(conversation_text, limit=limit * 4), limit)
+  686: 
+  687:     def _refresh_summary(self) -> None:
+  688:         examples = [
+  689:             item["reply"]
+  690:             for item in self.examples[-24:]
+  691:             if item.get("reply") and item.get("source") != ENTERPRISE_ANNUAL_REPORT_SOURCE
+  692:         ]
+  693:         avg_len = int(sum(len(x) for x in examples) / len(examples)) if examples else 18
+  694:         emoji = any(re.search(r"[\U0001F300-\U0001FAFF]", text) for text in examples)
+  695:         question = any("？" in text or "?" in text or "吗" in text for text in examples)
+  696:         length_note = "短句" if avg_len <= 24 else "中等长度"
+  697:         emoji_note = "会少量用表情" if emoji else "基本不用表情"
+  698:         question_note = "常用反问或确认句" if question else "表达直接"
+  699:         self.style_summary = f"{length_note}、微信口语、{emoji_note}、{question_note}、少客服腔。"
+  700: 
+  701:     def _load_vector_document(self) -> dict[str, object] | None:
+  702:         self.vector_ready = False
+  703:         if not self.vector_path.exists():
+  704:             self.last_vector_error = "vector index is missing"
+  705:             return None
+  706:         try:
+  707:             result = load_json(self.vector_path, _validate_vector_document)
+  708:         except JsonDataError:
+  709:             self.last_vector_error = "vector index is invalid"
+  710:             return None
+  711:         if result.recovered:
+  712:             self.last_vector_error = "vector index primary is invalid"
+  713:             return None
+  714:         if result.data["memory_hash"] != self.content_hash():
+  715:             self.last_vector_error = "vector index is stale"
+  716:             return None
+  717:         if result.data["items"] != self._build_vector_items():
+  718:             self.last_vector_error = "vector index does not match memory"
+  719:             return None
+  720:         self.vector_ready = True
+  721:         self.last_vector_error = None
+  722:         return result.data
+  723: 
+  724:     def _ensure_vector_index(self) -> None:
+  725:         if self._load_vector_document() is None:
+  726:             self.rebuild_vector_index()
+  727: 
+  728:     def _build_vector_items(self) -> list[dict[str, object]]:
+  729:         items = []
+  730:         for item in self.examples:
+  731:             vector = _text_vector(f"{item.get('cue', '')}\n{item.get('reply', '')}")
+  732:             if not vector:
+  733:                 continue
+  734:             items.append(
+  735:                 {
+  736:                     "conversation_hash": item.get("conversation_hash", ""),
+  737:                     "source": item.get("source", ""),
+  738:                     "reply": item.get("reply", ""),
+  739:                     "vector": vector,
+  740:                 }
+  741:             )
+  742:         return items
+  743: 
+  744:     def rebuild_vector_index(self) -> None:
+  745:         self.vector_ready = False
+  746:         self.last_vector_error = None
+  747:         try:
+  748:             data = {
+  749:                 "version": VECTOR_SCHEMA_VERSION,
+  750:                 "dim": VECTOR_DIMENSION,
+  751:                 "memory_hash": self.content_hash(),
+  752:                 "items": self._build_vector_items(),
+  753:             }
+  754:             atomic_write_json(self.vector_path, data, _validate_vector_document, backup_count=5)
+  755:         except Exception as error:
+  756:             self.last_vector_error = f"{type(error).__name__}: vector index rebuild failed"
+  757:             raise VectorIndexError(self.last_vector_error) from error
+  758:         self.vector_ready = True
+  759:         self.last_vector_error = None
+  760: 
+  761:     def assert_ready_for_managed_reply(self) -> None:
+  762:         if not self.vector_ready:
+  763:             raise VectorIndexError(self.last_vector_error or "vector index is not ready")
+  764: 
+  765:     @staticmethod
+  766:     def _extract_phrases(text: str) -> list[str]:
+  767:         pieces = re.split(r"[，。！？、,.!?\s]+", text)
+  768:         return [piece for piece in pieces if 2 <= len(piece) <= 10]
+  769: 
+  770: 
+  771: def _unique_replies(examples: list[dict[str, str]], limit: int) -> list[str]:
+  772:     suggestions: list[str] = []
+  773:     for item in examples:
+  774:         reply = str(item.get("reply", "")).strip()
+  775:         if reply and reply not in suggestions:
+  776:             suggestions.append(reply)
+  777:         if len(suggestions) >= limit:
+  778:             break
+  779:     return suggestions
+  780: 
+  781: 
+  782: def _library_name(source: str) -> str:
+  783:     names = {
+  784:         "enterprise_annual_report_kb": "企业年报知识库",
+  785:         "tiantian_html_training": "甜甜话术库",
+  786:         "chat_zip_training": "导入话术库",
+  787:         "wechat_export_training": "微信记录话术库",
+  788:         "sop_analysis_training": "SOP分析话术库",
+  789:         "manual_edit": "手动发送记忆",
+  790:         "selected_candidate": "候选发送记忆",
+  791:         "observed_chat": "训练模式观察",
+  792:         "managed_auto": "全托管记录",
+  793:     }
+  794:     return names.get(source, source or "默认话术库")
+  795: 
+  796: 
+  797: def _build_example(
+  798:     partner: str,
+  799:     cue: str,
+  800:     reply: str,
+  801:     source: str,
+  802:     created_at: str = "",
+  803: ) -> dict[str, str]:
+  804:     full_cue = _normalize_context(cue)
+  805:     full_reply = _normalize_enterprise_reply(reply) if source == ENTERPRISE_ANNUAL_REPORT_SOURCE else _normalize_reply(reply)
+  806:     return {
+  807:         "partner": partner.strip()[:50] or "聊天记录训练",
+  808:         "cue": full_cue,
+  809:         "reply": full_reply,
+  810:         "source": _clean_source(source),
+  811:         "created_at": created_at or _utc_now(),
+  812:         "conversation_hash": _conversation_hash(full_cue, full_reply),
+  813:     }
+  814: 
+  815: 
+  816: def _with_training_metadata(example: dict[str, str], raw_item: dict[str, object]) -> dict[str, str]:
+  817:     for key in (
+  818:         "scenario_id",
+  819:         "scenario_title",
+  820:         "why",
+  821:         "question",
+  822:         "module",
+  823:         "subcategory",
+  824:         "organization_type",
+  825:         "source_sheet",
+  826:         "source_cell",
+  827:         "source_file",
+  828:     ):
+  829:         value = str(raw_item.get(key, "")).strip()
+  830:         if value:
+  831:             example[key] = value[:240]
+  832:     priority = _parse_priority(raw_item.get("priority", ""))
+  833:     if priority:
+  834:         example["priority"] = str(priority)
+  835:     return example
+  836: 
+  837: 
+  838: def _normalize_example(item: object) -> dict[str, str]:
+  839:     if not isinstance(item, dict):
+  840:         return {}
+  841:     cue = _normalize_context(str(item.get("cue", "")))
+  842:     source = _clean_source(str(item.get("source", "manual_edit")))
+  843:     reply = _normalize_enterprise_reply(str(item.get("reply", ""))) if source == ENTERPRISE_ANNUAL_REPORT_SOURCE else _normalize_reply(str(item.get("reply", "")))
+  844:     if not reply:
+  845:         return {}
+  846:     result = {
+  847:         "partner": str(item.get("partner", "聊天记录训练")).strip()[:50],
+  848:         "cue": cue,
+  849:         "reply": reply,
+  850:         "source": source,
+  851:         "created_at": str(item.get("created_at", "")),
+  852:         "conversation_hash": str(item.get("conversation_hash", "")) or _conversation_hash(cue, reply),
+  853:     }
+  854:     for key in (
+  855:         "scenario_id",
+  856:         "scenario_title",
+  857:         "why",
+  858:         "question",
+  859:         "module",
+  860:         "subcategory",
+  861:         "organization_type",
+  862:         "source_sheet",
+  863:         "source_cell",
+  864:         "source_file",
+  865:     ):
+  866:         value = str(item.get(key, "")).strip()
+  867:         if value:
+  868:             result[key] = value[:240]
+  869:     priority = _parse_priority(item.get("priority", ""))
+  870:     if priority:
+  871:         result["priority"] = str(priority)
+  872:     return result
+  873: 
+  874: 
+  875: def _parse_priority(value: object) -> int:
+  876:     try:
+  877:         number = int(float(str(value).strip()))
+  878:     except Exception:
+  879:         return 0
+  880:     return max(0, min(100, number))
+  881: 
+  882: 
+  883: def _example_priority(item: dict[str, str]) -> int:
+  884:     return _parse_priority(item.get("priority", ""))
+  885: 
+  886: 
+  887: def _phrasebook_intent_bonus(conversation_text: str, item: dict[str, str]) -> int:
+  888:     query = conversation_text or ""
+  889:     haystack = "\n".join(
+  890:         str(item.get(key, ""))
+  891:         for key in ("cue", "reply", "scenario_title", "why")
+  892:         if item.get(key)
+  893:     )
+  894:     if _contains_any(query, ("怎么放", "放哪里", "放哪", "摆哪里", "摆哪", "位置", "手机后面", "收到", "收到了")):
+  895:         placement_hits = _contains_any(
+  896:             haystack,
+  897:             ("怎么放", "放哪里", "放置", "使用说明", "位置", "手机壳", "钱包", "床头柜", "衣柜", "财位", "正南"),
+  898:         )
+  899:         if placement_hits and _contains_any(query, ("怎么放", "放哪里", "放哪", "摆哪里", "摆哪", "位置", "手机后面")):
+  900:             return 80
+  901:         if placement_hits and _contains_any(query, ("收到", "收到了")):
+  902:             return 5
+  903:     if _contains_any(query, ("刚加", "添加", "开始聊", "可以开始")) and _contains_any(
+  904:         haystack,
+  905:         ("刚添加", "初始接待", "开始聊天"),
+  906:     ):
+  907:         return 12
+  908:     return 0
+  909: 
+  910: 
+  911: def _contains_any(text: str, terms: tuple[str, ...]) -> bool:
+  912:     return any(term in text for term in terms)
+  913: 
+  914: 
+  915: def _normalize_context(text: str) -> str:
+  916:     lines = [re.sub(r"\s+", " ", line.strip()) for line in text.splitlines() if line.strip()]
+  917:     return "\n".join(lines)
+  918: 
+  919: 
+  920: def _normalize_reply(text: str) -> str:
+  921:     return re.sub(r"\s+", " ", text.strip())
+  922: 
+  923: 
+  924: def _normalize_enterprise_reply(text: str) -> str:
+  925:     lines = [re.sub(r"[ \t]+", " ", line).strip() for line in (text or "").splitlines()]
+  926:     return "\n".join(line for line in lines if line).strip()
+  927: 
+  928: 
+  929: def _format_prompt_example(index: int, item: dict[str, str]) -> str:
+  930:     cue = _truncate_for_prompt(str(item.get("cue", "")), 700)
+  931:     reply = _truncate_for_prompt(str(item.get("reply", "")), 180)
+  932:     return f"{index}. 历史聊天片段：\n{cue}\n当时真实回复：{reply}"
+  933: 
+  934: 
+  935: def _truncate_for_prompt(text: str, limit: int) -> str:
+  936:     if len(text) <= limit:
+  937:         return text
+  938:     return text[-limit:]
+  939: 
+  940: 
+  941: def _conversation_hash(cue: str, reply: str) -> str:
+  942:     payload = f"{_compact_for_hash(cue)}\n---\n{_compact_for_hash(reply)}"
+  943:     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+  944: 
+  945: 
+  946: def _compact_for_hash(text: str) -> str:
+  947:     return re.sub(r"\s+", "", text)
+  948: 
+  949: 
+  950: def _enterprise_question_key(text: str) -> str:
+  951:     return re.sub(r"[\W_]+", "", text or "").lower()
+  952: 
+  953: 
+  954: def _enterprise_semantic_tags(text: str) -> set[str]:
+  955:     compact = _enterprise_question_key(text)
+  956:     if not compact:
+  957:         return set()
+  958:     tags = {
+  959:         tag
+  960:         for tag, terms in _ENTERPRISE_SEMANTIC_TERMS.items()
+  961:         if any(_enterprise_question_key(term) in compact for term in terms)
+  962:     }
+  963:     # “哪里能看”“在哪儿看”这类问法的中间常夹入助词，不能只靠固定短语识别。
+  964:     if "哪" in compact and "看" in compact:
+  965:         tags.add("action_view")
+  966:     return tags
+  967: 
+  968: 
+  969: def _enterprise_ratio_bonus(query_key: str, candidate_question_key: str) -> int:
+  970:     """数字比例/关键数字短语加分。
+  971: 
+  972:     问法里的关键数字（如"1/3"归一化为"13"、"70周岁"的"70"）如果同时出现在
+  973:     候选问题里，且数字前 1-4 个字的上下文有重叠，说明候选与问法在同一业务点
+  974:     （如"负责人超理事数1/3" 应命中"负责人超过理事数的1/3"，而不是
+  975:     "常务理事数的1/2"）。返回 0 或固定加分（15），避免并列误判。
+  976:     """
+  977:     if not query_key or not candidate_question_key:
+  978:         return 0
+  979:     query_nums = re.findall(r"\d+", query_key)
+  980:     if not query_nums:
+  981:         return 0
+  982:     for num in query_nums:
+  983:         if len(num) < 1 or num not in candidate_question_key:
+  984:             continue
+  985:         query_pos = query_key.find(num)
+  986:         cand_pos = candidate_question_key.find(num)
+  987:         query_ctx = query_key[max(0, query_pos - 4) : query_pos]
+  988:         cand_ctx = candidate_question_key[max(0, cand_pos - 4) : cand_pos]
+  989:         overlap = len(set(query_ctx) & set(cand_ctx))
+  990:         if overlap >= 2:
+  991:             return 15
+  992:     return 0
+  993: 
+  994: 
+  995: def _enterprise_semantic_conflicts(query_tags: set[str], candidate_tags: set[str]) -> tuple[int, list[str]]:
+  996:     conflicts: list[str] = []
+  997:     query_times = query_tags & _ENTERPRISE_TIME_TAGS
+  998:     candidate_times = candidate_tags & _ENTERPRISE_TIME_TAGS
+  999:     if query_times and candidate_times and not query_times & candidate_times:
+ 1000:         conflicts.append("时间冲突")
+ 1001: 
+ 1002:     query_actions = query_tags & _ENTERPRISE_PRIMARY_ACTION_TAGS
+ 1003:     candidate_actions = candidate_tags & _ENTERPRISE_PRIMARY_ACTION_TAGS
+ 1004:     if query_actions and candidate_actions and not query_actions & candidate_actions:
+ 1005:         conflicts.append("操作冲突")
+ 1006: 
+ 1007:     penalty = 44 * ("时间冲突" in conflicts) + 35 * ("操作冲突" in conflicts)
+ 1008:     return penalty, conflicts
+ 1009: 
+ 1010: 
+ 1011: def _enterprise_reason_labels(shared_tags: set[str], conflicts: list[str], exact_question: bool) -> list[str]:
+ 1012:     labels = []
+ 1013:     if exact_question:
+ 1014:         labels.append("精确问题")
+ 1015:     label_map = {
+ 1016:         "topic_annual_report": "年度报告",
+ 1017:         "topic_annual_inspection": "年检",
+ 1018:         "time_historical": "历史时间",
+ 1019:         "time_current": "当前年度",
+ 1020:         "action_view": "查看查询",
+ 1021:         "action_edit": "修改",
+ 1022:         "action_fill": "填报",
+ 1023:         "action_print": "打印导出",
+ 1024:         "action_login": "登录入口",
+ 1025:         "status_returned": "退回",
+ 1026:         "status_error": "问题状态",
+ 1027:         "action_handle": "处理",
+ 1028:     }
+ 1029:     labels.extend(label_map[tag] for tag in sorted(shared_tags) if tag in label_map)
+ 1030:     labels.extend(conflicts)
+ 1031:     return labels
+ 1032: 
+ 1033: 
+ 1034: def _annotate_enterprise_decision(candidates: list[dict[str, str]]) -> None:
+ 1035:     """Mark the single local decision consumed by both runtime and phrasebook UI."""
+ 1036: 
+ 1037:     if not candidates:
+ 1038:         return
+ 1039:     top = candidates[0]
+ 1040:     try:
+ 1041:         top_score = int(float(str(top.get("enterprise_local_score", "0"))))
+ 1042:     except (TypeError, ValueError):
+ 1043:         top_score = 0
+ 1044:     try:
+ 1045:         next_score = int(float(str(candidates[1].get("enterprise_local_score", "0")))) if len(candidates) > 1 else 0
+ 1046:     except (TypeError, ValueError):
+ 1047:         next_score = 0
+ 1048:     margin = max(0, top_score - next_score)
+ 1049:     has_conflict = str(top.get("enterprise_conflict_count", "")) not in {"", "0"}
+ 1050:     is_exact = str(top.get("enterprise_exact_question", "")).strip() == "1"
+ 1051:     is_confident = bool(
+ 1052:         top_score >= ENTERPRISE_LOCAL_CONFIDENT_FLOOR
+ 1053:         and not has_conflict
+ 1054:         and (is_exact or margin >= ENTERPRISE_LOCAL_CONFIDENT_MARGIN)
+ 1055:     )
+ 1056:     top["enterprise_local_confident"] = "1" if is_confident else ""
+ 1057:     # 并列待裁决：分数达到可靠底线但前三名并列/接近（margin<8），
+ 1058:     # 运行时交给大模型从并列候选中裁决，测试页显示"并列待裁决"。
+ 1059:     is_tie = bool(
+ 1060:         not is_confident
+ 1061:         and not has_conflict
+ 1062:         and top_score >= ENTERPRISE_LOCAL_CONFIDENT_FLOOR
+ 1063:         and margin < ENTERPRISE_LOCAL_CONFIDENT_MARGIN
+ 1064:         and len(candidates) >= 2
+ 1065:     )
+ 1066:     if is_confident:
+ 1067:         top["enterprise_decision"] = "send"
+ 1068:         top["enterprise_decision_label"] = "可直接发送"
+ 1069:     elif is_tie:
+ 1070:         top["enterprise_decision"] = "tie"
+ 1071:         top["enterprise_decision_label"] = "并列待裁决"
+ 1072:     else:
+ 1073:         top["enterprise_decision"] = "ambiguous"
+ 1074:         top["enterprise_decision_label"] = "歧义不发送"
+ 1075:     top["enterprise_next_score"] = str(next_score)
+ 1076:     top["enterprise_score_margin"] = str(margin)
+ 1077:     if is_confident:
+ 1078:         top["enterprise_decision_reason"] = "精确问题" if is_exact else "第一名领先第二名且无时间/操作冲突"
+ 1079:     elif is_tie:
+ 1080:         top["enterprise_decision_reason"] = "前三名并列/接近，运行时交大模型裁决"
+ 1081:     else:
+ 1082:         reasons = []
+ 1083:         if has_conflict:
+ 1084:             reasons.append("存在时间/操作冲突")
+ 1085:         if margin < ENTERPRISE_LOCAL_CONFIDENT_MARGIN:
+ 1086:             reasons.append("第一名未明显领先第二名")
+ 1087:         if top_score < ENTERPRISE_LOCAL_MIN_SCORE:
+ 1088:             reasons.append("有效匹配信息不足")
+ 1089:         top["enterprise_decision_reason"] = "；".join(reasons) or "匹配不可靠"
+ 1090: 
+ 1091: 
+ 1092: def _utc_now() -> str:
+ 1093:     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+ 1094: 
+ 1095: 
+ 1096: def _is_own_line(line: str) -> bool:
+ 1097:     return line.startswith("[我]") or line.startswith("[我 ")
+ 1098: 
+ 1099: 
+ 1100: def _last_other_text(conversation_text: str) -> str:
+ 1101:     for line in reversed(conversation_text.splitlines()):
+ 1102:         stripped = line.strip()
+ 1103:         if stripped.startswith("[对方]"):
+ 1104:             return stripped.split("]", 1)[-1].strip()
+ 1105:     return ""
+ 1106: 
+ 1107: 
+ 1108: def _text_tokens(text: str) -> set[str]:
+ 1109:     text = re.sub(r"\[(?:对方|我)\]", "", text)
+ 1110:     cleaned = re.sub(r"\s+", "", text)
+ 1111:     tokens = set(re.findall(r"[\u4e00-\u9fff]{2,8}|[A-Za-z0-9]{2,}", cleaned))
+ 1112:     for size in (2, 3, 4):
+ 1113:         for index in range(max(0, len(cleaned) - size + 1)):
+ 1114:             piece = cleaned[index : index + size]
+ 1115:             if re.fullmatch(r"[\u4e00-\u9fff]+", piece):
+ 1116:                 tokens.add(piece)
+ 1117:     return tokens
+ 1118: 
+ 1119: 
+ 1120: def _text_vector(text: str, dim: int = 384) -> dict[str, float]:
+ 1121:     features = Counter()
+ 1122:     cleaned = re.sub(r"\s+", "", text or "").lower()
+ 1123:     for token in _text_tokens(text):
+ 1124:         features[token] += 2
+ 1125:     for size in (2, 3, 4):
+ 1126:         for index in range(max(0, len(cleaned) - size + 1)):
+ 1127:             features[cleaned[index : index + size]] += 1
+ 1128:     if not features and cleaned:
+ 1129:         features[f"single:{cleaned}"] += 1
+ 1130:     if not features:
+ 1131:         return {}
+ 1132:     buckets: Counter[str] = Counter()
+ 1133:     for feature, weight in features.items():
+ 1134:         digest = hashlib.sha1(feature.encode("utf-8", errors="ignore")).hexdigest()
+ 1135:         buckets[str(int(digest[:8], 16) % dim)] += float(weight)
+ 1136:     norm = sum(value * value for value in buckets.values()) ** 0.5
+ 1137:     if not norm:
+ 1138:         return {}
+ 1139:     return {key: round(value / norm, 6) for key, value in buckets.items()}
+ 1140: 
+ 1141: 
+ 1142: def _cosine_sparse(left: dict[str, float], right: object) -> float:
+ 1143:     if not isinstance(right, dict) or not left:
+ 1144:         return 0.0
+ 1145:     score = 0.0
+ 1146:     for key, value in left.items():
+ 1147:         try:
+ 1148:             score += value * float(right.get(key, 0.0))
+ 1149:         except Exception:
+ 1150:             continue
+ 1151:     return score
+ 1152: 
+ 1153: 
+ 1154: def _dedupe_memory_examples(examples: list[dict[str, str]]) -> list[dict[str, str]]:
+ 1155:     seen: dict[str, dict[str, str]] = {}
+ 1156:     for raw_item in examples:
+ 1157:         item = _normalize_example(raw_item)
+ 1158:         if not item:
+ 1159:             continue
+ 1160:         key = f"{item.get('conversation_hash', '')}:{_compact_for_hash(item.get('reply', ''))}"
+ 1161:         if not key:
+ 1162:             continue
+ 1163:         existing = seen.get(key)
+ 1164:         if existing is None:
+ 1165:             seen[key] = item
+ 1166:         elif item.get("source_file") and not existing.get("source_file"):
+ 1167:             # 新条目带了来源文件名而旧条目没有（旧版本导入）→ 用新条目补充来源信息
+ 1168:             seen[key] = item
+ 1169:     return list(seen.values())
+ 1170: 
+ 1171: 
+ 1172: def _clean_source(source: str) -> str:
+ 1173:     allowed = {
+ 1174:         "selected_candidate",
+ 1175:         "manual_edit",
+ 1176:         "managed_auto",
+ 1177:         "observed_chat",
+ 1178:         "chat_zip_training",
+ 1179:         "tiantian_html_training",
+ 1180:         "wechat_export_training",
+ 1181:         "sop_analysis_training",
+ 1182:         "enterprise_annual_report_kb",
+ 1183:     }
+ 1184:     return source if source in allowed else "manual_edit"
+
+===== CURRENT WITH LINE NUMBERS: tests\test_persistence.py =====
+    1: from collections import Counter
+    2: import hashlib
+    3: import json
+    4: import math
+    5: import os
+    6: import sys
+    7: from pathlib import Path
+    8: 
+    9: import pytest
+   10: 
+   11: import app_paths
+   12: from atomic_json import JsonDataError, atomic_write_json, load_json
+   13: import memory as memory_module
+   14: from memory import StyleMemory
+   15: import settings as settings_module
+   16: 
+   17: 
+   18: class FakeCredentialStore:
+   19:     def __init__(self, initial=None, *, save_error=None, load_error=None):
+   20:         self.values = dict(initial or {})
+   21:         self.save_error = save_error
+   22:         self.load_error = load_error
+   23: 
+   24:     def load(self):
+   25:         if self.load_error is not None:
+   26:             raise self.load_error
+   27:         return dict(self.values)
+   28: 
+   29:     def save(self, keys):
+   30:         if self.save_error is not None:
+   31:             raise self.save_error
+   32:         self.values = dict(keys)
+   33: 
+   34: 
+   35: def test_source_and_frozen_use_same_explicit_data_root(tmp_path, monkeypatch):
+   36:     monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(tmp_path))
+   37:     assert app_paths.config_path() == tmp_path / "settings.json"
+   38:     assert app_paths.memory_path() == tmp_path / "memory.json"
+   39:     assert app_paths.vector_path() == tmp_path / "vector_memory.json"
+   40: 
+   41: 
+   42: def test_default_root_is_appdata_even_when_frozen(tmp_path, monkeypatch):
+   43:     monkeypatch.delenv("WECHAT_ASSISTANT_DATA_DIR", raising=False)
+   44:     monkeypatch.setenv("APPDATA", str(tmp_path))
+   45:     monkeypatch.setattr(sys, "frozen", True, raising=False)
+   46:     assert app_paths.data_dir() == tmp_path / "WeChatStyleReplyAssistant"
+   47: 
+   48: 
+   49: def _require_examples_dict(value):
+   50:     if not isinstance(value, dict) or "examples" not in value:
+   51:         raise ValueError("examples must be a dictionary field")
+   52: 
+   53: 
+   54: def _require_numeric_config_version(value):
+   55:     if not isinstance(value, dict) or not isinstance(value.get("config_version"), int):
+   56:         raise ValueError("config_version must be an integer")
+   57: 
+   58: 
+   59: @pytest.fixture
+   60: def isolated_memory_root(tmp_path, monkeypatch):
+   61:     monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(tmp_path))
+   62:     return tmp_path
+   63: 
+   64: 
+   65: def _valid_example(index, *, reply=None, organization_type="association"):
+   66:     return {
+   67:         "partner": f"partner-{index}",
+   68:         "cue": f"[other] question-{index}",
+   69:         "reply": reply or f"answer-{index}",
+   70:         "source": "manual_edit",
+   71:         "created_at": "2026-08-12T00:00:00+00:00",
+   72:         "conversation_hash": f"hash-{index}",
+   73:         "organization_type": organization_type,
+   74:     }
+   75: 
+   76: 
+   77: def _valid_memory(examples):
+   78:     return {
+   79:         "schema_version": 2,
+   80:         "style_summary": "short and direct",
+   81:         "examples": list(examples),
+   82:         "common_phrases": {"received": 2},
+   83:     }
+   84: 
+   85: 
+   86: def test_save_does_not_truncate_more_than_3000_records(isolated_memory_root):
+   87:     memory = StyleMemory(path=isolated_memory_root / "memory.json")
+   88:     memory.examples = [_valid_example(index) for index in range(3001)]
+   89: 
+   90:     memory.save()
+   91:     loaded = StyleMemory(path=memory.path).load()
+   92: 
+   93:     assert len(json.loads(memory.path.read_text(encoding="utf-8"))["examples"]) == 3001
+   94:     assert len(loaded.examples) == 3001
+   95: 
+   96: 
+   97: def test_corrupt_primary_recovers_backup_without_empty_overwrite(isolated_memory_root):
+   98:     path = isolated_memory_root / "memory.json"
+   99:     corrupt_primary = b"broken-primary"
+  100:     path.write_bytes(corrupt_primary)
+  101:     (isolated_memory_root / "memory.json.bak.1").write_text(
+  102:         json.dumps(_valid_memory([_valid_example(1)])),
+  103:         encoding="utf-8",
+  104:     )
+  105: 
+  106:     memory = StyleMemory(path=path).load()
+  107: 
+  108:     assert len(memory.examples) == 1
+  109:     assert memory.load_result is not None
+  110:     assert memory.load_result.recovered is True
+  111:     assert memory.load_result.source == isolated_memory_root / "memory.json.bak.1"
+  112:     assert path.read_bytes() == corrupt_primary
+  113: 
+  114: 
+  115: def test_missing_primary_recovers_valid_backup(isolated_memory_root):
+  116:     path = isolated_memory_root / "memory.json"
+  117:     backup_path = isolated_memory_root / "memory.json.bak.1"
+  118:     backup_path.write_text(
+  119:         json.dumps(_valid_memory([_valid_example(7)])),
+  120:         encoding="utf-8",
+  121:     )
+  122: 
+  123:     memory = StyleMemory(path=path).load()
+  124: 
+  125:     assert memory.load_result is not None
+  126:     assert memory.load_result.recovered is True
+  127:     assert memory.load_result.source == backup_path
+  128:     assert [item["conversation_hash"] for item in memory.examples] == ["hash-7"]
+  129:     assert not path.exists()
+  130: 
+  131: 
+  132: def test_missing_primary_with_only_invalid_backups_raises_without_byte_changes(isolated_memory_root):
+  133:     path = isolated_memory_root / "memory.json"
+  134:     backups = [isolated_memory_root / f"memory.json.bak.{index}" for index in range(1, 6)]
+  135:     for index, backup in enumerate(backups, start=1):
+  136:         backup.write_bytes(f"broken-backup-{index}".encode("utf-8"))
+  137:     before = {backup: backup.read_bytes() for backup in backups}
+  138: 
+  139:     with pytest.raises(JsonDataError):
+  140:         StyleMemory(path=path).load()
+  141: 
+  142:     assert not path.exists()
+  143:     assert {backup: backup.read_bytes() for backup in backups} == before
+  144: 
+  145: 
+  146: @pytest.mark.parametrize(
+  147:     "invalid_primary",
+  148:     [
+  149:         {},
+  150:         {"style_summary": "incomplete", "examples": []},
+  151:         {
+  152:             "schema_version": 2,
+  153:             "style_summary": "invalid empty reply",
+  154:             "examples": [
+  155:                 {
+  156:                     "cue": "[other] question",
+  157:                     "reply": "   ",
+  158:                     "source": "manual_edit",
+  159:                     "conversation_hash": "empty-reply",
+  160:                 }
+  161:             ],
+  162:             "common_phrases": {},
+  163:         },
+  164:         {
+  165:             "style_summary": "legacy partial item",
+  166:             "examples": [{"cue": "[other] question", "reply": "answer"}],
+  167:             "common_phrases": {},
+  168:         },
+  169:     ],
+  170:     ids=["empty-object", "missing-core-field", "empty-reply", "partial-v1-item"],
+  171: )
+  172: def test_invalid_primary_candidate_cannot_preempt_valid_backup(
+  173:     invalid_primary,
+  174:     isolated_memory_root,
+  175: ):
+  176:     path = isolated_memory_root / "memory.json"
+  177:     path.write_text(json.dumps(invalid_primary), encoding="utf-8")
+  178:     backup_path = isolated_memory_root / "memory.json.bak.1"
+  179:     backup_path.write_text(
+  180:         json.dumps(_valid_memory([_valid_example(9)])),
+  181:         encoding="utf-8",
+  182:     )
+  183: 
+  184:     memory = StyleMemory(path=path).load()
+  185: 
+  186:     assert memory.load_result is not None
+  187:     assert memory.load_result.recovered is True
+  188:     assert memory.load_result.source == backup_path
+  189:     assert [item["conversation_hash"] for item in memory.examples] == ["hash-9"]
+  190: 
+  191: 
+  192: def test_all_corrupt_memory_candidates_raise_typed_error_without_byte_changes(isolated_memory_root):
+  193:     path = isolated_memory_root / "memory.json"
+  194:     candidates = [path, *(isolated_memory_root / f"memory.json.bak.{index}" for index in range(1, 6))]
+  195:     payloads = [
+  196:         b"{broken-primary",
+  197:         b"[]",
+  198:         b'{"schema_version":"2","examples":[]}',
+  199:         b'{"schema_version":2,"style_summary":[],"examples":[],"common_phrases":{}}',
+  200:         b'{"schema_version":2,"style_summary":"ok","examples":{},"common_phrases":{}}',
+  201:         b'{"schema_version":2,"style_summary":"ok","examples":[],"common_phrases":[]}',
+  202:     ]
+  203:     for candidate, payload in zip(candidates, payloads):
+  204:         candidate.write_bytes(payload)
+  205:     before = {candidate: candidate.read_bytes() for candidate in candidates}
+  206: 
+  207:     with pytest.raises(JsonDataError):
+  208:         StyleMemory(path=path).load()
+  209: 
+  210:     assert {candidate: candidate.read_bytes() for candidate in candidates} == before
+  211: 
+  212: 
+  213: @pytest.mark.parametrize(
+  214:     ("field", "invalid_value"),
+  215:     [
+  216:         ("schema_version", "2"),
+  217:         ("style_summary", []),
+  218:         ("examples", {}),
+  219:         ("common_phrases", []),
+  220:     ],
+  221: )
+  222: def test_memory_validator_rejects_wrong_top_level_field_types(field, invalid_value):
+  223:     document = _valid_memory([_valid_example(1)])
+  224:     document[field] = invalid_value
+  225: 
+  226:     with pytest.raises(ValueError):
+  227:         memory_module.validate_memory_document(document)
+  228: 
+  229: 
+  230: @pytest.mark.parametrize(
+  231:     "field",
+  232:     [
+  233:         "partner",
+  234:         "cue",
+  235:         "reply",
+  236:         "source",
+  237:         "created_at",
+  238:         "conversation_hash",
+  239:         "organization_type",
+  240:     ],
+  241: )
+  242: def test_memory_validator_rejects_non_string_example_fields(field):
+  243:     example = _valid_example(1)
+  244:     example[field] = 123
+  245: 
+  246:     with pytest.raises(ValueError):
+  247:         memory_module.validate_memory_document(_valid_memory([example]))
+  248: 
+  249: 
+  250: @pytest.mark.parametrize(
+  251:     "phrases",
+  252:     [
+  253:         {1: 2},
+  254:         {"received": "2"},
+  255:         {"received": True},
+  256:         {"received": -1},
+  257:     ],
+  258: )
+  259: def test_memory_validator_requires_non_negative_integer_phrase_counts(phrases):
+  260:     document = _valid_memory([_valid_example(1)])
+  261:     document["common_phrases"] = phrases
+  262: 
+  263:     with pytest.raises(ValueError):
+  264:         memory_module.validate_memory_document(document)
+  265: 
+  266: 
+  267: @pytest.mark.parametrize("state", ["missing", "corrupt", "schema_mismatch", "hash_mismatch"])
+  268: def test_vector_hash_and_other_invalid_states_rebuild_from_memory(
+  269:     state,
+  270:     isolated_memory_root,
+  271: ):
+  272:     path = isolated_memory_root / "memory.json"
+  273:     path.write_text(json.dumps(_valid_memory([_valid_example(1)])), encoding="utf-8")
+  274:     vector_path = isolated_memory_root / "vector_memory.json"
+  275:     if state == "corrupt":
+  276:         vector_path.write_text("{broken-vector", encoding="utf-8")
+  277:     elif state == "schema_mismatch":
+  278:         vector_path.write_text(
+  279:             json.dumps({"version": 999, "dim": 384, "memory_hash": "0" * 64, "items": []}),
+  280:             encoding="utf-8",
+  281:         )
+  282:     elif state == "hash_mismatch":
+  283:         vector_path.write_text(
+  284:             json.dumps({"version": 1, "dim": 384, "memory_hash": "0" * 64, "items": []}),
+  285:             encoding="utf-8",
+  286:         )
+  287: 
+  288:     memory = StyleMemory(path=path).load()
+  289:     rebuilt = json.loads(vector_path.read_text(encoding="utf-8"))
+  290: 
+  291:     assert rebuilt["version"] == 1
+  292:     assert rebuilt["memory_hash"] == memory.content_hash()
+  293:     assert len(rebuilt["items"]) == 1
+  294: 
+  295: 
+  296: def test_vector_write_failure_is_observable_and_preserves_memory_hash(
+  297:     isolated_memory_root,
+  298:     monkeypatch,
+  299: ):
+  300:     path = isolated_memory_root / "memory.json"
+  301:     path.write_text(json.dumps(_valid_memory([_valid_example(1)])), encoding="utf-8")
+  302:     vector_path = isolated_memory_root / "vector_memory.json"
+  303:     vector_path.write_text("{broken-vector", encoding="utf-8")
+  304:     memory_hash_before = hashlib.sha256(path.read_bytes()).hexdigest()
+  305:     real_atomic_write_json = atomic_write_json
+  306: 
+  307:     def fail_vector_write(destination, data, validator, backup_count=5):
+  308:         if Path(destination) == vector_path:
+  309:             raise OSError("simulated vector write failure")
+  310:         return real_atomic_write_json(destination, data, validator, backup_count)
+  311: 
+  312:     monkeypatch.setattr(memory_module, "atomic_write_json", fail_vector_write, raising=False)
+  313: 
+  314:     memory = StyleMemory(path=path)
+  315:     with pytest.raises(memory_module.VectorIndexError) as error:
+  316:         memory.load()
+  317: 
+  318:     assert hashlib.sha256(path.read_bytes()).hexdigest() == memory_hash_before
+  319:     assert isinstance(error.value.__cause__, OSError)
+  320:     assert memory.vector_ready is False
+  321:     assert memory.last_vector_error
+  322:     with pytest.raises(memory_module.VectorIndexError):
+  323:         memory.assert_ready_for_managed_reply()
+  324: 
+  325: 
+  326: def test_runtime_save_vector_failure_blocks_until_successful_rebuild(
+  327:     isolated_memory_root,
+  328:     monkeypatch,
+  329: ):
+  330:     memory = StyleMemory(path=isolated_memory_root / "memory.json")
+  331:     memory.examples = [_valid_example(1)]
+  332:     memory.save()
+  333:     memory.examples.append(_valid_example(2))
+  334:     real_atomic_write_json = memory_module.atomic_write_json
+  335: 
+  336:     def fail_vector_write(destination, data, validator, backup_count=5):
+  337:         if Path(destination) == memory.vector_path:
+  338:             raise OSError("sensitive customer payload at C:\\private\\memory")
+  339:         return real_atomic_write_json(destination, data, validator, backup_count)
+  340: 
+  341:     with monkeypatch.context() as scoped:
+  342:         scoped.setattr(memory_module, "atomic_write_json", fail_vector_write)
+  343:         with pytest.raises(memory_module.VectorIndexError):
+  344:             memory.save()
+  345: 
+  346:     persisted_after_failure = memory.path.read_bytes()
+  347:     assert len(json.loads(persisted_after_failure)["examples"]) == 2
+  348:     assert memory.vector_ready is False
+  349:     assert memory.last_vector_error is not None
+  350:     assert "OSError" in memory.last_vector_error
+  351:     assert "customer" not in memory.last_vector_error
+  352:     assert "private" not in memory.last_vector_error
+  353:     with pytest.raises(memory_module.VectorIndexError):
+  354:         memory.assert_ready_for_managed_reply()
+  355: 
+  356:     memory.rebuild_vector_index()
+  357: 
+  358:     assert memory.path.read_bytes() == persisted_after_failure
+  359:     assert memory.vector_ready is True
+  360:     assert memory.last_vector_error is None
+  361:     memory.assert_ready_for_managed_reply()
+  362: 
+  363: 
+  364: @pytest.mark.parametrize(
+  365:     "corruption",
+  366:     [
+  367:         "nan-weight",
+  368:         "infinite-weight",
+  369:         "weight-out-of-range",
+  370:         "bucket-out-of-range",
+  371:         "noncanonical-bucket",
+  372:         "empty-vector",
+  373:         "record-mismatch",
+  374:     ],
+  375: )
+  376: def test_invalid_vector_payload_with_current_memory_hash_is_rebuilt(
+  377:     corruption,
+  378:     isolated_memory_root,
+  379: ):
+  380:     memory = StyleMemory(path=isolated_memory_root / "memory.json")
+  381:     memory.examples = [_valid_example(1)]
+  382:     memory.save()
+  383:     vector_path = memory.vector_path
+  384:     vector_document = json.loads(vector_path.read_text(encoding="utf-8"))
+  385:     expected_items = json.loads(json.dumps(vector_document["items"]))
+  386:     item = vector_document["items"][0]
+  387:     bucket = next(iter(item["vector"]))
+  388:     if corruption == "nan-weight":
+  389:         item["vector"][bucket] = float("nan")
+  390:     elif corruption == "infinite-weight":
+  391:         item["vector"][bucket] = float("inf")
+  392:     elif corruption == "weight-out-of-range":
+  393:         item["vector"][bucket] = 1.5
+  394:     elif corruption == "bucket-out-of-range":
+  395:         item["vector"] = {"384": 0.5}
+  396:     elif corruption == "noncanonical-bucket":
+  397:         item["vector"] = {"01": 0.5}
+  398:     elif corruption == "empty-vector":
+  399:         item["vector"] = {}
+  400:     else:
+  401:         item["reply"] = "tampered reply"
+  402:     vector_path.write_text(json.dumps(vector_document), encoding="utf-8")
+  403: 
+  404:     loaded = StyleMemory(path=memory.path).load()
+  405:     rebuilt = json.loads(vector_path.read_text(encoding="utf-8"))
+  406: 
+  407:     assert rebuilt["items"] == expected_items
+  408:     assert loaded.vector_ready is True
+  409:     assert loaded.last_vector_error is None
+  410:     for rebuilt_item in rebuilt["items"]:
+  411:         assert rebuilt_item["vector"]
+  412:         assert all(
+  413:             bucket_key == str(int(bucket_key)) and 0 <= int(bucket_key) < 384
+  414:             for bucket_key in rebuilt_item["vector"]
+  415:         )
+  416:         assert all(
+  417:             math.isfinite(weight) and 0 < weight <= 1
+  418:             for weight in rebuilt_item["vector"].values()
+  419:         )
+  420: 
+  421: 
+  422: @pytest.mark.parametrize("reply", ["x", "中"], ids=["ascii", "chinese"])
+  423: def test_single_character_examples_always_have_stable_vector_items(
+  424:     reply,
+  425:     isolated_memory_root,
+  426: ):
+  427:     memory = StyleMemory(path=isolated_memory_root / "memory.json")
+  428:     example = _valid_example(1, reply=reply)
+  429:     example["cue"] = ""
+  430:     example["conversation_hash"] = f"single-{ord(reply)}"
+  431:     memory.examples = [example]
+  432: 
+  433:     memory.save()
+  434:     built_items = memory._build_vector_items()
+  435:     vector_document = json.loads(memory.vector_path.read_text(encoding="utf-8"))
+  436: 
+  437:     assert len(built_items) == len(memory.examples) == 1
+  438:     assert built_items[0]["vector"]
+  439:     assert vector_document["items"] == built_items
+  440:     assert memory_module._text_vector(reply) == built_items[0]["vector"]
+  441:     assert memory.vector_ready is True
+  442:     memory.assert_ready_for_managed_reply()
+  443: 
+  444:     vector_backup = memory.vector_path.with_name(f"{memory.vector_path.name}.bak.1")
+  445:     assert not vector_backup.exists()
+  446:     first_reload = StyleMemory(path=memory.path).load()
+  447:     second_reload = StyleMemory(path=memory.path).load()
+  448: 
+  449:     assert first_reload.vector_ready is True
+  450:     assert second_reload.vector_ready is True
+  451:     assert not vector_backup.exists()
+  452: 
+  453: 
+  454: def test_content_hash_uses_stable_canonical_json(isolated_memory_root):
+  455:     example = _valid_example(1)
+  456:     memory = StyleMemory(path=isolated_memory_root / "memory.json")
+  457:     memory.style_summary = "stable summary"
+  458:     memory.examples = [dict(reversed(list(example.items())))]
+  459:     memory.common_phrases = Counter({"second": 1, "first": 2})
+  460:     canonical_document = {
+  461:         "schema_version": 2,
+  462:         "style_summary": "stable summary",
+  463:         "examples": [example],
+  464:         "common_phrases": {"first": 2, "second": 1},
+  465:     }
+  466:     expected = hashlib.sha256(
+  467:         json.dumps(
+  468:             canonical_document,
+  469:             ensure_ascii=False,
+  470:             sort_keys=True,
+  471:             separators=(",", ":"),
+  472:         ).encode("utf-8")
+  473:     ).hexdigest()
+  474: 
+  475:     assert memory.content_hash() == expected
+  476: 
+  477: 
+  478: def test_legacy_memory_without_created_at_keeps_stable_hash(isolated_memory_root, monkeypatch):
+  479:     path = isolated_memory_root / "memory.json"
+  480:     legacy_example = _valid_example(1)
+  481:     legacy_example.pop("created_at")
+  482:     legacy_document = _valid_memory([legacy_example])
+  483:     legacy_document.pop("schema_version")
+  484:     path.write_text(json.dumps(legacy_document), encoding="utf-8")
+  485:     ticks = iter(f"generated-{index}" for index in range(20))
+  486:     monkeypatch.setattr(memory_module, "_utc_now", lambda: next(ticks))
+  487: 
+  488:     first_hash = StyleMemory(path=path).load().content_hash()
+  489:     second_hash = StyleMemory(path=path).load().content_hash()
+  490: 
+  491:     assert first_hash == second_hash
+  492: 
+  493: 
+  494: def test_dedupe_preserves_different_answers_sharing_conversation_hash(isolated_memory_root):
+  495:     first = _valid_example(1, reply="answer for associations", organization_type="association")
+  496:     second = _valid_example(2, reply="answer for foundations", organization_type="foundation")
+  497:     first["conversation_hash"] = second["conversation_hash"] = "shared-conversation"
+  498:     memory = StyleMemory(path=isolated_memory_root / "memory.json")
+  499:     memory.examples = [first, second]
+  500: 
+  501:     memory.save()
+  502: 
+  503:     assert [item["reply"] for item in StyleMemory(path=memory.path).load().examples] == [
+  504:         "answer for associations",
+  505:         "answer for foundations",
+  506:     ]
+  507: 
+  508: 
+  509: def test_missing_memory_returns_empty_without_creating_primary_or_vector(isolated_memory_root):
+  510:     memory = StyleMemory(path=isolated_memory_root / "memory.json").load()
+  511: 
+  512:     assert memory.examples == []
+  513:     assert memory.load_result is None
+  514:     assert not memory.path.exists()
+  515:     assert not memory.vector_path.exists()
+  516: 
+  517: 
+  518: def test_load_recovers_newest_valid_backup(tmp_path):
+  519:     path = tmp_path / "memory.json"
+  520:     path.write_text("{broken", encoding="utf-8")
+  521:     (tmp_path / "memory.json.bak.1").write_text("{broken", encoding="utf-8")
+  522:     (tmp_path / "memory.json.bak.2").write_text('{"examples": [1]}', encoding="utf-8")
+  523:     (tmp_path / "memory.json.bak.3").write_text('{"examples": [2]}', encoding="utf-8")
+  524: 
+  525:     result = load_json(path, _require_examples_dict)
+  526: 
+  527:     assert result.data == {"examples": [1]}
+  528:     assert result.source == tmp_path / "memory.json.bak.2"
+  529:     assert result.recovered is True
+  530: 
+  531: 
+  532: def test_atomic_write_failed_validation_does_not_replace_existing_file(tmp_path):
+  533:     path = tmp_path / "settings.json"
+  534:     path.write_text('{"config_version": 2}', encoding="utf-8")
+  535: 
+  536:     with pytest.raises(ValueError):
+  537:         atomic_write_json(path, {"config_version": "bad"}, _require_numeric_config_version)
+  538: 
+  539:     assert json.loads(path.read_text(encoding="utf-8")) == {"config_version": 2}
+  540: 
+  541: 
+  542: def test_atomic_write_rotates_five_backups(tmp_path):
+  543:     path = tmp_path / "settings.json"
+  544:     path.write_text('{"config_version": 0}', encoding="utf-8")
+  545:     for index in range(1, 6):
+  546:         (tmp_path / f"settings.json.bak.{index}").write_text(
+  547:             json.dumps({"config_version": index}), encoding="utf-8"
+  548:         )
+  549: 
+  550:     atomic_write_json(path, {"config_version": 6}, _require_numeric_config_version)
+  551: 
+  552:     assert json.loads(path.read_text(encoding="utf-8")) == {"config_version": 6}
+  553:     assert [
+  554:         json.loads((tmp_path / f"settings.json.bak.{index}").read_text(encoding="utf-8"))
+  555:         for index in range(1, 6)
+  556:     ] == [{"config_version": value} for value in range(0, 5)]
+  557: 
+  558: 
+  559: def test_atomic_write_retains_older_valid_backup_when_newer_slots_are_corrupt(tmp_path):
+  560:     path = tmp_path / "settings.json"
+  561:     path.write_text('{"config_version": 0}', encoding="utf-8")
+  562:     (tmp_path / "settings.json.bak.1").write_text("{broken", encoding="utf-8")
+  563:     (tmp_path / "settings.json.bak.2").write_text('{"config_version": 2}', encoding="utf-8")
+  564:     (tmp_path / "settings.json.bak.3").write_text("{broken", encoding="utf-8")
+  565:     (tmp_path / "settings.json.bak.4").write_text("{broken", encoding="utf-8")
+  566:     (tmp_path / "settings.json.bak.5").write_text('{"config_version": 5}', encoding="utf-8")
+  567: 
+  568:     atomic_write_json(path, {"config_version": 6}, _require_numeric_config_version)
+  569: 
+  570:     assert [
+  571:         json.loads((tmp_path / f"settings.json.bak.{index}").read_text(encoding="utf-8"))
+  572:         for index in range(1, 4)
+  573:     ] == [
+  574:         {"config_version": 0},
+  575:         {"config_version": 2},
+  576:         {"config_version": 5},
+  577:     ]
+  578:     assert not (tmp_path / "settings.json.bak.4").exists()
+  579:     assert not (tmp_path / "settings.json.bak.5").exists()
+  580: 
+  581: 
+  582: def test_atomic_replace_failure_leaves_original_primary_readable(tmp_path, monkeypatch):
+  583:     path = tmp_path / "settings.json"
+  584:     path.write_text('{"config_version": 2}', encoding="utf-8")
+  585: 
+  586:     import atomic_json
+  587: 
+  588:     original_replace = atomic_json.os.replace
+  589: 
+  590:     def fail_primary_replace(source, destination):
+  591:         if destination == path:
+  592:             raise OSError("simulated replace failure")
+  593:         return original_replace(source, destination)
+  594: 
+  595:     monkeypatch.setattr(atomic_json.os, "replace", fail_primary_replace)
+  596: 
+  597:     with pytest.raises(OSError, match="simulated replace failure"):
+  598:         atomic_write_json(path, {"config_version": 3}, _require_numeric_config_version)
+  599: 
+  600:     assert json.loads(path.read_text(encoding="utf-8")) == {"config_version": 2}
+  601: 
+  602: 
+  603: def test_load_json_all_invalid_candidates_raises_without_creating_file(tmp_path):
+  604:     path = tmp_path / "memory.json"
+  605:     (tmp_path / "memory.json.bak.1").write_text("[]", encoding="utf-8")
+  606: 
+  607:     with pytest.raises(JsonDataError) as error:
+  608:         load_json(path, _require_examples_dict)
+  609: 
+  610:     assert not path.exists()
+  611:     assert "memory.json" in str(error.value)
+  612: 
+  613: 
+  614: @pytest.mark.parametrize("field", ["managed_auto_reply", "auto_recognize", "training_mode"])
+  615: def test_string_false_is_rejected(field, tmp_path):
+  616:     path = tmp_path / "settings.json"
+  617:     path.write_text(json.dumps({"config_version": 2, field: "false"}), encoding="utf-8")
+  618: 
+  619:     with pytest.raises(settings_module.SettingsValidationError):
+  620:         settings_module.AppSettings(
+  621:             config_path=path,
+  622:             credential_store=FakeCredentialStore(),
+  623:         ).load()
+  624: 
+  625: 
+  626: @pytest.mark.parametrize(
+  627:     ("field", "low", "high"),
+  628:     [
+  629:         ("poll_interval_ms", 250, 10000),
+  630:         ("group_poll_interval_ms", 250, 10000),
+  631:         ("auto_reply_delay_seconds", 0.5, 10),
+  632:         ("capture_cooldown_seconds", 0.5, 60),
+  633:         ("search_max_results", 1, 6),
+  634:     ],
+  635: )
+  636: def test_settings_numeric_bounds_are_inclusive_and_reject_outside_values(field, low, high, tmp_path):
+  637:     for accepted in (low, high):
+  638:         path = tmp_path / f"{field}-{accepted}.json"
+  639:         path.write_text(json.dumps({"config_version": 2, field: accepted}), encoding="utf-8")
+  640:         loaded = settings_module.AppSettings(
+  641:             config_path=path,
+  642:             credential_store=FakeCredentialStore(),
+  643:         ).load()
+  644:         assert getattr(loaded, field) == accepted
+  645: 
+  646:     for rejected in (low - 0.01, high + 0.01, "1", True):
+  647:         path = tmp_path / f"{field}-invalid-{rejected}.json"
+  648:         path.write_text(json.dumps({"config_version": 2, field: rejected}), encoding="utf-8")
+  649:         with pytest.raises(settings_module.SettingsValidationError):
+  650:             settings_module.AppSettings(
+  651:                 config_path=path,
+  652:                 credential_store=FakeCredentialStore(),
+  653:             ).load()
+  654: 
+  655: 
+  656: @pytest.mark.parametrize(
+  657:     "area",
+  658:     [
+  659:         {"x_left": -0.01, "x_right": 0.9, "y_top": 0.1, "y_bottom": 0.9},
+  660:         {"x_left": 0.1, "x_right": 1.01, "y_top": 0.1, "y_bottom": 0.9},
+  661:         {"x_left": 0.4, "x_right": 0.4, "y_top": 0.1, "y_bottom": 0.9},
+  662:         {"x_left": 0.7, "x_right": 0.4, "y_top": 0.1, "y_bottom": 0.9},
+  663:         {"x_left": 0.1, "x_right": 0.9, "y_top": 0.9, "y_bottom": 0.9},
+  664:         {"x_left": 0.1, "x_right": 0.9, "y_top": 0.95, "y_bottom": 0.9},
+  665:         {"x_left": "0.1", "x_right": 0.9, "y_top": 0.1, "y_bottom": 0.9},
+  666:     ],
+  667: )
+  668: def test_chat_area_requires_numeric_unit_coordinates_in_visual_order(area, tmp_path):
+  669:     path = tmp_path / "settings.json"
+  670:     path.write_text(json.dumps({"config_version": 2, "chat_area": area}), encoding="utf-8")
+  671: 
+  672:     with pytest.raises(settings_module.SettingsValidationError):
+  673:         settings_module.AppSettings(
+  674:             config_path=path,
+  675:             credential_store=FakeCredentialStore(),
+  676:         ).load()
+  677: 
+  678: 
+  679: def test_formal_settings_forbid_generation_and_search():
+  680:     with pytest.raises(settings_module.SettingsValidationError):
+  681:         settings_module.AppSettings(reply_source_mode="model").validate()
+  682:     with pytest.raises(settings_module.SettingsValidationError):
+  683:         settings_module.AppSettings(enable_web_search=True).validate()
+  684: 
+  685: 
+  686: def test_legacy_managed_true_migrates_only_to_observe(tmp_path):
+  687:     path = tmp_path / "settings.json"
+  688:     path.write_text(json.dumps({"managed_auto_reply": True}), encoding="utf-8")
+  689: 
+  690:     loaded = settings_module.AppSettings(
+  691:         config_path=path,
+  692:         credential_store=FakeCredentialStore(),
+  693:     ).load()
+  694: 
+  695:     assert loaded.managed_mode == "observe"
+  696:     assert loaded.managed_auto_reply is False
+  697:     persisted = json.loads(path.read_text(encoding="utf-8"))
+  698:     assert persisted["config_version"] == 2
+  699:     assert persisted["managed_mode"] == "observe"
+  700:     assert "managed_auto_reply" not in persisted
+  701: 
+  702: 
+  703: def test_credential_store_round_trip_uses_injected_protection(tmp_path):
+  704:     from secure_store import CredentialStore
+  705: 
+  706:     def protect(payload):
+  707:         return b"protected:" + payload[::-1]
+  708: 
+  709:     def unprotect(blob):
+  710:         assert blob.startswith(b"protected:")
+  711:         return blob[len(b"protected:") :][::-1]
+  712: 
+  713:     path = tmp_path / "credentials.dat"
+  714:     store = CredentialStore(path=path, protect=protect, unprotect=unprotect)
+  715:     store.save({"deepseek": "secret-value", "vision:zhipu": "vision-secret"})
+  716: 
+  717:     assert store.load() == {"deepseek": "secret-value", "vision:zhipu": "vision-secret"}
+  718:     assert b"secret-value" not in path.read_bytes()
+  719: 
+  720: 
+  721: def test_credential_store_binary_write_fsyncs_replaces_and_keeps_five_valid_backups(tmp_path, monkeypatch):
+  722:     import secure_store
+  723: 
+  724:     path = tmp_path / "credentials.dat"
+  725:     store = secure_store.CredentialStore(
+  726:         path=path,
+  727:         protect=lambda payload: b"sealed:" + payload,
+  728:         unprotect=lambda blob: blob.removeprefix(b"sealed:"),
+  729:     )
+  730:     fsync_calls = []
+  731:     replace_destinations = []
+  732:     real_fsync = secure_store.os.fsync
+  733:     real_replace = secure_store.os.replace
+  734: 
+  735:     def track_fsync(fd):
+  736:         fsync_calls.append(fd)
+  737:         return real_fsync(fd)
+  738: 
+  739:     def track_replace(source, destination):
+  740:         assert Path(source).parent == Path(destination).parent == tmp_path
+  741:         replace_destinations.append(Path(destination).name)
+  742:         return real_replace(source, destination)
+  743: 
+  744:     monkeypatch.setattr(secure_store.os, "fsync", track_fsync)
+  745:     monkeypatch.setattr(secure_store.os, "replace", track_replace)
+  746:     for value in range(7):
+  747:         store.save({"deepseek": f"secret-{value}"})
+  748: 
+  749:     assert fsync_calls
+  750:     assert "credentials.dat" in replace_destinations
+  751:     assert [
+  752:         secure_store.CredentialStore(
+  753:             path=tmp_path / f"credentials.dat.bak.{index}",
+  754:             protect=lambda payload: b"sealed:" + payload,
+  755:             unprotect=lambda blob: blob.removeprefix(b"sealed:"),
+  756:         ).load()["deepseek"]
+  757:         for index in range(1, 6)
+  758:     ] == ["secret-5", "secret-4", "secret-3", "secret-2", "secret-1"]
+  759: 
+  760: 
+  761: def test_credential_store_skips_undecryptable_primary_and_loads_valid_backup(tmp_path):
+  762:     from secure_store import CredentialStore
+  763: 
+  764:     def unprotect(blob):
+  765:         if not blob.startswith(b"sealed:"):
+  766:             raise RuntimeError("simulated DPAPI rejection")
+  767:         return blob.removeprefix(b"sealed:")
+  768: 
+  769:     path = tmp_path / "credentials.dat"
+  770:     store = CredentialStore(
+  771:         path=path,
+  772:         protect=lambda payload: b"sealed:" + payload,
+  773:         unprotect=unprotect,
+  774:     )
+  775:     store.save({"deepseek": "older"})
+  776:     store.save({"deepseek": "current"})
+  777:     path.write_bytes(b"not-a-dpapi-blob")
+  778: 
+  779:     assert store.load() == {"deepseek": "older"}
+  780: 
+  781: 
+  782: def test_legacy_plaintext_keys_are_removed_only_after_encrypted_round_trip(tmp_path):
+  783:     path = tmp_path / "settings.json"
+  784:     path.write_text(
+  785:         json.dumps(
+  786:             {
+  787:                 "api_provider": "deepseek",
+  788:                 "api_key": "legacy-text",
+  789:                 "provider_api_keys": {"zhipu": "legacy-zhipu"},
+  790:                 "vision_provider": "zhipu",
+  791:                 "vision_api_key": "legacy-vision",
+  792:             }
+  793:         ),
+  794:         encoding="utf-8",
+  795:     )
+  796:     credential_store = FakeCredentialStore()
+  797: 
+  798:     loaded = settings_module.AppSettings(
+  799:         config_path=path,
+  800:         credential_store=credential_store,
+  801:     ).load()
+  802: 
+  803:     assert loaded.get_provider_api_key("deepseek") == "legacy-text"
+  804:     assert loaded.get_provider_api_key("zhipu") == "legacy-zhipu"
+  805:     assert loaded.vision_api_key == "legacy-vision"
+  806:     assert credential_store.values == {
+  807:         "deepseek": "legacy-text",
+  808:         "zhipu": "legacy-zhipu",
+  809:         "vision:zhipu": "legacy-vision",
+  810:     }
+  811:     persisted = path.read_text(encoding="utf-8")
+  812:     assert "legacy-text" not in persisted
+  813:     assert "legacy-zhipu" not in persisted
+  814:     assert "legacy-vision" not in persisted
+  815:     persisted_fields = json.loads(persisted)
+  816:     assert "api_key" not in persisted_fields
+  817:     assert "provider_api_keys" not in persisted_fields
+  818:     assert "vision_api_key" not in persisted_fields
+  819: 
+  820: 
+  821: def test_legacy_migration_purges_plaintext_keys_from_primary_and_all_settings_backups(tmp_path):
+  822:     path = tmp_path / "settings.json"
+  823:     path.write_text(
+  824:         json.dumps({"api_provider": "deepseek", "api_key": "primary-secret"}),
+  825:         encoding="utf-8",
+  826:     )
+  827:     (tmp_path / "settings.json.bak.1").write_text(
+  828:         json.dumps({"provider_api_keys": {"zhipu": "backup-provider-secret"}}),
+  829:         encoding="utf-8",
+  830:     )
+  831:     (tmp_path / "settings.json.bak.2").write_text(
+  832:         json.dumps({"vision_api_key": "backup-vision-secret"}),
+  833:         encoding="utf-8",
+  834:     )
+  835: 
+  836:     settings_module.AppSettings(
+  837:         config_path=path,
+  838:         credential_store=FakeCredentialStore(),
+  839:     ).load()
+  840: 
+  841:     candidates = [path, *sorted(tmp_path.glob("settings.json.bak.*"))]
+  842:     assert candidates
+  843:     for candidate in candidates:
+  844:         raw = candidate.read_text(encoding="utf-8")
+  845:         document = json.loads(raw)
+  846:         assert not {"api_key", "vision_api_key", "provider_api_keys"} & document.keys()
+  847:         assert "primary-secret" not in raw
+  848:         assert "backup-provider-secret" not in raw
+  849:         assert "backup-vision-secret" not in raw
+  850: 
+  851: 
+  852: @pytest.mark.parametrize(
+  853:     ("field", "literal_value"),
+  854:     [
+  855:         ("custom_headers", '{"Authorization":"Bearer sk-live-literal"}'),
+  856:         ("custom_headers", '{"X-Token":"literal-header-token"}'),
+  857:         ("custom_body", '{"token":"literal-body-token","prompt":"{prompt}"}'),
+  858:         ("custom_body", '{"auth":"literal-body-secret","prompt":"{prompt}"}'),
+  859:         ("custom_body", '{"api_key":"literal-body-key","prompt":"{prompt}"}'),
+  860:     ],
+  861: )
+  862: def test_settings_reject_literal_credentials_in_custom_request_templates(field, literal_value, tmp_path):
+  863:     settings = settings_module.AppSettings(
+  864:         config_path=tmp_path / "settings.json",
+  865:         credential_store=FakeCredentialStore(),
+  866:     )
+  867:     setattr(settings, field, literal_value)
+  868: 
+  869:     with pytest.raises(settings_module.SettingsValidationError):
+  870:         settings.save()
+  871: 
+  872:     assert not settings.config_path.exists()
+  873: 
+  874: 
+  875: def test_settings_allow_api_key_placeholder_in_custom_request_templates(tmp_path):
+  876:     path = tmp_path / "settings.json"
+  877:     settings = settings_module.AppSettings(config_path=path, credential_store=FakeCredentialStore())
+  878:     settings.custom_headers = '{"Authorization":"Bearer {api_key}","X-Key":"{api_key}"}'
+  879:     settings.custom_body = '{"model":"{model}","prompt":"{prompt}","credential":"{api_key}"}'
+  880: 
+  881:     settings.save()
+  882:     loaded = settings_module.AppSettings(
+  883:         config_path=path,
+  884:         credential_store=FakeCredentialStore(),
+  885:     ).load()
+  886: 
+  887:     assert loaded.custom_headers == settings.custom_headers
+  888:     assert loaded.custom_body == settings.custom_body
+  889: 
+  890: 
+  891: @pytest.mark.parametrize(
+  892:     ("field", "literal_template", "secret"),
+  893:     [
+  894:         ("custom_headers", '{"X-Auth":"x-auth-literal-secret"}', "x-auth-literal-secret"),
+  895:         (
+  896:             "custom_headers",
+  897:             '{"Proxy-Authorization":"Basic proxy-literal-secret"}',
+  898:             "proxy-literal-secret",
+  899:         ),
+  900:         ("custom_body", '{"access_token":"access-literal-secret"}', "access-literal-secret"),
+  901:         ("custom_body", '{"client_secret":"client-literal-secret"}', "client-literal-secret"),
+  902:         ("custom_body", '{"password":"password-literal-secret"}', "password-literal-secret"),
+  903:     ],
+  904: )
+  905: def test_compound_credential_fields_reject_literals_and_keep_all_settings_snapshots_clean(
+  906:     field,
+  907:     literal_template,
+  908:     secret,
+  909:     tmp_path,
+  910: ):
+  911:     path = tmp_path / "settings.json"
+  912:     settings = settings_module.AppSettings(config_path=path, credential_store=FakeCredentialStore())
+  913:     for _index in range(7):
+  914:         settings.save()
+  915: 
+  916:     setattr(settings, field, literal_template)
+  917:     with pytest.raises(settings_module.SettingsValidationError):
+  918:         settings.save()
+  919: 
+  920:     candidates = [path, *sorted(tmp_path.glob("settings.json.bak.*"))]
+  921:     assert len(candidates) == 6
+  922:     for candidate in candidates:
+  923:         assert secret not in candidate.read_text(encoding="utf-8")
+  924: 
+  925: 
+  926: @pytest.mark.parametrize(
+  927:     ("field", "placeholder_template"),
+  928:     [
+  929:         ("custom_headers", '{"X-Auth":"{api_key}"}'),
+  930:         ("custom_headers", '{"Proxy-Authorization":"Basic {api_key}"}'),
+  931:         ("custom_body", '{"access_token":"{api_key}"}'),
+  932:         ("custom_body", '{"client_secret":"{api_key}"}'),
+  933:         ("custom_body", '{"password":"{api_key}"}'),
+  934:     ],
+  935: )
+  936: def test_compound_credential_fields_allow_api_key_placeholder(field, placeholder_template, tmp_path):
+  937:     path = tmp_path / "settings.json"
+  938:     settings = settings_module.AppSettings(config_path=path, credential_store=FakeCredentialStore())
+  939:     setattr(settings, field, placeholder_template)
+  940: 
+  941:     settings.save()
+  942:     loaded = settings_module.AppSettings(config_path=path, credential_store=FakeCredentialStore()).load()
+  943: 
+  944:     assert getattr(loaded, field) == placeholder_template
+  945: 
+  946: 
+  947: def test_settings_load_uses_valid_backup_when_primary_persisted_string_type_is_corrupt(tmp_path):
+  948:     path = tmp_path / "settings.json"
+  949:     path.write_text(
+  950:         json.dumps({"config_version": 2, "api_provider": ["not", "a", "string"]}),
+  951:         encoding="utf-8",
+  952:     )
+  953:     (tmp_path / "settings.json.bak.1").write_text(
+  954:         json.dumps({"config_version": 2, "api_provider": "deepseek", "model": "backup-model"}),
+  955:         encoding="utf-8",
+  956:     )
+  957: 
+  958:     loaded = settings_module.AppSettings(
+  959:         config_path=path,
+  960:         credential_store=FakeCredentialStore(),
+  961:     ).load()
+  962: 
+  963:     assert loaded.api_provider == "deepseek"
+  964:     assert loaded.model == "backup-model"
+  965: 
+  966: 
+  967: @pytest.mark.parametrize(
+  968:     ("malformed_field", "malformed_value", "backup_model"),
+  969:     [
+  970:         ("api_key", ["not", "a", "string"], "backup-api-key"),
+  971:         ("vision_api_key", 123, "backup-vision-key"),
+  972:         ("provider_api_keys", {"deepseek": ["not", "a", "string"]}, "backup-provider-keys"),
+  973:     ],
+  974: )
+  975: def test_v1_malformed_credential_field_is_rejected_before_valid_backup_selection(
+  976:     malformed_field,
+  977:     malformed_value,
+  978:     backup_model,
+  979:     tmp_path,
+  980: ):
+  981:     path = tmp_path / "settings.json"
+  982:     path.write_text(json.dumps({malformed_field: malformed_value}), encoding="utf-8")
+  983:     (tmp_path / "settings.json.bak.1").write_text(
+  984:         json.dumps({"config_version": 2, "api_provider": "deepseek", "model": backup_model}),
+  985:         encoding="utf-8",
+  986:     )
+  987: 
+  988:     loaded = settings_module.AppSettings(
+  989:         config_path=path,
+  990:         credential_store=FakeCredentialStore(),
+  991:     ).load()
+  992: 
+  993:     assert loaded.api_provider == "deepseek"
+  994:     assert loaded.model == backup_model
+  995: 
+  996: 
+  997: @pytest.mark.parametrize("failure_mode", ["save", "load"])
+  998: def test_failed_legacy_credential_migration_preserves_original_bytes_and_forces_managed_off(
+  999:     failure_mode, tmp_path
+ 1000: ):
+ 1001:     path = tmp_path / "settings.json"
+ 1002:     original = b'{\n  "api_key": "legacy-secret",\n  "managed_auto_reply": true\n}\n'
+ 1003:     path.write_bytes(original)
+ 1004:     credential_store = FakeCredentialStore(
+ 1005:         save_error=RuntimeError("encrypt failed") if failure_mode == "save" else None,
+ 1006:         load_error=RuntimeError("read-back failed") if failure_mode == "load" else None,
+ 1007:     )
+ 1008: 
+ 1009:     loaded = settings_module.AppSettings(
+ 1010:         config_path=path,
+ 1011:         credential_store=credential_store,
+ 1012:     ).load()
+ 1013: 
+ 1014:     assert path.read_bytes() == original
+ 1015:     assert loaded.managed_mode == "off"
+ 1016:     assert loaded.managed_auto_reply is False
+ 1017: 
+ 1018: 
+ 1019: def test_save_uses_explicit_allowlist_without_runtime_objects_or_key_fields(tmp_path):
+ 1020:     path = tmp_path / "settings.json"
+ 1021:     credential_store = FakeCredentialStore()
+ 1022:     settings = settings_module.AppSettings(config_path=path, credential_store=credential_store)
+ 1023:     settings.set_provider_api_key("deepseek", "secret-value")
+ 1024:     settings.vision_api_key = "vision-value"
+ 1025:     settings.runtime_socket = object()
+ 1026:     settings.save()
+ 1027: 
+ 1028:     saved = json.loads(path.read_text(encoding="utf-8"))
+ 1029:     assert saved["config_version"] == 2
+ 1030:     assert "config_path" not in saved
+ 1031:     assert "credential_store" not in saved
+ 1032:     assert "runtime_socket" not in saved
+ 1033:     assert not any("key" in field.casefold() for field in saved)
+ 1034:     assert "secret-value" not in path.read_text(encoding="utf-8")
+ 1035:     assert "vision-value" not in path.read_text(encoding="utf-8")
+
+===== FIX REPORT TAIL =====
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py -k "missing_primary or invalid_primary_candidate or vector_failure or invalid_vector_payload" -v
+```
+
+Actual result before the fix: exit code `1`; `14 failed, 80 deselected`. Both missing-primary cases short-circuited as empty; all four invalid primary candidates were selected instead of the backup; the health API did not exist; all seven malformed/current-hash vector payloads remained unchanged.
+
+Typed-error RED command:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py -k "vector_write_failure_is_observable" -v
+```
+
+Actual result before the fix: exit code `1`; `1 failed, 93 deselected`, because `VectorIndexError` did not exist.
+
+### Fix Round 1 GREEN and regression evidence
+
+Focused GREEN command:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py -k "missing_primary or invalid_primary_candidate or vector_failure or invalid_vector_payload or vector_write_failure_is_observable" -v
+```
+
+Actual result: exit code `0`; `15 passed, 79 deselected`.
+
+Memory/vector target command:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py tests\test_core.py -k "MemoryTests or memory or vector" -v
+```
+
+Actual result: exit code `0`; `87 passed, 263 deselected`.
+
+Full suite and compile command:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py tests\test_core.py -v
+.\.venv\Scripts\python.exe -m compileall -q memory.py tests\test_persistence.py tests\test_core.py
+```
+
+Actual result: exit code `0`; `350 passed, 6 subtests passed in 10.11s`; `compileall` produced no errors.
+
+### Cross-task interface boundary
+
+Task 4 now owns and tests the durable in-process health contract:
+
+```python
+memory.vector_ready
+memory.last_vector_error
+memory.assert_ready_for_managed_reply()
+```
+
+Task 5 or the later runtime integration must call `assert_ready_for_managed_reply()` at the automatic-send boundary and convert `VectorIndexError` into the user-visible blocking state. Task 4 intentionally does not edit `main.py` and does not decide UI/runtime policy.
+
+### Updated checkpoint
+
+The required checkpoint file was regenerated after Fix Round 1:
+
+- `memory.py`: `37026BD2E18B33AF9667EC5DD2EA7D071D098C79BE882AC4C7C6947312949798`
+- `tests/test_persistence.py`: `226245EDCE1468CE39F57F339FC9E12CD260E5D5CF329D3AD53208EAF8C09C2F`
+
+The earlier checkpoint values in the base Task 4 section document the pre-review implementation and are superseded by these Fix Round 1 values.
+
+### Remaining concern
+
+- The automatic-send entry point does not consume the health guard in this task by explicit cross-task decision. Until Task 5/runtime integration calls `assert_ready_for_managed_reply()`, the state is available and tested but not yet enforced at that outer boundary.
+
+## Fix Round 2
+
+### Finding and root cause
+
+- `_text_tokens()` only emits tokens of length two or greater, while `_text_vector()` previously emitted only 2-, 3-, and 4-character features.
+- A valid authoritative example whose normalized text was a single character therefore produced `{}`. `_build_vector_items()` silently skipped it, allowing an empty `items` list to validate and incorrectly set `vector_ready=True`.
+- `_text_vector()` now emits one deterministic fallback feature, `single:<normalized text>`, only when normalized text is non-empty and the normal feature set is empty. The same function is used for stored examples and queries, so one-character Chinese and ASCII replies remain mutually searchable. The vector validator was not relaxed.
+
+### Tests added
+
+- `test_single_character_examples_always_have_stable_vector_items[ascii]`
+- `test_single_character_examples_always_have_stable_vector_items[chinese]`
+
+Each case uses an empty cue and a one-character reply (`x` or `中`) and proves that the built item count equals the authoritative example count, the vector is non-empty, a rebuild finishes ready, and two subsequent loads do not trigger another vector rewrite.
+
+### RED evidence
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py -k "single_character_examples" -v
+```
+
+Actual result before the fix: exit code `1`; `2 failed, 94 deselected`. Both parameterized cases built zero vector items for one authoritative example.
+
+### GREEN and regression evidence
+
+Focused GREEN command:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py -k "single_character_examples" -v
+```
+
+Actual result: exit code `0`; `2 passed, 94 deselected`.
+
+Memory/vector target command:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py tests\test_core.py -k "MemoryTests or memory or vector" -v
+```
+
+Actual result: exit code `0`; `89 passed, 263 deselected in 2.60s`.
+
+Full suite and compile command:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py tests\test_core.py -v
+.\.venv\Scripts\python.exe -m compileall -q memory.py tests\test_persistence.py tests\test_core.py
+```
+
+Actual result: exit code `0`; `352 passed, 6 subtests passed in 9.03s`; `compileall` produced no output or errors.
+
+### Updated checkpoint
+
+The required checkpoint was regenerated after Fix Round 2:
+
+- `memory.py`: `3EB04AD35BE57B66A961013889CC20586E480F7DBC3FE99848B712DD7B7A4C6B`
+- `tests/test_persistence.py`: `CE12A768DFB3469F7AC7572EC48C94D413D22860FE1FECA4D34D445B54A13E03`
+
+These values supersede the earlier Task 4 and Fix Round 1 checkpoint values.
+
+### Fix Round 2 self-review
+
+- Every currently valid non-empty example produces a non-empty vector item, including one-character ASCII and Chinese replies.
+- The fallback is stable and isolated to inputs that cannot produce existing 2-4 character features; vectors for ordinary longer text are unchanged.
+- No vector-schema constraint was weakened, and `main.py` and later knowledge-mode behavior remain untouched.
+- No new concern was introduced. The previously documented Task 5/runtime responsibility to consume `assert_ready_for_managed_reply()` remains unchanged.
+
+===== CHECKPOINT =====
+[
+    {
+        "Algorithm":  "SHA256",
+        "Hash":  "3EB04AD35BE57B66A961013889CC20586E480F7DBC3FE99848B712DD7B7A4C6B",
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\memory.py"
+    },
+    {
+        "Algorithm":  "SHA256",
+        "Hash":  "CE12A768DFB3469F7AC7572EC48C94D413D22860FE1FECA4D34D445B54A13E03",
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\tests\\test_persistence.py"
+    }
+]

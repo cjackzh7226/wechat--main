@@ -1,0 +1,4 @@
+﻿COMMAND=.venv\Scripts\python.exe -m pytest tests/test_persistence.py::test_all_production_diag_calls_use_explicit_enum_codes_and_remain_distinguishable -q
+EXIT_CODE=0
+.                                                                        [100%]
+1 passed in 0.82s

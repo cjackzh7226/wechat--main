@@ -1,0 +1,79 @@
+﻿COMMAND=.venv\Scripts\python.exe -m pytest tests/test_persistence.py::test_runtime_logger_first_initialization_is_thread_safe_and_writes_event_once tests/test_persistence.py::test_diag_logger_lazy_initialization_is_thread_safe -q
+EXIT_CODE=1
+FF                                                                       [100%]
+================================== FAILURES ===================================
+_ test_runtime_logger_first_initialization_is_thread_safe_and_writes_event_once _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-97/test_runtime_logger_first_init0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x00000237E95F3990>
+
+    def test_runtime_logger_first_initialization_is_thread_safe_and_writes_event_once(tmp_path, monkeypatch):
+        import runtime_logging as runtime_logging_module
+    
+        real_handler = runtime_logging_module.RotatingFileHandler
+    
+        class SlowHandler(real_handler):
+            def __init__(self, *args, **kwargs):
+                time.sleep(0.05)
+                super().__init__(*args, **kwargs)
+    
+        monkeypatch.setattr(runtime_logging_module, "RotatingFileHandler", SlowHandler)
+        barrier = threading.Barrier(8)
+        results = []
+    
+        def build():
+            barrier.wait()
+            results.append(runtime_logging_module.build_runtime_logger(tmp_path))
+    
+        workers = [threading.Thread(target=build) for _ in range(8)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=5)
+        assert all(not worker.is_alive() for worker in workers)
+        logger = results[0]
+        owned = [handler for handler in logger.handlers if getattr(handler, "_wechat_runtime_path", None)]
+>       assert len(owned) == 1
+E       assert 8 == 1
+E        +  where 8 = len([<SlowHandler C:\Users\14913\AppData\Local\Temp\pytest-of-14913\pytest-97\test_runtime_logger_first_init0\runtime.log ...C:\Users\14913\AppData\Local\Temp\pytest-of-14913\pytest-97\test_runtime_logger_first_init0\runtime.log (NOTSET)>, ...])
+
+tests\test_persistence.py:287: AssertionError
+_____________ test_diag_logger_lazy_initialization_is_thread_safe _____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x00000237E95A4310>
+
+    def test_diag_logger_lazy_initialization_is_thread_safe(monkeypatch):
+        import main as main_module
+    
+        calls = []
+        events = []
+        fake_logger = type("FakeLogger", (), {"info": lambda self, *args, **kwargs: events.append((args, kwargs))})()
+    
+        def slow_build(log_dir):
+            time.sleep(0.05)
+            calls.append(log_dir)
+            return fake_logger
+    
+        main_module.DIAG_LOG = None
+        monkeypatch.setattr(main_module, "build_runtime_logger", slow_build)
+        barrier = threading.Barrier(8)
+    
+        def emit():
+            barrier.wait()
+            main_module._diag("concurrency-check")
+    
+        workers = [threading.Thread(target=emit) for _ in range(8)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=5)
+    
+>       assert len(calls) == 1
+E       AssertionError: assert 8 == 1
+E        +  where 8 = len([WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-97/test_diag_logger_lazy_initiali0/isolated-app...Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-97/test_diag_logger_lazy_initiali0/isolated-app-data/logs'), ...])
+
+tests\test_persistence.py:322: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_persistence.py::test_runtime_logger_first_initialization_is_thread_safe_and_writes_event_once
+FAILED tests/test_persistence.py::test_diag_logger_lazy_initialization_is_thread_safe
+2 failed in 1.18s

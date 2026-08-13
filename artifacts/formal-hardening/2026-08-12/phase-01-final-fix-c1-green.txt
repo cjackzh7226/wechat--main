@@ -1,0 +1,14 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- D:\Vibe C\客服\wechat--main\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\Vibe C\客服\wechat--main
+collecting ... collected 20 items / 14 deselected / 6 selected
+
+tests/test_phase1_final_fix.py::test_knowledge_only_without_approved_hit_returns_exact_no_answer_and_never_falls_back[low-information] PASSED [ 16%]
+tests/test_phase1_final_fix.py::test_knowledge_only_without_approved_hit_returns_exact_no_answer_and_never_falls_back[thanks] PASSED [ 33%]
+tests/test_phase1_final_fix.py::test_knowledge_only_without_approved_hit_returns_exact_no_answer_and_never_falls_back[statement] PASSED [ 50%]
+tests/test_phase1_final_fix.py::test_knowledge_only_without_approved_hit_returns_exact_no_answer_and_never_falls_back[question] PASSED [ 66%]
+tests/test_phase1_final_fix.py::test_personal_fake_sender_receives_only_exact_no_answer_for_knowledge_miss PASSED [ 83%]
+tests/test_phase1_final_fix.py::test_group_fake_sender_receives_only_exact_no_answer_for_knowledge_miss PASSED [100%]
+
+====================== 6 passed, 14 deselected in 1.35s =======================

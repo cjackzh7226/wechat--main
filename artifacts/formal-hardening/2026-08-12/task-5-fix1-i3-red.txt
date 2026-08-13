@@ -1,0 +1,27 @@
+﻿COMMAND=.venv\Scripts\python.exe -m pytest tests/test_persistence.py::test_entire_suite_uses_session_data_root_isolation tests/test_persistence.py::test_full_data_directory_snapshot_includes_credentials_ledger_logs_salt_and_backups -q
+EXIT_CODE=1
+FF                                                                       [100%]
+================================== FAILURES ===================================
+_____________ test_entire_suite_uses_session_data_root_isolation ______________
+
+request = <FixtureRequest for <Function test_entire_suite_uses_session_data_root_isolation>>
+
+    def test_entire_suite_uses_session_data_root_isolation(request):
+>       assert "isolate_entire_test_suite_data_root" in request.fixturenames
+E       AssertionError: assert 'isolate_entire_test_suite_data_root' in ['tmp_path_factory', 'isolate_data_root_and_preserve_formal_files', 'tmp_path', 'request', 'monkeypatch']
+E        +  where ['tmp_path_factory', 'isolate_data_root_and_preserve_formal_files', 'tmp_path', 'request', 'monkeypatch'] = <FixtureRequest for <Function test_entire_suite_uses_session_data_root_isolation>>.fixturenames
+
+tests\test_persistence.py:54: AssertionError
+_ test_full_data_directory_snapshot_includes_credentials_ledger_logs_salt_and_backups _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-99/test_full_data_directory_snaps0')
+
+    def test_full_data_directory_snapshot_includes_credentials_ledger_logs_salt_and_backups(tmp_path):
+>       from conftest import snapshot_data_directory
+E       ModuleNotFoundError: No module named 'conftest'
+
+tests\test_persistence.py:59: ModuleNotFoundError
+=========================== short test summary info ===========================
+FAILED tests/test_persistence.py::test_entire_suite_uses_session_data_root_isolation
+FAILED tests/test_persistence.py::test_full_data_directory_snapshot_includes_credentials_ledger_logs_salt_and_backups
+2 failed in 0.53s

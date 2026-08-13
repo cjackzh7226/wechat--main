@@ -1,0 +1,52 @@
+﻿COMMAND=.venv\Scripts\python.exe -m pytest tests/test_persistence.py::test_runtime_event_uses_positive_schema_and_rejects_aliases_nested_values_and_field_smuggling -q
+EXIT_CODE=1
+F                                                                        [100%]
+================================== FAILURES ===================================
+_ test_runtime_event_uses_positive_schema_and_rejects_aliases_nested_values_and_field_smuggling _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-91/test_runtime_event_uses_positi0')
+
+    def test_runtime_event_uses_positive_schema_and_rejects_aliases_nested_values_and_field_smuggling(tmp_path):
+        from runtime_logging import build_runtime_logger
+    
+        logger = build_runtime_logger(tmp_path)
+        secrets = {
+            "chat_title": "FULL-CHAT-NAME",
+            "text": "FULL-MESSAGE",
+            "answer": "FULL-REPLY",
+            "access_token": "API-SECRET",
+            "prompt": "FULL-PROMPT",
+            "content": "FULL-CONTENT",
+            "customer": "FULL-CUSTOMER",
+            "partner": "FULL-PARTNER",
+        }
+        logger.info(
+            "schema-probe",
+            extra={
+                "event_data": {
+                    **secrets,
+                    "record_id": {"text": "RECORD-ID-SECRET"},
+                    "state": ["STATE-SECRET", {"authorization": "Bearer STATE-TOKEN"}],
+                    "event": "Bearer EVENT-SECRET",
+                    "org_scope": {"customer": "ORG-SECRET"},
+                    "error_category": "ERROR CATEGORY SECRET",
+                    "score": 91.5,
+                    "timestamp": "2026-08-12T00:00:00+00:00",
+                }
+            },
+        )
+        line = (tmp_path / "runtime.log").read_text(encoding="utf-8").strip()
+        parsed = json.loads(line)
+    
+        for private_value in (*secrets.values(), "RECORD-ID-SECRET", "STATE-SECRET", "STATE-TOKEN", "EVENT-SECRET", "ORG-SECRET", "ERROR CATEGORY SECRET"):
+>           assert private_value not in line
+E           assert 'RECORD-ID-SECRET' not in '{"error_cat...0:00+00:00"}'
+E             
+E             'RECORD-ID-SECRET' is contained here:
+E               {"text": "RECORD-ID-SECRET"}, "score": 91.5, "state": [{}], "timestamp": "2026-08-12T00:00:00+00:00"}
+E             ?           ++++++++++++++++
+
+tests\test_persistence.py:208: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_persistence.py::test_runtime_event_uses_positive_schema_and_rejects_aliases_nested_values_and_field_smuggling
+1 failed in 0.44s

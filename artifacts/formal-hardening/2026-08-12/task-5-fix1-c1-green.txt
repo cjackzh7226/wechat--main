@@ -1,0 +1,4 @@
+﻿COMMAND=.venv\Scripts\python.exe -m pytest tests/test_persistence.py::test_runtime_event_uses_positive_schema_and_rejects_aliases_nested_values_and_field_smuggling -q
+EXIT_CODE=0
+.                                                                        [100%]
+1 passed in 0.32s

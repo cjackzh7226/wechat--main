@@ -1,0 +1,172 @@
+﻿COMMAND=.venv\Scripts\python.exe -m pytest tests/test_persistence.py -q
+EXIT_CODE=1
+..F.F..F................................................................ [ 55%]
+..........................................................               [100%]
+================================== FAILURES ===================================
+______ test_runtime_event_redacts_private_values_and_keeps_audit_fields _______
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-111/test_runtime_event_redacts_pri0')
+
+    def test_runtime_event_redacts_private_values_and_keeps_audit_fields(tmp_path):
+        assert importlib.util.find_spec("runtime_logging") is not None
+        from runtime_logging import build_runtime_logger
+    
+        logger = build_runtime_logger(tmp_path)
+        logger.info(
+            "managed-send",
+            extra={
+                "event_data": {
+                    "chat_name": "����",
+                    "message": "���֤����",
+                    "reply": "˽�ܻظ�",
+                    "context": "����������",
+                    "api_key": "secret-key",
+                    "Authorization": "Bearer secret-token",
+                    "nested": {
+                        "API_KEY": "nested-secret",
+                        "authorization": "nested-token",
+                    },
+                    "record_id": "r1",
+                    "score": 91,
+                    "org_scope": "municipal",
+                    "state": "blocked",
+                    "error_category": "vector",
+                    "event": "managed-send",
+                    "timestamp": "2026-08-12T00:00:00+00:00",
+                }
+            },
+        )
+        line = (tmp_path / "runtime.log").read_text(encoding="utf-8").strip()
+        parsed = json.loads(line)
+    
+        for private_value in (
+            "����",
+            "���֤����",
+            "˽�ܻظ�",
+            "����������",
+            "secret-key",
+            "secret-token",
+            "nested-secret",
+            "nested-token",
+        ):
+            assert private_value not in line
+>       assert parsed == {
+            "error_category": "vector",
+            "event": "managed-send",
+            "org_scope": "municipal",
+            "record_id": "r1",
+            "score": 91,
+            "state": "blocked",
+            "timestamp": "2026-08-12T00:00:00+00:00",
+        }
+E       AssertionError: assert {'error_categ...4e49bc1', ...} == {'error_categ...d': 'r1', ...}
+E         
+E         Omitting 5 identical items, use -vv to show
+E         Differing items:
+E         {'timestamp': '2026-08-11T23:34:48.718026+00:00'} != {'timestamp': '2026-08-12T00:00:00+00:00'}
+E         {'record_id': 'sha256:112c57f1eb726d19a3e2d35a8f1ffd582926788136d75af49c0e75a364e49bc1'} != {'record_id': 'r1'}
+E         Use -v to get more diff
+
+tests\test_persistence.py:113: AssertionError
+_ test_runtime_event_uses_positive_schema_and_rejects_aliases_nested_values_and_field_smuggling _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-111/test_runtime_event_uses_positi0')
+
+    def test_runtime_event_uses_positive_schema_and_rejects_aliases_nested_values_and_field_smuggling(tmp_path):
+        from runtime_logging import build_runtime_logger
+    
+        logger = build_runtime_logger(tmp_path)
+        secrets = {
+            "chat_title": "FULL-CHAT-NAME",
+            "text": "FULL-MESSAGE",
+            "answer": "FULL-REPLY",
+            "access_token": "API-SECRET",
+            "prompt": "FULL-PROMPT",
+            "content": "FULL-CONTENT",
+            "customer": "FULL-CUSTOMER",
+            "partner": "FULL-PARTNER",
+        }
+        logger.info(
+            "schema-probe",
+            extra={
+                "event_data": {
+                    **secrets,
+                    "record_id": {"text": "RECORD-ID-SECRET"},
+                    "state": ["STATE-SECRET", {"authorization": "Bearer STATE-TOKEN"}],
+                    "event": "Bearer EVENT-SECRET",
+                    "org_scope": {"customer": "ORG-SECRET"},
+                    "error_category": "ERROR CATEGORY SECRET",
+                    "score": 91.5,
+                    "timestamp": "2026-08-12T00:00:00+00:00",
+                }
+            },
+        )
+        line = (tmp_path / "runtime.log").read_text(encoding="utf-8").strip()
+        parsed = json.loads(line)
+    
+        for private_value in (*secrets.values(), "RECORD-ID-SECRET", "STATE-SECRET", "STATE-TOKEN", "EVENT-SECRET", "ORG-SECRET", "ERROR CATEGORY SECRET"):
+            assert private_value not in line
+>       assert parsed == {
+            "score": 91.5,
+            "timestamp": "2026-08-12T00:00:00+00:00",
+        }
+E       AssertionError: assert {'score': 91....923606+00:00'} == {'score': 91....:00:00+00:00'}
+E         
+E         Omitting 1 identical items, use -vv to show
+E         Differing items:
+E         {'timestamp': '2026-08-11T23:34:48.923606+00:00'} != {'timestamp': '2026-08-12T00:00:00+00:00'}
+E         Use -v to get more diff
+
+tests\test_persistence.py:211: AssertionError
+____ test_runtime_logger_rotates_at_exact_limit_and_writes_parseable_jsonl ____
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-111/test_runtime_logger_rotates_at0')
+
+    def test_runtime_logger_rotates_at_exact_limit_and_writes_parseable_jsonl(tmp_path):
+        from runtime_logging import build_runtime_logger
+    
+        logger = build_runtime_logger(tmp_path)
+        handlers = [handler for handler in logger.handlers if isinstance(handler, logging.handlers.RotatingFileHandler)]
+        assert len(handlers) == 1
+        handler = handlers[0]
+        assert handler.maxBytes == 2_000_000
+        assert handler.backupCount == 5
+    
+        record_ids = {f"r{index}" for index in range(16_000)}
+        for index in range(16_000):
+            logger.info(
+                "rotation-check",
+                extra={
+                    "event_data": {
+                        "event": "rotation-check",
+                        "record_id": f"r{index}",
+                        "state": "x" * 64,
+                    }
+                },
+            )
+        handler.flush()
+    
+        log_files = sorted(tmp_path.glob("runtime.log*"))
+        assert 2 <= len(log_files) <= 6
+        parsed_lines = []
+        for path in log_files:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                parsed_lines.append(json.loads(line))
+>       assert {item["record_id"] for item in parsed_lines} == record_ids
+E       AssertionError: assert {'sha256:0001...807e86a', ...} == {'r0', 'r1', ...'r10000', ...}
+E         
+E         Extra items in the left set:
+E         'sha256:910185592b71b079743877b4fa10e8292290223370c3acf38843454f3e4a8677'
+E         'sha256:da5149ca55ae4664ba084ea3c6080872b6f26dd36e28bc01d7037a0250ff0fa1'
+E         'sha256:6bc8e63d6e4055ff5a2cbd3851371fd2be311fb3d149e196c1450445de62e810'
+E         'sha256:10529bc1ff5c1e4dded583fbd62422babf6f1eb77662dc21da1dd72b65bd7a99'
+E         'sha256:7d1bd4c853a0a6773b5e24f7a1ce50b993aa4bf614b9ca1d690892173123a036'...
+E         
+E         ...Full output truncated (31997 lines hidden), use '-vv' to show
+
+tests\test_persistence.py:287: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_persistence.py::test_runtime_event_redacts_private_values_and_keeps_audit_fields
+FAILED tests/test_persistence.py::test_runtime_event_uses_positive_schema_and_rejects_aliases_nested_values_and_field_smuggling
+FAILED tests/test_persistence.py::test_runtime_logger_rotates_at_exact_limit_and_writes_parseable_jsonl
+3 failed, 127 passed in 13.24s

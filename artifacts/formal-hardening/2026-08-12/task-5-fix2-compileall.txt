@@ -1,0 +1,2 @@
+﻿COMMAND=.venv\Scripts\python.exe -m compileall -q runtime_logging.py main.py settings.py tests
+EXIT_CODE=0

@@ -1,0 +1,64 @@
+﻿Task 1 fix round 1 non-Git evidence package
+Open finding: review package omitted checkpoint evidence.
+
+===== CHECKPOINT FILE =====
+[
+    {
+        "Algorithm":  "SHA256",
+        "Hash":  "F8F5FF09720FACC8B5384D302AE1F6A9083042A573CEA5ECBDE2060D1A530440",
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\app_paths.py"
+    },
+    {
+        "Algorithm":  "SHA256",
+        "Hash":  "A984D012D77E05433FD900C3174BB094EEC60633FFA1DE3EFC056355C5E13830",
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\settings.py"
+    },
+    {
+        "Algorithm":  "SHA256",
+        "Hash":  "1A03CE8B389A97A8F850207B01E9508231C71C62697113EFEB7518FA690E7822",
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\memory.py"
+    }
+]
+
+===== LIVE FILE HASHES =====
+
+Path                                   Hash                                                            
+----                                   ----                                                            
+D:\Vibe C\客服\wechat--main\app_paths.py F8F5FF09720FACC8B5384D302AE1F6A9083042A573CEA5ECBDE2060D1A530440
+D:\Vibe C\客服\wechat--main\settings.py  A984D012D77E05433FD900C3174BB094EEC60633FFA1DE3EFC056355C5E13830
+D:\Vibe C\客服\wechat--main\memory.py    1A03CE8B389A97A8F850207B01E9508231C71C62697113EFEB7518FA690E7822
+
+
+
+
+===== REPORT FIX ROUND TAIL =====
+
+- All resolver functions return direct children of `data_dir()`.
+- Tests use `WECHAT_ASSISTANT_DATA_DIR` set to a temporary directory; no test command uses the real AppData directory.
+- Frozen execution no longer branches to EXE-adjacent `user_data`.
+- No later persistence, credential, ledger, logging, or release-hardening tasks were implemented.
+
+## Remaining Risks
+
+- This task intentionally only centralizes current default settings and memory paths. Existing callers that construct custom paths remain unchanged by design.
+- The AppData fallback is retained for environments where `APPDATA` is unset; Windows source and frozen runs use the mandated AppData location when it is available.
+
+## Fix Round 1
+
+**Covered file:** `artifacts/formal-hardening/2026-08-12/01-paths.sha256.json`.
+
+The required non-Git checkpoint was regenerated and read back. No production code or tests were changed in this fix round.
+
+Validation command:
+
+```powershell
+Get-FileHash app_paths.py,settings.py,memory.py -Algorithm SHA256 | ConvertTo-Json | Set-Content artifacts\formal-hardening\2026-08-12\01-paths.sha256.json -Encoding UTF8; Get-Content -LiteralPath artifacts\formal-hardening\2026-08-12\01-paths.sha256.json
+```
+
+Actual output:
+
+```text
+app_paths.py  F8F5FF09720FACC8B5384D302AE1F6A9083042A573CEA5ECBDE2060D1A530440
+settings.py   A984D012D77E05433FD900C3174BB094EEC60633FFA1DE3EFC056355C5E13830
+memory.py     1A03CE8B389A97A8F850207B01E9508231C71C62697113EFEB7518FA690E7822
+```

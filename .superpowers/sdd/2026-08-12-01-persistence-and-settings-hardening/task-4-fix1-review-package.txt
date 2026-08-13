@@ -1,0 +1,1252 @@
+﻿Task 4 fix round 1 non-Git scoped package
+Open findings: persistent vector health, missing-primary backup recovery, semantic memory validation, strict vector validation.
+
+
+===== CURRENT CUMULATIVE DIFF: memory.py =====
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-4-baseline\\memory.py" b/memory.py
+index dd9595c..0c142d6 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-4-baseline\\memory.py"	
++++ b/memory.py
+@@ -1,34 +1,60 @@
+ from __future__ import annotations
+ 
+ import hashlib
+ import json
+-import os
++import math
+ import re
+-import shutil
+-import time
+ from collections import Counter
+ from dataclasses import dataclass, field
+ from datetime import datetime, timezone
+ from pathlib import Path
+ 
+-from app_paths import memory_path
++from app_paths import memory_path, vector_path
++from atomic_json import JsonDataError, JsonLoadResult, atomic_write_json, load_json
+ 
+ 
+ ENTERPRISE_ANNUAL_REPORT_SOURCE = "enterprise_annual_report_kb"
+ ENTERPRISE_LOCAL_CONFIDENT_MARGIN = 8
+ ENTERPRISE_LOCAL_MIN_SCORE = 8
++MEMORY_SCHEMA_VERSION = 2
++VECTOR_SCHEMA_VERSION = 1
++VECTOR_DIMENSION = 384
++
++_MEMORY_EXAMPLE_STRING_FIELDS = {
++    "partner",
++    "cue",
++    "reply",
++    "source",
++    "created_at",
++    "conversation_hash",
++    "scenario_id",
++    "scenario_title",
++    "why",
++    "question",
++    "module",
++    "subcategory",
++    "organization_type",
++    "source_sheet",
++    "source_cell",
++    "source_file",
++    "priority",
++}
++
++
++class VectorIndexError(RuntimeError):
++    """Raised when the vector index is unavailable for managed replies."""
+ # 企业年报"可直接发送"的可靠底线：第一名分数不低于该值且明显领先第二名（>=8 分）且无冲突。
+ # 2026-08-05 用户要求低分阈值 20 -> 30：命中评分 < 30 时回复企业未命中文案。
+ ENTERPRISE_LOCAL_CONFIDENT_FLOOR = 30
+ 
+ # 普通话术库共享打分的最低匹配值：低于该值视为知识库未准备该问题，
+ # 运行时不会把低分候选发给用户，而是老实回答"暂时未查到对应答案"。
+ PHRASEBOOK_CONFIDENT_SCORE = 30
+ 
+ # 企业年报问题常见的同义表达。它们只用于本地召回排序，不会改写知识库原问题或原答案。
+ _ENTERPRISE_SEMANTIC_TERMS: dict[str, tuple[str, ...]] = {
+     "topic_annual_report": ("年度工作报告", "年度报告", "年报"),
+     "topic_annual_inspection": ("年检", "年审"),
+     "time_historical": ("往年", "以前", "之前", "历史", "过往", "已提交"),
+     "time_current": ("本年度", "本年", "今年", "当年", "当前"),
+     "action_view": ("查看", "查询", "查找", "检索", "怎么查", "如何查", "哪里看", "在哪看", "怎么看", "看到"),
+@@ -97,79 +123,180 @@ _ENTERPRISE_SCOPE_TERMS = (
+     "专家委员会",
+     "技术委员会",
+     "主任委员",
+     "副主任委员",
+     "学组",
+     "会费",
+     "专项基金",
+     "印章",
+ )
+ 
+ 
+ def default_memory_path() -> Path:
+     return memory_path()
+ 
+ 
++def validate_memory_document(value: object) -> None:
++    if not isinstance(value, dict):
++        raise ValueError("memory root must be an object")
++    version = value.get("schema_version", 1)
++    if type(version) is not int or version not in {1, MEMORY_SCHEMA_VERSION}:
++        raise ValueError("unsupported memory schema_version")
++    missing = {"style_summary", "examples", "common_phrases"} - value.keys()
++    if missing:
++        raise ValueError(f"memory fields missing: {', '.join(sorted(missing))}")
++    if type(value["style_summary"]) is not str:
++        raise ValueError("style_summary must be a string")
++    examples = value["examples"]
++    if type(examples) is not list:
++        raise ValueError("examples must be a list")
++    for index, item in enumerate(examples):
++        if type(item) is not dict:
++            raise ValueError(f"examples[{index}] must be an object")
++        for key in _MEMORY_EXAMPLE_STRING_FIELDS:
++            if key in item and type(item[key]) is not str:
++                raise ValueError(f"examples[{index}].{key} must be a string")
++        missing_example = {"cue", "reply", "source", "conversation_hash"} - item.keys()
++        if missing_example:
++            raise ValueError(
++                f"examples[{index}] fields missing: {', '.join(sorted(missing_example))}"
++            )
++        normalized = _normalize_example(item)
++        if not normalized or not normalized["reply"]:
++            raise ValueError(f"examples[{index}].reply must normalize to non-empty text")
++    phrases = value["common_phrases"]
++    if type(phrases) is not dict:
++        raise ValueError("common_phrases must be an object")
++    if any(
++        type(phrase) is not str
++        or type(count) is not int
++        or count < 0
++        for phrase, count in phrases.items()
++    ):
++        raise ValueError("common_phrases must map strings to non-negative integers")
++
++
++def _validate_vector_document(value: object) -> None:
++    if not isinstance(value, dict):
++        raise ValueError("vector root must be an object")
++    if type(value.get("version")) is not int or value["version"] != VECTOR_SCHEMA_VERSION:
++        raise ValueError("unsupported vector schema version")
++    if type(value.get("dim")) is not int or value["dim"] != VECTOR_DIMENSION:
++        raise ValueError("unsupported vector dimension")
++    memory_hash = value.get("memory_hash")
++    if type(memory_hash) is not str or re.fullmatch(r"[0-9a-f]{64}", memory_hash) is None:
++        raise ValueError("memory_hash must be a SHA-256 hex digest")
++    items = value.get("items")
++    if type(items) is not list:
++        raise ValueError("vector items must be a list")
++    for index, item in enumerate(items):
++        if type(item) is not dict:
++            raise ValueError(f"vector items[{index}] must be an object")
++        for key in ("conversation_hash", "source", "reply"):
++            if type(item.get(key)) is not str:
++                raise ValueError(f"vector items[{index}].{key} must be a string")
++        vector = item.get("vector")
++        if type(vector) is not dict or not vector:
++            raise ValueError(f"vector items[{index}].vector must be non-empty")
++        for token, weight in vector.items():
++            if (
++                type(token) is not str
++                or re.fullmatch(r"0|[1-9][0-9]*", token) is None
++                or not 0 <= int(token) < VECTOR_DIMENSION
++            ):
++                raise ValueError(f"vector items[{index}] has an invalid bucket")
++            if (
++                type(weight) not in {int, float}
++                or isinstance(weight, bool)
++                or not math.isfinite(float(weight))
++                or not 0 < float(weight) <= 1
++            ):
++                raise ValueError(f"vector items[{index}] has an invalid weight")
++
++
+ @dataclass
+ class StyleMemory:
+     path: Path = field(default_factory=default_memory_path)
+     style_summary: str = "偏短句、微信口语、少解释、少承诺。"
+     examples: list[dict[str, str]] = field(default_factory=list)
+     common_phrases: Counter = field(default_factory=Counter)
+     max_examples: int = 3000
++    load_result: JsonLoadResult | None = field(default=None, init=False, repr=False)
++    vector_ready: bool = field(default=False, init=False)
++    last_vector_error: str | None = field(default=None, init=False)
+ 
+     @property
+     def vector_path(self) -> Path:
+-        return self.path.with_name("vector_memory.json")
++        return self.path.with_name(vector_path().name)
+ 
+     @property
+     def sop_library_path(self) -> Path:
+         return self.path.with_name("sop_library.json")
+ 
+     def load(self) -> "StyleMemory":
+-        if not self.path.exists():
++        backups = [self.path.with_name(f"{self.path.name}.bak.{index}") for index in range(1, 6)]
++        if not self.path.exists() and not any(backup.exists() for backup in backups):
+             return self
+-        data = json.loads(self.path.read_text(encoding="utf-8"))
++        self.load_result = load_json(self.path, validate_memory_document)
++        data = self.load_result.data
+         self.style_summary = str(data.get("style_summary", self.style_summary))
+-        raw_examples = list(data.get("examples", []))[-self.max_examples :]
+-        self.examples = [_normalize_example(item) for item in raw_examples if _normalize_example(item)]
++        raw_examples = list(data.get("examples", []))
++        self.examples = []
++        for item in raw_examples:
++            normalized = _normalize_example(item)
++            if normalized:
++                self.examples.append(normalized)
+         self.common_phrases = Counter(data.get("common_phrases", {}))
++        self._ensure_vector_index()
+         return self
+ 
+     def save(self) -> None:
+-        self.path.parent.mkdir(parents=True, exist_ok=True)
+-        # 数量骤减保护：磁盘已有大量知识库（≥50 条）而内存只有极少（<20 条）时，
+-        # 说明程序可能 load 到了旧/空数据（常见于程序运行中数据被外部同步/替换），
+-        # 先备份磁盘当前文件再覆盖，避免知识库被永久冲掉。
+-        try:
+-            if self.path.exists():
+-                disk_examples = json.loads(self.path.read_text(encoding="utf-8")).get("examples", [])
+-                if len(disk_examples) >= 50 and len(self.examples) < 20:
+-                    backup_path = self.path.with_name(
+-                        f"memory.json.bak-auto-{time.strftime('%Y%m%d-%H%M%S')}"
+-                    )
+-                    shutil.copy2(self.path, backup_path)
+-        except Exception:
+-            pass
+-        self.examples = _dedupe_memory_examples(self.examples)[-self.max_examples :]
+-        data = {
++        normalized_examples = []
++        for index, item in enumerate(self.examples):
++            if type(item) is not dict:
++                raise ValueError(f"examples[{index}] must be an object")
++            for key in _MEMORY_EXAMPLE_STRING_FIELDS:
++                if key in item and type(item[key]) is not str:
++                    raise ValueError(f"examples[{index}].{key} must be a string")
++            normalized = _normalize_example(item)
++            if not normalized:
++                raise ValueError(f"examples[{index}] must contain a non-empty reply")
++            normalized_examples.append(normalized)
++        document = {
++            "schema_version": MEMORY_SCHEMA_VERSION,
++            "style_summary": self.style_summary,
++            "examples": _dedupe_memory_examples(normalized_examples),
++            "common_phrases": dict(self.common_phrases.most_common(120)),
++        }
++        atomic_write_json(self.path, document, validate_memory_document, backup_count=5)
++        self.examples = list(document["examples"])
++        self.rebuild_vector_index()
++
++    def content_hash(self) -> str:
++        document = {
++            "schema_version": MEMORY_SCHEMA_VERSION,
+             "style_summary": self.style_summary,
+-            "examples": self.examples,
++            "examples": _dedupe_memory_examples(self.examples),
+             "common_phrases": dict(self.common_phrases.most_common(120)),
+         }
+-        self.path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+-        self._save_vector_index()
++        payload = json.dumps(
++            document,
++            ensure_ascii=False,
++            sort_keys=True,
++            separators=(",", ":"),
++        ).encode("utf-8")
++        return hashlib.sha256(payload).hexdigest()
+ 
+     def learn_from_chat_text(self, conversation_text: str) -> None:
+         lines = [line.strip() for line in conversation_text.splitlines() if line.strip()]
+         observed_examples: list[dict[str, str]] = []
+         for index, line in enumerate(lines):
+             if not _is_own_line(line):
+                 continue
+             reply = line.split("]", 1)[-1].strip()
+             cue = "\n".join(lines[max(0, index - 8) : index])
+             if cue and reply:
+                 observed_examples.append(
+                     _build_example(
+                         partner="训练模式观察",
+                         cue=cue,
+                         reply=reply,
+@@ -379,35 +506,32 @@ class StyleMemory:
+                 }
+             )
+             rows.append(row)
+         return rows
+ 
+     def has_enterprise_annual_report_knowledge(self) -> bool:
+         return any(item.get("source") == ENTERPRISE_ANNUAL_REPORT_SOURCE for item in self.examples)
+ 
+     def is_enterprise_annual_report_query(self, conversation_text: str) -> bool:
+         query = _last_other_text(conversation_text) or conversation_text
+         compact = _enterprise_question_key(query)
+         return bool(compact and any(term in compact for term in _ENTERPRISE_SCOPE_TERMS))
+ 
+     def vector_relevant_examples(self, conversation_text: str, limit: int = 6) -> list[dict[str, str]]:
+         query_vector = _text_vector(conversation_text)
+-        if not query_vector or not self.vector_path.exists():
+-            return []
+-        try:
+-            data = json.loads(self.vector_path.read_text(encoding="utf-8"))
+-        except Exception:
++        data = self._load_vector_document()
++        if not query_vector or data is None:
+             return []
+         by_hash = {item.get("conversation_hash", ""): item for item in self.examples}
+         scored: list[tuple[float, int, dict[str, str]]] = []
+         for index, item in enumerate(data.get("items", [])):
+             if not isinstance(item, dict):
+                 continue
+             key = str(item.get("conversation_hash", ""))
+             example = by_hash.get(key)
+             if not example:
+                 continue
+             score = _cosine_sparse(query_vector, item.get("vector", {}))
+             if score >= 0.08:
+                 scored.append((score, index, example))
+         scored.sort(key=lambda row: (row[0], -row[1]), reverse=True)
+         return [item for _, _, item in scored[:limit]]
+@@ -527,35 +651,32 @@ class StyleMemory:
+             new_cue = _normalize_context(cue if cue is not None else str(item.get("cue", "")))
+             new_reply = _normalize_reply(reply if reply is not None else str(item.get("reply", "")))
+             if not new_reply:
+                 return False
+             updated = dict(item)
+             updated["cue"] = new_cue
+             updated["reply"] = new_reply
+             updated["conversation_hash"] = _conversation_hash(new_cue, new_reply)
+             updated["created_at"] = _utc_now()
+             self.examples[index] = updated
+             self.save()
+             return True
+         return False
+ 
+     def _vector_by_hash(self) -> dict[str, dict[str, float]]:
+-        if not self.vector_path.exists():
+-            return {}
+-        try:
+-            data = json.loads(self.vector_path.read_text(encoding="utf-8"))
+-        except Exception:
++        data = self._load_vector_document()
++        if data is None:
+             return {}
+         result: dict[str, dict[str, float]] = {}
+         for item in data.get("items", []):
+             if isinstance(item, dict):
+                 key = str(item.get("conversation_hash", ""))
+                 vector = item.get("vector", {})
+                 if key and isinstance(vector, dict):
+                     result[key] = vector
+         return result
+ 
+     def suggest_replies(self, conversation_text: str, limit: int = 3) -> list[str]:
+         return self.suggest_replies_strict(conversation_text, limit=limit) or _unique_replies(
+             self.relevant_examples(conversation_text, limit=limit * 4),
+             limit,
+         )
+@@ -565,46 +686,93 @@ class StyleMemory:
+ 
+     def _refresh_summary(self) -> None:
+         examples = [
+             item["reply"]
+             for item in self.examples[-24:]
+             if item.get("reply") and item.get("source") != ENTERPRISE_ANNUAL_REPORT_SOURCE
+         ]
+         avg_len = int(sum(len(x) for x in examples) / len(examples)) if examples else 18
+         emoji = any(re.search(r"[\U0001F300-\U0001FAFF]", text) for text in examples)
+         question = any("？" in text or "?" in text or "吗" in text for text in examples)
+         length_note = "短句" if avg_len <= 24 else "中等长度"
+         emoji_note = "会少量用表情" if emoji else "基本不用表情"
+         question_note = "常用反问或确认句" if question else "表达直接"
+         self.style_summary = f"{length_note}、微信口语、{emoji_note}、{question_note}、少客服腔。"
+ 
+-    def _save_vector_index(self) -> None:
++    def _load_vector_document(self) -> dict[str, object] | None:
++        self.vector_ready = False
++        if not self.vector_path.exists():
++            self.last_vector_error = "vector index is missing"
++            return None
++        try:
++            result = load_json(self.vector_path, _validate_vector_document)
++        except JsonDataError:
++            self.last_vector_error = "vector index is invalid"
++            return None
++        if result.recovered:
++            self.last_vector_error = "vector index primary is invalid"
++            return None
++        if result.data["memory_hash"] != self.content_hash():
++            self.last_vector_error = "vector index is stale"
++            return None
++        if result.data["items"] != self._build_vector_items():
++            self.last_vector_error = "vector index does not match memory"
++            return None
++        self.vector_ready = True
++        self.last_vector_error = None
++        return result.data
++
++    def _ensure_vector_index(self) -> None:
++        if self._load_vector_document() is None:
++            self.rebuild_vector_index()
++
++    def _build_vector_items(self) -> list[dict[str, object]]:
+         items = []
+         for item in self.examples:
+             vector = _text_vector(f"{item.get('cue', '')}\n{item.get('reply', '')}")
+             if not vector:
+                 continue
+             items.append(
+                 {
+                     "conversation_hash": item.get("conversation_hash", ""),
+                     "source": item.get("source", ""),
+                     "reply": item.get("reply", ""),
+                     "vector": vector,
+                 }
+             )
+-        data = {"version": 1, "dim": 384, "items": items}
+-        self.vector_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
++        return items
++
++    def rebuild_vector_index(self) -> None:
++        self.vector_ready = False
++        self.last_vector_error = None
++        try:
++            data = {
++                "version": VECTOR_SCHEMA_VERSION,
++                "dim": VECTOR_DIMENSION,
++                "memory_hash": self.content_hash(),
++                "items": self._build_vector_items(),
++            }
++            atomic_write_json(self.vector_path, data, _validate_vector_document, backup_count=5)
++        except Exception as error:
++            self.last_vector_error = f"{type(error).__name__}: vector index rebuild failed"
++            raise VectorIndexError(self.last_vector_error) from error
++        self.vector_ready = True
++        self.last_vector_error = None
++
++    def assert_ready_for_managed_reply(self) -> None:
++        if not self.vector_ready:
++            raise VectorIndexError(self.last_vector_error or "vector index is not ready")
+ 
+     @staticmethod
+     def _extract_phrases(text: str) -> list[str]:
+         pieces = re.split(r"[，。！？、,.!?\s]+", text)
+         return [piece for piece in pieces if 2 <= len(piece) <= 10]
+ 
+ 
+ def _unique_replies(examples: list[dict[str, str]], limit: int) -> list[str]:
+     suggestions: list[str] = []
+     for item in examples:
+         reply = str(item.get("reply", "")).strip()
+         if reply and reply not in suggestions:
+             suggestions.append(reply)
+         if len(suggestions) >= limit:
+             break
+@@ -668,31 +836,31 @@ def _with_training_metadata(example: dict[str, str], raw_item: dict[str, object]
+ 
+ 
+ def _normalize_example(item: object) -> dict[str, str]:
+     if not isinstance(item, dict):
+         return {}
+     cue = _normalize_context(str(item.get("cue", "")))
+     source = _clean_source(str(item.get("source", "manual_edit")))
+     reply = _normalize_enterprise_reply(str(item.get("reply", ""))) if source == ENTERPRISE_ANNUAL_REPORT_SOURCE else _normalize_reply(str(item.get("reply", "")))
+     if not reply:
+         return {}
+     result = {
+         "partner": str(item.get("partner", "聊天记录训练")).strip()[:50],
+         "cue": cue,
+         "reply": reply,
+         "source": source,
+-        "created_at": str(item.get("created_at", "")) or _utc_now(),
++        "created_at": str(item.get("created_at", "")),
+         "conversation_hash": str(item.get("conversation_hash", "")) or _conversation_hash(cue, reply),
+     }
+     for key in (
+         "scenario_id",
+         "scenario_title",
+         "why",
+         "question",
+         "module",
+         "subcategory",
+         "organization_type",
+         "source_sheet",
+         "source_cell",
+         "source_file",
+     ):
+         value = str(item.get(key, "")).strip()
+
+===== CURRENT CUMULATIVE DIFF: tests\test_persistence.py =====
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-4-baseline\\tests__test_persistence.py" "b/tests\\test_persistence.py"
+index 83022b9..a15ef62 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-4-baseline\\tests__test_persistence.py"	
++++ "b/tests\\test_persistence.py"
+@@ -1,24 +1,29 @@
++from collections import Counter
++import hashlib
+ import json
++import math
+ import os
+ import sys
+ from pathlib import Path
+ 
+ import pytest
+ 
+ import app_paths
+ from atomic_json import JsonDataError, atomic_write_json, load_json
++import memory as memory_module
++from memory import StyleMemory
+ import settings as settings_module
+ 
+ 
+ class FakeCredentialStore:
+     def __init__(self, initial=None, *, save_error=None, load_error=None):
+         self.values = dict(initial or {})
+         self.save_error = save_error
+         self.load_error = load_error
+ 
+     def load(self):
+         if self.load_error is not None:
+             raise self.load_error
+         return dict(self.values)
+ 
+     def save(self, keys):
+@@ -39,30 +44,457 @@ def test_default_root_is_appdata_even_when_frozen(tmp_path, monkeypatch):
+     monkeypatch.setenv("APPDATA", str(tmp_path))
+     monkeypatch.setattr(sys, "frozen", True, raising=False)
+     assert app_paths.data_dir() == tmp_path / "WeChatStyleReplyAssistant"
+ 
+ 
+ def _require_examples_dict(value):
+     if not isinstance(value, dict) or "examples" not in value:
+         raise ValueError("examples must be a dictionary field")
+ 
+ 
+ def _require_numeric_config_version(value):
+     if not isinstance(value, dict) or not isinstance(value.get("config_version"), int):
+         raise ValueError("config_version must be an integer")
+ 
+ 
++@pytest.fixture
++def isolated_memory_root(tmp_path, monkeypatch):
++    monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(tmp_path))
++    return tmp_path
++
++
++def _valid_example(index, *, reply=None, organization_type="association"):
++    return {
++        "partner": f"partner-{index}",
++        "cue": f"[other] question-{index}",
++        "reply": reply or f"answer-{index}",
++        "source": "manual_edit",
++        "created_at": "2026-08-12T00:00:00+00:00",
++        "conversation_hash": f"hash-{index}",
++        "organization_type": organization_type,
++    }
++
++
++def _valid_memory(examples):
++    return {
++        "schema_version": 2,
++        "style_summary": "short and direct",
++        "examples": list(examples),
++        "common_phrases": {"received": 2},
++    }
++
++
++def test_save_does_not_truncate_more_than_3000_records(isolated_memory_root):
++    memory = StyleMemory(path=isolated_memory_root / "memory.json")
++    memory.examples = [_valid_example(index) for index in range(3001)]
++
++    memory.save()
++    loaded = StyleMemory(path=memory.path).load()
++
++    assert len(json.loads(memory.path.read_text(encoding="utf-8"))["examples"]) == 3001
++    assert len(loaded.examples) == 3001
++
++
++def test_corrupt_primary_recovers_backup_without_empty_overwrite(isolated_memory_root):
++    path = isolated_memory_root / "memory.json"
++    corrupt_primary = b"broken-primary"
++    path.write_bytes(corrupt_primary)
++    (isolated_memory_root / "memory.json.bak.1").write_text(
++        json.dumps(_valid_memory([_valid_example(1)])),
++        encoding="utf-8",
++    )
++
++    memory = StyleMemory(path=path).load()
++
++    assert len(memory.examples) == 1
++    assert memory.load_result is not None
++    assert memory.load_result.recovered is True
++    assert memory.load_result.source == isolated_memory_root / "memory.json.bak.1"
++    assert path.read_bytes() == corrupt_primary
++
++
++def test_missing_primary_recovers_valid_backup(isolated_memory_root):
++    path = isolated_memory_root / "memory.json"
++    backup_path = isolated_memory_root / "memory.json.bak.1"
++    backup_path.write_text(
++        json.dumps(_valid_memory([_valid_example(7)])),
++        encoding="utf-8",
++    )
++
++    memory = StyleMemory(path=path).load()
++
++    assert memory.load_result is not None
++    assert memory.load_result.recovered is True
++    assert memory.load_result.source == backup_path
++    assert [item["conversation_hash"] for item in memory.examples] == ["hash-7"]
++    assert not path.exists()
++
++
++def test_missing_primary_with_only_invalid_backups_raises_without_byte_changes(isolated_memory_root):
++    path = isolated_memory_root / "memory.json"
++    backups = [isolated_memory_root / f"memory.json.bak.{index}" for index in range(1, 6)]
++    for index, backup in enumerate(backups, start=1):
++        backup.write_bytes(f"broken-backup-{index}".encode("utf-8"))
++    before = {backup: backup.read_bytes() for backup in backups}
++
++    with pytest.raises(JsonDataError):
++        StyleMemory(path=path).load()
++
++    assert not path.exists()
++    assert {backup: backup.read_bytes() for backup in backups} == before
++
++
++@pytest.mark.parametrize(
++    "invalid_primary",
++    [
++        {},
++        {"style_summary": "incomplete", "examples": []},
++        {
++            "schema_version": 2,
++            "style_summary": "invalid empty reply",
++            "examples": [
++                {
++                    "cue": "[other] question",
++                    "reply": "   ",
++                    "source": "manual_edit",
++                    "conversation_hash": "empty-reply",
++                }
++            ],
++            "common_phrases": {},
++        },
++        {
++            "style_summary": "legacy partial item",
++            "examples": [{"cue": "[other] question", "reply": "answer"}],
++            "common_phrases": {},
++        },
++    ],
++    ids=["empty-object", "missing-core-field", "empty-reply", "partial-v1-item"],
++)
++def test_invalid_primary_candidate_cannot_preempt_valid_backup(
++    invalid_primary,
++    isolated_memory_root,
++):
++    path = isolated_memory_root / "memory.json"
++    path.write_text(json.dumps(invalid_primary), encoding="utf-8")
++    backup_path = isolated_memory_root / "memory.json.bak.1"
++    backup_path.write_text(
++        json.dumps(_valid_memory([_valid_example(9)])),
++        encoding="utf-8",
++    )
++
++    memory = StyleMemory(path=path).load()
++
++    assert memory.load_result is not None
++    assert memory.load_result.recovered is True
++    assert memory.load_result.source == backup_path
++    assert [item["conversation_hash"] for item in memory.examples] == ["hash-9"]
++
++
++def test_all_corrupt_memory_candidates_raise_typed_error_without_byte_changes(isolated_memory_root):
++    path = isolated_memory_root / "memory.json"
++    candidates = [path, *(isolated_memory_root / f"memory.json.bak.{index}" for index in range(1, 6))]
++    payloads = [
++        b"{broken-primary",
++        b"[]",
++        b'{"schema_version":"2","examples":[]}',
++        b'{"schema_version":2,"style_summary":[],"examples":[],"common_phrases":{}}',
++        b'{"schema_version":2,"style_summary":"ok","examples":{},"common_phrases":{}}',
++        b'{"schema_version":2,"style_summary":"ok","examples":[],"common_phrases":[]}',
++    ]
++    for candidate, payload in zip(candidates, payloads):
++        candidate.write_bytes(payload)
++    before = {candidate: candidate.read_bytes() for candidate in candidates}
++
++    with pytest.raises(JsonDataError):
++        StyleMemory(path=path).load()
++
++    assert {candidate: candidate.read_bytes() for candidate in candidates} == before
++
++
++@pytest.mark.parametrize(
++    ("field", "invalid_value"),
++    [
++        ("schema_version", "2"),
++        ("style_summary", []),
++        ("examples", {}),
++        ("common_phrases", []),
++    ],
++)
++def test_memory_validator_rejects_wrong_top_level_field_types(field, invalid_value):
++    document = _valid_memory([_valid_example(1)])
++    document[field] = invalid_value
++
++    with pytest.raises(ValueError):
++        memory_module.validate_memory_document(document)
++
++
++@pytest.mark.parametrize(
++    "field",
++    [
++        "partner",
++        "cue",
++        "reply",
++        "source",
++        "created_at",
++        "conversation_hash",
++        "organization_type",
++    ],
++)
++def test_memory_validator_rejects_non_string_example_fields(field):
++    example = _valid_example(1)
++    example[field] = 123
++
++    with pytest.raises(ValueError):
++        memory_module.validate_memory_document(_valid_memory([example]))
++
++
++@pytest.mark.parametrize(
++    "phrases",
++    [
++        {1: 2},
++        {"received": "2"},
++        {"received": True},
++        {"received": -1},
++    ],
++)
++def test_memory_validator_requires_non_negative_integer_phrase_counts(phrases):
++    document = _valid_memory([_valid_example(1)])
++    document["common_phrases"] = phrases
++
++    with pytest.raises(ValueError):
++        memory_module.validate_memory_document(document)
++
++
++@pytest.mark.parametrize("state", ["missing", "corrupt", "schema_mismatch", "hash_mismatch"])
++def test_vector_hash_and_other_invalid_states_rebuild_from_memory(
++    state,
++    isolated_memory_root,
++):
++    path = isolated_memory_root / "memory.json"
++    path.write_text(json.dumps(_valid_memory([_valid_example(1)])), encoding="utf-8")
++    vector_path = isolated_memory_root / "vector_memory.json"
++    if state == "corrupt":
++        vector_path.write_text("{broken-vector", encoding="utf-8")
++    elif state == "schema_mismatch":
++        vector_path.write_text(
++            json.dumps({"version": 999, "dim": 384, "memory_hash": "0" * 64, "items": []}),
++            encoding="utf-8",
++        )
++    elif state == "hash_mismatch":
++        vector_path.write_text(
++            json.dumps({"version": 1, "dim": 384, "memory_hash": "0" * 64, "items": []}),
++            encoding="utf-8",
++        )
++
++    memory = StyleMemory(path=path).load()
++    rebuilt = json.loads(vector_path.read_text(encoding="utf-8"))
++
++    assert rebuilt["version"] == 1
++    assert rebuilt["memory_hash"] == memory.content_hash()
++    assert len(rebuilt["items"]) == 1
++
++
++def test_vector_write_failure_is_observable_and_preserves_memory_hash(
++    isolated_memory_root,
++    monkeypatch,
++):
++    path = isolated_memory_root / "memory.json"
++    path.write_text(json.dumps(_valid_memory([_valid_example(1)])), encoding="utf-8")
++    vector_path = isolated_memory_root / "vector_memory.json"
++    vector_path.write_text("{broken-vector", encoding="utf-8")
++    memory_hash_before = hashlib.sha256(path.read_bytes()).hexdigest()
++    real_atomic_write_json = atomic_write_json
++
++    def fail_vector_write(destination, data, validator, backup_count=5):
++        if Path(destination) == vector_path:
++            raise OSError("simulated vector write failure")
++        return real_atomic_write_json(destination, data, validator, backup_count)
++
++    monkeypatch.setattr(memory_module, "atomic_write_json", fail_vector_write, raising=False)
++
++    memory = StyleMemory(path=path)
++    with pytest.raises(memory_module.VectorIndexError) as error:
++        memory.load()
++
++    assert hashlib.sha256(path.read_bytes()).hexdigest() == memory_hash_before
++    assert isinstance(error.value.__cause__, OSError)
++    assert memory.vector_ready is False
++    assert memory.last_vector_error
++    with pytest.raises(memory_module.VectorIndexError):
++        memory.assert_ready_for_managed_reply()
++
++
++def test_runtime_save_vector_failure_blocks_until_successful_rebuild(
++    isolated_memory_root,
++    monkeypatch,
++):
++    memory = StyleMemory(path=isolated_memory_root / "memory.json")
++    memory.examples = [_valid_example(1)]
++    memory.save()
++    memory.examples.append(_valid_example(2))
++    real_atomic_write_json = memory_module.atomic_write_json
++
++    def fail_vector_write(destination, data, validator, backup_count=5):
++        if Path(destination) == memory.vector_path:
++            raise OSError("sensitive customer payload at C:\\private\\memory")
++        return real_atomic_write_json(destination, data, validator, backup_count)
++
++    with monkeypatch.context() as scoped:
++        scoped.setattr(memory_module, "atomic_write_json", fail_vector_write)
++        with pytest.raises(memory_module.VectorIndexError):
++            memory.save()
++
++    persisted_after_failure = memory.path.read_bytes()
++    assert len(json.loads(persisted_after_failure)["examples"]) == 2
++    assert memory.vector_ready is False
++    assert memory.last_vector_error is not None
++    assert "OSError" in memory.last_vector_error
++    assert "customer" not in memory.last_vector_error
++    assert "private" not in memory.last_vector_error
++    with pytest.raises(memory_module.VectorIndexError):
++        memory.assert_ready_for_managed_reply()
++
++    memory.rebuild_vector_index()
++
++    assert memory.path.read_bytes() == persisted_after_failure
++    assert memory.vector_ready is True
++    assert memory.last_vector_error is None
++    memory.assert_ready_for_managed_reply()
++
++
++@pytest.mark.parametrize(
++    "corruption",
++    [
++        "nan-weight",
++        "infinite-weight",
++        "weight-out-of-range",
++        "bucket-out-of-range",
++        "noncanonical-bucket",
++        "empty-vector",
++        "record-mismatch",
++    ],
++)
++def test_invalid_vector_payload_with_current_memory_hash_is_rebuilt(
++    corruption,
++    isolated_memory_root,
++):
++    memory = StyleMemory(path=isolated_memory_root / "memory.json")
++    memory.examples = [_valid_example(1)]
++    memory.save()
++    vector_path = memory.vector_path
++    vector_document = json.loads(vector_path.read_text(encoding="utf-8"))
++    expected_items = json.loads(json.dumps(vector_document["items"]))
++    item = vector_document["items"][0]
++    bucket = next(iter(item["vector"]))
++    if corruption == "nan-weight":
++        item["vector"][bucket] = float("nan")
++    elif corruption == "infinite-weight":
++        item["vector"][bucket] = float("inf")
++    elif corruption == "weight-out-of-range":
++        item["vector"][bucket] = 1.5
++    elif corruption == "bucket-out-of-range":
++        item["vector"] = {"384": 0.5}
++    elif corruption == "noncanonical-bucket":
++        item["vector"] = {"01": 0.5}
++    elif corruption == "empty-vector":
++        item["vector"] = {}
++    else:
++        item["reply"] = "tampered reply"
++    vector_path.write_text(json.dumps(vector_document), encoding="utf-8")
++
++    loaded = StyleMemory(path=memory.path).load()
++    rebuilt = json.loads(vector_path.read_text(encoding="utf-8"))
++
++    assert rebuilt["items"] == expected_items
++    assert loaded.vector_ready is True
++    assert loaded.last_vector_error is None
++    for rebuilt_item in rebuilt["items"]:
++        assert rebuilt_item["vector"]
++        assert all(
++            bucket_key == str(int(bucket_key)) and 0 <= int(bucket_key) < 384
++            for bucket_key in rebuilt_item["vector"]
++        )
++        assert all(
++            math.isfinite(weight) and 0 < weight <= 1
++            for weight in rebuilt_item["vector"].values()
++        )
++
++
++def test_content_hash_uses_stable_canonical_json(isolated_memory_root):
++    example = _valid_example(1)
++    memory = StyleMemory(path=isolated_memory_root / "memory.json")
++    memory.style_summary = "stable summary"
++    memory.examples = [dict(reversed(list(example.items())))]
++    memory.common_phrases = Counter({"second": 1, "first": 2})
++    canonical_document = {
++        "schema_version": 2,
++        "style_summary": "stable summary",
++        "examples": [example],
++        "common_phrases": {"first": 2, "second": 1},
++    }
++    expected = hashlib.sha256(
++        json.dumps(
++            canonical_document,
++            ensure_ascii=False,
++            sort_keys=True,
++            separators=(",", ":"),
++        ).encode("utf-8")
++    ).hexdigest()
++
++    assert memory.content_hash() == expected
++
++
++def test_legacy_memory_without_created_at_keeps_stable_hash(isolated_memory_root, monkeypatch):
++    path = isolated_memory_root / "memory.json"
++    legacy_example = _valid_example(1)
++    legacy_example.pop("created_at")
++    legacy_document = _valid_memory([legacy_example])
++    legacy_document.pop("schema_version")
++    path.write_text(json.dumps(legacy_document), encoding="utf-8")
++    ticks = iter(f"generated-{index}" for index in range(20))
++    monkeypatch.setattr(memory_module, "_utc_now", lambda: next(ticks))
++
++    first_hash = StyleMemory(path=path).load().content_hash()
++    second_hash = StyleMemory(path=path).load().content_hash()
++
++    assert first_hash == second_hash
++
++
++def test_dedupe_preserves_different_answers_sharing_conversation_hash(isolated_memory_root):
++    first = _valid_example(1, reply="answer for associations", organization_type="association")
++    second = _valid_example(2, reply="answer for foundations", organization_type="foundation")
++    first["conversation_hash"] = second["conversation_hash"] = "shared-conversation"
++    memory = StyleMemory(path=isolated_memory_root / "memory.json")
++    memory.examples = [first, second]
++
++    memory.save()
++
++    assert [item["reply"] for item in StyleMemory(path=memory.path).load().examples] == [
++        "answer for associations",
++        "answer for foundations",
++    ]
++
++
++def test_missing_memory_returns_empty_without_creating_primary_or_vector(isolated_memory_root):
++    memory = StyleMemory(path=isolated_memory_root / "memory.json").load()
++
++    assert memory.examples == []
++    assert memory.load_result is None
++    assert not memory.path.exists()
++    assert not memory.vector_path.exists()
++
++
+ def test_load_recovers_newest_valid_backup(tmp_path):
+     path = tmp_path / "memory.json"
+     path.write_text("{broken", encoding="utf-8")
+     (tmp_path / "memory.json.bak.1").write_text("{broken", encoding="utf-8")
+     (tmp_path / "memory.json.bak.2").write_text('{"examples": [1]}', encoding="utf-8")
+     (tmp_path / "memory.json.bak.3").write_text('{"examples": [2]}', encoding="utf-8")
+ 
+     result = load_json(path, _require_examples_dict)
+ 
+     assert result.data == {"examples": [1]}
+     assert result.source == tmp_path / "memory.json.bak.2"
+     assert result.recovered is True
+ 
+ 
+ def test_atomic_write_failed_validation_does_not_replace_existing_file(tmp_path):
+
+===== CURRENT CUMULATIVE DIFF: tests\test_core.py =====
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-4-baseline\\tests__test_core.py" "b/tests\\test_core.py"
+index c0d4dc8..01d1994 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-4-baseline\\tests__test_core.py"	
++++ "b/tests\\test_core.py"
+@@ -307,64 +307,64 @@ class MemoryTests(unittest.TestCase):
+         history_answer = "历史报告请到公示页面查询。"
+         memory.learn_from_training_examples(_enterprise_history_lookup_examples(history_answer))
+         engine = ReplyEngine(settings, memory)
+ 
+         # 命中后交大模型一致性判断：一致才发送官方答案
+         with patch("reply_engine.requests.post") as post:
+             post.return_value.status_code = 200
+             post.return_value.raise_for_status.return_value = None
+             post.return_value.json.return_value = {"choices": [{"message": {"content": '{"chosen": 1, "consistent": true}'}}]}
+             result = engine.generate("[对方] 之前那个报告怎么看", "客户")
+ 
+         self.assertEqual(result, [history_answer])
+         self.assertIn("C11:D11", engine.last_source)
+         self.assertIn("大模型确认一致", engine.last_source)
+ 
+-    def test_save_protects_disk_knowledge_when_memory_shrinks(self):
+-        """数量骤减保护：磁盘已有大量知识库（≥50 条）、内存只有极少时，save 先备份磁盘。"""
++    def test_save_keeps_previous_memory_in_managed_backup(self):
++        """每次覆盖前由统一原子写入层保留上一份有效正文。"""
+         tmp = tempfile.TemporaryDirectory()
+         self.addCleanup(tmp.cleanup)
+         memory = StyleMemory(Path(tmp.name) / "memory.json")
+ 
+         # 磁盘先写入 60 条知识库
+         big_examples = []
+         for i in range(60):
+             big_examples.append(
+                 {
+                     "question": f"测试问题{i}",
+                     "cue": f"[对方] 测试问题{i}",
+                     "reply": f"测试回答{i}",
+                     "source": "enterprise_annual_report_kb",
+                     "conversation_hash": f"hash-{i}",
+                 }
+             )
+         memory.examples = big_examples
+         memory.save()
+         self.assertEqual(len(memory.load().examples), 60)
+ 
+         # 模拟程序 load 到旧/空数据（只有 3 条）后 save
+         memory2 = StyleMemory(Path(tmp.name) / "memory.json")
+         memory2.load()
+         memory2.examples = [
+             {"question": "", "cue": "[对方] 测试", "reply": "测试", "source": "chat_zip_training", "conversation_hash": "x"}
+         ] * 3
+         memory2.save()
+ 
+-        # 保护触发：磁盘文件里应有自动备份
+-        backup_files = list(Path(tmp.name).glob("memory.json.bak-auto-*"))
+-        self.assertTrue(backup_files, "应生成自动备份")
+-        backup = json.loads(backup_files[0].read_text(encoding="utf-8"))
++        # 统一原子写入层应把覆盖前正文放入最新的有效备份槽位。
++        backup_path = Path(tmp.name) / "memory.json.bak.1"
++        self.assertTrue(backup_path.exists(), "应生成托管备份")
++        backup = json.loads(backup_path.read_text(encoding="utf-8"))
+         self.assertEqual(len(backup.get("examples", [])), 60, "备份应包含 60 条知识库")
+ 
+     def test_enterprise_ambiguous_runtime_and_phrasebook_both_refuse_to_send(self):
+         import main
+ 
+         settings = AppSettings(api_key="configured", reply_source_mode="model_memory")
+         tmp = tempfile.TemporaryDirectory()
+         self.addCleanup(tmp.cleanup)
+         memory = StyleMemory(Path(tmp.name) / "memory.json")
+         memory.learn_from_training_examples(_enterprise_history_lookup_examples("历史报告请到公示页面查询。"))
+         engine = ReplyEngine(settings, memory)
+ 
+         with patch("reply_engine.requests.post") as post:
+             post.return_value.status_code = 200
+             post.return_value.raise_for_status.return_value = None
+
+===== FIX REPORT TAIL =====
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py tests\test_core.py -k "MemoryTests or memory or vector" -v
+```
+
+The first compatibility run exposed one obsolete assertion requiring `memory.json.bak-auto-*`. The test was updated to assert the Task 2 managed backup `memory.json.bak.1` contains the overwritten 60-example snapshot. Final result: exit code `0`; `78 passed, 257 deselected`.
+
+Full suite:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py tests\test_core.py -v
+```
+
+Actual result: exit code `0`; `336 passed, 6 subtests passed in 9.10s`.
+
+Compile check:
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile memory.py tests\test_persistence.py tests\test_core.py
+```
+
+Actual result: exit code `0`, no output.
+
+## Added/updated behavioral tests
+
+- `test_save_does_not_truncate_more_than_3000_records`
+- `test_corrupt_primary_recovers_backup_without_empty_overwrite`
+- `test_all_corrupt_memory_candidates_raise_typed_error_without_byte_changes`
+- `test_memory_validator_rejects_wrong_top_level_field_types`
+- `test_memory_validator_rejects_non_string_example_fields`
+- `test_memory_validator_requires_non_negative_integer_phrase_counts`
+- `test_vector_hash_and_other_invalid_states_rebuild_from_memory`
+- `test_vector_write_failure_is_observable_and_preserves_memory_hash`
+- `test_content_hash_uses_stable_canonical_json`
+- `test_legacy_memory_without_created_at_keeps_stable_hash`
+- `test_dedupe_preserves_different_answers_sharing_conversation_hash`
+- `test_missing_memory_returns_empty_without_creating_primary_or_vector`
+- Updated `MemoryTests.test_save_keeps_previous_memory_in_managed_backup` to check the unified managed backup rather than the removed ad-hoc filename.
+
+All new pytest-style persistence tests use `tmp_path` through `isolated_memory_root` and set a temporary `WECHAT_ASSISTANT_DATA_DIR` with `monkeypatch`.
+
+## Changed files
+
+- `memory.py`
+- `tests/test_persistence.py`
+- `tests/test_core.py`
+- `artifacts/formal-hardening/2026-08-12/04-memory-vector.sha256.json`
+- `.superpowers/sdd/2026-08-12-01-persistence-and-settings-hardening/task-4-report.md`
+
+Not changed: `main.py`, `settings.py`, `atomic_json.py`, `app_paths.py`.
+
+## Checkpoint
+
+Command required by the brief was run:
+
+```powershell
+Get-FileHash memory.py,tests\test_persistence.py -Algorithm SHA256 | ConvertTo-Json | Set-Content artifacts\formal-hardening\2026-08-12\04-memory-vector.sha256.json -Encoding UTF8
+```
+
+Recorded hashes:
+
+- `memory.py`: `C71FA37E2E6C6CDE869F0BE248C146C044A9CCD6093C0977237772C5CCB723D9`
+- `tests/test_persistence.py`: `B129CE7168A295919D2CDCD5015EC20C86EC98C7958404163BCFCD57FC8E6944`
+
+## Self-review and concerns
+
+- Confirmed no direct `read_text`/`write_text` persistence remains in `StyleMemory`; memory and vector JSON both use the shared atomic/recovery layer.
+- Confirmed all-invalid memory candidates raise `JsonDataError` without changing any candidate bytes.
+- Confirmed corrupt-primary recovery does not overwrite the corrupt primary with an empty document.
+- Confirmed vector rebuild failure is observable as the underlying write exception and the memory primary SHA-256 remains unchanged.
+- Confirmed `max_examples` is no longer applied by `StyleMemory.save()` or `StyleMemory.load()`. The field remains because existing import call sites use it as an upstream selection parameter; changing those import policies would modify files and ingestion semantics outside this Task 4 brief.
+- Vector rebuilding is synchronous. A very large memory may add load/save latency, but failing closed and rebuilding from the authoritative body is the required consistency behavior; no benchmark or background migration was added in this phase.
+- No real user memory file was opened or modified during implementation. New persistence tests were isolated under pytest temporary directories.
+
+## Fix Round 1
+
+### Review findings addressed
+
+1. **Critical — persistent vector health and typed blocking error**
+   - Added public `VectorIndexError`.
+   - Added observable `StyleMemory.vector_ready: bool` and `StyleMemory.last_vector_error: str | None`.
+   - Every rebuild starts fail-closed with `vector_ready=False`. Successful validation or atomic rebuild sets it to `True` and clears the error.
+   - A rebuild exception remains observable as `VectorIndexError`, chains the underlying cause, keeps `vector_ready=False`, and stores only a sanitized reason consisting of the exception type plus a fixed message. Paths, customer text, and the raw exception message are not retained.
+   - Added `StyleMemory.assert_ready_for_managed_reply() -> None`; it raises `VectorIndexError` whenever the vector is not ready.
+   - Runtime `save()` failure coverage proves the newly persisted memory body remains valid, health checks reject, and a later successful `rebuild_vector_index()` restores readiness without changing the memory primary bytes.
+
+2. **Important — missing primary now still examines backups**
+   - `StyleMemory.load()` treats the installation as new only when `memory.json` and all five managed backup candidates are absent.
+   - If any candidate exists, `load_json()` performs normal validated selection. A missing primary can therefore recover `.bak.1`; invalid-only backups raise `JsonDataError` without byte changes.
+
+3. **Important — strict v1 and v2 candidate semantics**
+   - Both versions now require `style_summary`, `examples`, and `common_phrases` to exist with the correct types.
+   - `examples=[]` remains a valid explicit empty library.
+   - Every non-empty example item must be an object with string `cue`, `reply`, `source`, and `conversation_hash`, and its reply must remain non-empty after the real normalization path.
+   - Empty objects, missing top-level fields, whitespace-only replies, and partial legacy items can no longer preempt a valid backup.
+
+4. **Important — strict vector values and authoritative semantic match**
+   - Sparse vectors must be non-empty.
+   - Bucket keys must be canonical base-10 strings in `0..383`.
+   - Weights must be finite numeric values in `(0, 1]`; `NaN`, infinity, booleans, zero, negatives, and values above one are invalid.
+   - After schema and `memory_hash` validation, vector `items` must exactly match the vectors regenerated from the in-memory authoritative examples, covering `conversation_hash`, `source`, `reply`, item count/order, and vector values.
+
+### Fix Round 1 tests
+
+Added or strengthened:
+
+- `test_missing_primary_recovers_valid_backup`
+- `test_missing_primary_with_only_invalid_backups_raises_without_byte_changes`
+- `test_invalid_primary_candidate_cannot_preempt_valid_backup` with `empty-object`, `missing-core-field`, `empty-reply`, and `partial-v1-item` cases
+- `test_vector_write_failure_is_observable_and_preserves_memory_hash` now requires `VectorIndexError` and a failing health check
+- `test_runtime_save_vector_failure_blocks_until_successful_rebuild`
+- `test_invalid_vector_payload_with_current_memory_hash_is_rebuilt` with `nan-weight`, `infinite-weight`, `weight-out-of-range`, `bucket-out-of-range`, `noncanonical-bucket`, `empty-vector`, and `record-mismatch` cases
+
+### Fix Round 1 RED evidence
+
+Primary RED command:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py -k "missing_primary or invalid_primary_candidate or vector_failure or invalid_vector_payload" -v
+```
+
+Actual result before the fix: exit code `1`; `14 failed, 80 deselected`. Both missing-primary cases short-circuited as empty; all four invalid primary candidates were selected instead of the backup; the health API did not exist; all seven malformed/current-hash vector payloads remained unchanged.
+
+Typed-error RED command:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py -k "vector_write_failure_is_observable" -v
+```
+
+Actual result before the fix: exit code `1`; `1 failed, 93 deselected`, because `VectorIndexError` did not exist.
+
+### Fix Round 1 GREEN and regression evidence
+
+Focused GREEN command:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py -k "missing_primary or invalid_primary_candidate or vector_failure or invalid_vector_payload or vector_write_failure_is_observable" -v
+```
+
+Actual result: exit code `0`; `15 passed, 79 deselected`.
+
+Memory/vector target command:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py tests\test_core.py -k "MemoryTests or memory or vector" -v
+```
+
+Actual result: exit code `0`; `87 passed, 263 deselected`.
+
+Full suite and compile command:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_persistence.py tests\test_core.py -v
+.\.venv\Scripts\python.exe -m compileall -q memory.py tests\test_persistence.py tests\test_core.py
+```
+
+Actual result: exit code `0`; `350 passed, 6 subtests passed in 10.11s`; `compileall` produced no errors.
+
+### Cross-task interface boundary
+
+Task 4 now owns and tests the durable in-process health contract:
+
+```python
+memory.vector_ready
+memory.last_vector_error
+memory.assert_ready_for_managed_reply()
+```
+
+Task 5 or the later runtime integration must call `assert_ready_for_managed_reply()` at the automatic-send boundary and convert `VectorIndexError` into the user-visible blocking state. Task 4 intentionally does not edit `main.py` and does not decide UI/runtime policy.
+
+### Updated checkpoint
+
+The required checkpoint file was regenerated after Fix Round 1:
+
+- `memory.py`: `37026BD2E18B33AF9667EC5DD2EA7D071D098C79BE882AC4C7C6947312949798`
+- `tests/test_persistence.py`: `226245EDCE1468CE39F57F339FC9E12CD260E5D5CF329D3AD53208EAF8C09C2F`
+
+The earlier checkpoint values in the base Task 4 section document the pre-review implementation and are superseded by these Fix Round 1 values.
+
+### Remaining concern
+
+- The automatic-send entry point does not consume the health guard in this task by explicit cross-task decision. Until Task 5/runtime integration calls `assert_ready_for_managed_reply()`, the state is available and tested but not yet enforced at that outer boundary.
+
+===== CHECKPOINT =====
+[
+    {
+        "Algorithm":  "SHA256",
+        "Hash":  "37026BD2E18B33AF9667EC5DD2EA7D071D098C79BE882AC4C7C6947312949798",
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\memory.py"
+    },
+    {
+        "Algorithm":  "SHA256",
+        "Hash":  "226245EDCE1468CE39F57F339FC9E12CD260E5D5CF329D3AD53208EAF8C09C2F",
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\tests\\test_persistence.py"
+    }
+]

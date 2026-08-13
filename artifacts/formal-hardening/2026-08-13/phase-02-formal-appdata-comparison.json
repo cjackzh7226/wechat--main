@@ -1,0 +1,11 @@
+﻿{
+    "schema_version":  1,
+    "evidence_source":  "tests/conftest.py session autouse guard from final Phase 2 pytest run",
+    "before_count":  32,
+    "after_count":  32,
+    "before_manifest_sha256":  "dce85a645edbf5371d1b65536ef082ca253da7317a15fae5377602bb8beb42e8",
+    "after_manifest_sha256":  "dce85a645edbf5371d1b65536ef082ca253da7317a15fae5377602bb8beb42e8",
+    "exact_match":  true,
+    "pytest_exit":  0,
+    "note":  "The first auxiliary wrapper used unsupported Path.GetRelativePath; these are the authoritative manifests emitted by the passing test-session guard."
+}

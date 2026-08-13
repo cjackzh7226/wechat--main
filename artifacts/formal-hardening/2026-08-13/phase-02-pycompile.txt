@@ -1,0 +1,4 @@
+Python 3.11.9
+PY_COMPILE_EXIT=0
+modules=knowledge_base.py,candidate_judge.py,managed_reply.py,knowledge_import.py,memory.py,reply_engine.py,main.py,float_ui.py,chat_training.py,build_release.py,tools/migrate_formal_knowledge.py
+

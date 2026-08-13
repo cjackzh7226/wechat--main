@@ -1,0 +1,1300 @@
+﻿Task 5 non-Git review package
+Plan task: Privacy-Safe Rotating Runtime Logs and Blocking Startup Errors
+Report: 
+D:\Vibe C\客服\wechat--main\.superpowers\sdd\2026-08-12-01-persistence-and-settings-hardening\task-5-report.md
+
+
+===== DIFF: runtime_logging.py =====
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-5-baseline\\__empty__" b/runtime_logging.py
+index e69de29..f9fb179 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-5-baseline\\__empty__"	
++++ b/runtime_logging.py
+@@ -0,0 +1,159 @@
++from __future__ import annotations
++
++from datetime import datetime, timezone
++import hashlib
++import hmac
++import json
++import logging
++from logging.handlers import RotatingFileHandler
++import os
++from pathlib import Path
++import re
++import secrets
++from typing import Mapping
++
++
++_AUDIT_FIELDS = {
++    "record_id",
++    "score",
++    "org_scope",
++    "state",
++    "error_category",
++    "event",
++    "timestamp",
++}
++_PRIVATE_FIELDS = {"chatname", "message", "reply", "context"}
++_SESSION_DEBUG = False
++
++
++def enable_session_debug(enabled: bool = True) -> None:
++    """Enable privacy-safe diagnostic hashes for this process only."""
++    global _SESSION_DEBUG
++    _SESSION_DEBUG = bool(enabled)
++
++
++def _normalized_key(value: object) -> str:
++    return re.sub(r"[^a-z0-9]", "", str(value).casefold())
++
++
++def _load_or_create_salt(log_dir: Path) -> bytes:
++    salt_path = log_dir / ".runtime-salt"
++    try:
++        salt = salt_path.read_bytes()
++        if len(salt) >= 16:
++            return salt
++    except FileNotFoundError:
++        pass
++    salt = secrets.token_bytes(32)
++    try:
++        with salt_path.open("xb") as stream:
++            stream.write(salt)
++        try:
++            os.chmod(salt_path, 0o600)
++        except OSError:
++            pass
++        return salt
++    except FileExistsError:
++        existing = salt_path.read_bytes()
++        if len(existing) >= 16:
++            return existing
++        raise RuntimeError("runtime log salt is invalid")
++
++
++def _private_hash(value: object, salt: bytes) -> str:
++    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
++    return "sha256:" + hmac.new(salt, payload, hashlib.sha256).hexdigest()
++
++
++def _redact_value(value: object, *, salt: bytes | None, debug: bool) -> object:
++    if isinstance(value, Mapping):
++        cleaned: dict[str, object] = {}
++        for key, nested_value in value.items():
++            normalized = _normalized_key(key)
++            if "apikey" in normalized or "authorization" in normalized:
++                continue
++            if any(private_field in normalized for private_field in _PRIVATE_FIELDS):
++                if debug and salt is not None:
++                    cleaned[str(key)] = _private_hash(nested_value, salt)
++                continue
++            cleaned[str(key)] = _redact_value(nested_value, salt=salt, debug=debug)
++        return cleaned
++    if isinstance(value, (list, tuple)):
++        cleaned_items = []
++        for item in value:
++            if isinstance(item, (Mapping, list, tuple)):
++                cleaned_items.append(_redact_value(item, salt=salt, debug=debug))
++            elif debug and salt is not None:
++                cleaned_items.append(_private_hash(item, salt))
++        return cleaned_items
++    if value is None or isinstance(value, (str, int, float, bool)):
++        return value
++    return str(value)
++
++
++def redact_event(
++    event: Mapping[str, object],
++    *,
++    salt: bytes | None = None,
++    debug: bool | None = None,
++) -> dict[str, object]:
++    """Return only the non-content fields used for runtime auditing."""
++    debug_enabled = _SESSION_DEBUG if debug is None else bool(debug)
++    if debug_enabled:
++        if salt is None:
++            from app_paths import logs_dir
++
++            log_dir = logs_dir()
++            log_dir.mkdir(parents=True, exist_ok=True)
++            salt = _load_or_create_salt(log_dir)
++    redacted = {
++        key: _redact_value(event[key], salt=salt, debug=debug_enabled)
++        for key in sorted(_AUDIT_FIELDS)
++        if key in event
++    }
++    if debug_enabled:
++        for key, value in event.items():
++            normalized = _normalized_key(key)
++            if any(private_field in normalized for private_field in _PRIVATE_FIELDS):
++                redacted[str(key)] = _private_hash(value, salt)
++    return redacted
++
++
++class _JsonLineFormatter(logging.Formatter):
++    def __init__(self, salt: bytes) -> None:
++        super().__init__()
++        self.salt = salt
++
++    def format(self, record: logging.LogRecord) -> str:
++        event_data = getattr(record, "event_data", {})
++        if not isinstance(event_data, Mapping):
++            event_data = {}
++        redacted = redact_event(event_data, salt=self.salt)
++        redacted.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
++        return json.dumps(redacted, ensure_ascii=False, sort_keys=True)
++
++
++def build_runtime_logger(log_dir: Path) -> logging.Logger:
++    resolved_dir = Path(log_dir).resolve()
++    resolved_dir.mkdir(parents=True, exist_ok=True)
++    logger_key = hashlib.sha256(str(resolved_dir).casefold().encode("utf-8")).hexdigest()
++    logger = logging.getLogger(f"wechat_assistant.runtime.{logger_key}")
++    log_path = resolved_dir / "runtime.log"
++    owned_handlers = [
++        handler
++        for handler in logger.handlers
++        if getattr(handler, "_wechat_runtime_path", None) == str(log_path)
++    ]
++    if not owned_handlers:
++        handler = RotatingFileHandler(
++            log_path,
++            maxBytes=2_000_000,
++            backupCount=5,
++            encoding="utf-8",
++        )
++        handler._wechat_runtime_path = str(log_path)
++        handler.setFormatter(_JsonLineFormatter(_load_or_create_salt(resolved_dir)))
++        logger.addHandler(handler)
++    logger.setLevel(logging.INFO)
++    logger.propagate = False
++    return logger
+
+===== DIFF: main.py =====
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-5-baseline\\main.py" b/main.py
+index 03c2bf7..e38afb7 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-5-baseline\\main.py"	
++++ b/main.py
+@@ -1,91 +1,90 @@
+ from __future__ import annotations
+ 
+ import hashlib
+ import logging
+ import os
+ import re
+ import sys
+ import threading
+ import time
++from dataclasses import dataclass
+ from difflib import SequenceMatcher
++from json import JSONDecodeError
+ from pathlib import Path
+ from queue import Empty, Queue
+ 
++from app_paths import logs_dir
++from atomic_json import JsonDataError
+ from chat_training import import_chat_zip_to_memory, import_chat_zip_to_memory_with_llm
+ from capture_ocr import ChatOCR
+ from float_ui import ReplyAssistantUI
+-from memory import ENTERPRISE_ANNUAL_REPORT_SOURCE, StyleMemory
++from memory import ENTERPRISE_ANNUAL_REPORT_SOURCE, StyleMemory, VectorIndexError
++from runtime_logging import build_runtime_logger, enable_session_debug
+ from reply_engine import (
+     NO_DIRECT_ANSWER_REPLY,
+     ReplyEngine,
+     _is_question,
+     _is_pending_reply,
+     last_meaningful_other_message,
+     latest_meaningful_message,
+     select_best_reply_for_context,
+     unreplied_other_messages,
+ )
+ from sender import WeChatSender
+-from settings import AppSettings
++from settings import AppSettings, SettingsValidationError
+ from sop_analyzer import (
+     analyze_training_source_to_memory,
+     build_sop_library_from_memory,
+     ensure_sop_library_flow,
+     FLOW_LIBRARY_VERSION,
+     format_sop_document,
+     format_sop_library_document,
+     load_sop_library,
+     save_sop_library,
+     sop_document_from_memory,
+     sop_library_from_report,
+     write_sop_library_html,
+ )
+ from visible_content import VisibleContentAnalyzer, build_augmented_context, visible_from_ocr_text
+ from wechat_window import WeChatWindow, WeChatWindowDetector
+ 
+ 
+ try:
+     import pyautogui
+ except Exception:  # pragma: no cover
+     pyautogui = None
+ 
+ 
+ def _setup_diag_log() -> logging.Logger:
+-    """全托管发送链路诊断日志：记录每次发送决策与原因，便于排查“候选刷新但不发送”。"""
+-    logger = logging.getLogger("managed_send_diag")
+-    if not logger.handlers:
+-        logger.setLevel(logging.INFO)
+-        base = os.environ.get("APPDATA", "")
+-        log_dir = Path(base) / "WeChatStyleReplyAssistant" if base else Path.home() / ".wechat_style_reply_assistant"
+-        try:
+-            log_dir.mkdir(parents=True, exist_ok=True)
+-            handler = logging.FileHandler(log_dir / "managed_send.log", encoding="utf-8")
+-            handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+-            logger.addHandler(handler)
+-            logger.propagate = False
+-        except Exception:
+-            pass
+-    return logger
++    """Create the privacy-safe diagnostic logger only when an event is emitted."""
++    return build_runtime_logger(logs_dir())
+ 
+ 
+-DIAG_LOG = _setup_diag_log()
++DIAG_LOG: logging.Logger | None = None
+ 
+ 
+ def _diag(*args: object) -> None:
++    global DIAG_LOG
+     try:
+-        DIAG_LOG.info(" ".join(str(arg) for arg in args))
++        if DIAG_LOG is None:
++            DIAG_LOG = _setup_diag_log()
++        state = str(args[0]) if args else "diagnostic"
++        DIAG_LOG.info(
++            "managed-send-diagnostic",
++            extra={"event_data": {"event": "managed-send-diagnostic", "state": state}},
++        )
+     except Exception:
+         pass
+ 
+ 
+ 
+ MSG = {
+     "waiting": "等待微信、企业微信或 QQ 聊天窗口...",
+     "no_key": "\u5df2\u542f\u52a8\u3002\u672a\u914d\u7f6e API Key \u65f6\u4f1a\u4f7f\u7528\u672c\u5730\u5907\u7528\u56de\u590d\u3002",
+     "idle_partner": "等待聊天窗口",
+     "idle_status": "请打开微信、企业微信或 QQ，并点进一个聊天",
+     "current": "当前聊天：{title}",
+     "manual_ready": "已定位聊天窗口。点“识别当前聊天”生成回复。",
+     "recognizing": "\u6b63\u5728\u8bc6\u522b\u5f53\u524d\u804a\u5929...",
+     "step_located": "1/5 已定位聊天窗口：{title}",
+     "step_capture": "2/5 \u6b63\u5728\u622a\u53d6\u5f53\u524d\u804a\u5929\u533a\u57df...",
+@@ -101,40 +100,120 @@ MSG = {
+     "visible_skip": "识别为表情包/纯图片且没有实际问题，已跳过回复。",
+     "wait_other": "\u6700\u65b0\u6709\u6548\u6d88\u606f\u662f\u6211\u65b9\u53d1\u51fa\uff0c\u5df2\u505c\u6b62\u81ea\u52a8\u56de\u590d\uff0c\u7b49\u5f85\u5bf9\u65b9\u4e0b\u4e00\u6761\u6d88\u606f\u3002",
+     "monitor_error": "\u76d1\u63a7\u5f02\u5e38\uff1a{error}",
+     "no_window": "请先点进一个微信、企业微信或 QQ 聊天",
+     "no_context": "\u8fd8\u6ca1\u6709\u8bc6\u522b\u5230\u804a\u5929\u5185\u5bb9",
+     "regenerating": "\u6b63\u5728\u91cd\u65b0\u751f\u6210...",
+     "auto_on": "\u5df2\u5f00\u542f\u81ea\u52a8\u8bc6\u522b\u3002\u5207\u6362\u804a\u5929\u540e\u4f1a\u81ea\u52a8\u751f\u6210\u3002",
+     "auto_off": "\u5df2\u5173\u95ed\u81ea\u52a8\u8bc6\u522b\u3002\u8bf7\u624b\u52a8\u70b9\u51fb\u8bc6\u522b\u6309\u94ae\u3002",
+     "training_on": "\u5df2\u5f00\u542f\u8bad\u7ec3\u6a21\u5f0f\uff1a\u5c06\u6301\u7eed\u5b66\u4e60\u4e0a\u4e0b\u6587\u548c\u4f60\u53d1\u51fa\u7684\u56de\u590d\uff0c\u4e0d\u4f1a\u81ea\u52a8\u53d1\u9001\u3002",
+     "training_off": "\u5df2\u5173\u95ed\u8bad\u7ec3\u6a21\u5f0f\u3002",
+     "training_learned": "\u8bad\u7ec3\u6a21\u5f0f\u5df2\u5b66\u4e60\u5f53\u524d\u804a\u5929\u4e0a\u4e0b\u6587\u548c\u6211\u65b9\u56de\u590d\u3002",
+     "managed_on": "\u5df2\u5f00\u542f\u5168\u6258\u7ba1\uff1a\u751f\u6210\u540e\u4f1a\u5148\u5ba1\u6838\u8bed\u5883\uff0c\u518d\u81ea\u52a8\u53d1\u9001\u6700\u5408\u9002\u7684\u4e00\u6761\u3002",
+     "managed_off": "\u5df2\u5173\u95ed\u5168\u6258\u7ba1\u3002",
+     "auto_sending": "\u5168\u6258\u7ba1\u5ba1\u6838\u540e\u9009\u4e2d\uff1a{text}",
+     "managed_preflight_blocked": "全托管发送前复核未通过：{reason}",
++    "managed_vector_blocked": "向量索引未就绪，已关闭全托管自动发送；请修复索引后使用手动诊断。",
+     "api_failed_stop_send": "接口未生效，已停止全托管自动发送。请先检查 API Key、额度、模型名或 Base URL。",
+     "no_send_window": "没有可发送的聊天窗口",
+     "training_imported": "训练包已导入：{files} 个文件，{turns} 轮对话，写入 {examples} 条长期记忆样例。",
+ }
+ 
+ 
++@dataclass
++class StartupState:
++    settings: AppSettings
++    memory: StyleMemory
++    managed_mode: str
++    blocking_error: str = ""
++    error_type: type[Exception] | None = None
++
++
++def _blocked_startup_state(
++    settings: AppSettings,
++    memory: StyleMemory,
++    message: str,
++    error: Exception,
++) -> StartupState:
++    settings.managed_mode = "off"
++    settings.auto_recognize = False
++    settings.training_mode = False
++    return StartupState(
++        settings=settings,
++        memory=memory,
++        managed_mode="off",
++        blocking_error=message,
++        error_type=type(error),
++    )
++
++
++def load_startup_state_for_test() -> StartupState:
++    """Load startup persistence without replacing invalid formal files."""
++    settings = AppSettings()
++    memory = StyleMemory()
++    try:
++        settings.load()
++    except JSONDecodeError as error:
++        typed_error = JsonDataError(
++            settings.config_path,
++            [(settings.config_path, f"JSONDecodeError: {error.msg}")],
++        )
++        return _blocked_startup_state(
++            settings,
++            memory,
++            "配置读取失败，已关闭托管模式；请检查设置文件后使用手动诊断。",
++            typed_error,
++        )
++    except (SettingsValidationError, JsonDataError) as error:
++        return _blocked_startup_state(
++            settings,
++            memory,
++            "配置读取失败，已关闭托管模式；请检查设置文件后使用手动诊断。",
++            error,
++        )
++    try:
++        memory.load()
++    except JsonDataError as error:
++        return _blocked_startup_state(
++            settings,
++            memory,
++            "记忆读取失败，已关闭托管模式；请检查记忆文件后使用手动诊断。",
++            error,
++        )
++    except VectorIndexError as error:
++        return _blocked_startup_state(
++            settings,
++            memory,
++            "向量索引读取失败，已关闭托管模式；请修复索引后使用手动诊断。",
++            error,
++        )
++    return StartupState(
++        settings=settings,
++        memory=memory,
++        managed_mode=settings.managed_mode,
++    )
++
++
+ class WeChatStyleReplyAssistant:
+-    def __init__(self) -> None:
+-        self.settings = AppSettings().load()
+-        self.memory = StyleMemory().load()
++    def __init__(self, startup_state: StartupState | None = None) -> None:
++        state = startup_state or load_startup_state_for_test()
++        self.startup_state = state
++        self.startup_blocking_error = state.blocking_error
++        self.settings = state.settings
++        self.memory = state.memory
++        if self.startup_blocking_error:
++            self._install_blocking_startup_guards()
+         self.detector = WeChatWindowDetector()
+         self.ocr = ChatOCR(self.settings)
+         self.visible_analyzer = VisibleContentAnalyzer(self.settings)
+         self.engine = ReplyEngine(self.settings, self.memory)
+         self.sender = WeChatSender()
+         self.queue: Queue[tuple[str, object]] = Queue()
+         self.current_window: WeChatWindow | None = None
+         self.current_context = ""
+         self.current_hash = ""
+         self.last_capture = 0.0
+         self.processing = False
+         self.running = True
+         self.progress_steps: list[str] = []
+         self.last_auto_reply_signature = ""
+         self.pending_auto_reply_signature = ""
+@@ -188,32 +267,39 @@ class WeChatStyleReplyAssistant:
+                 "source_mode_changed": self._source_mode_changed,
+                 "regenerate": self._regenerate,
+                 "send": self._send,
+                 "import_training_zip": self._import_training_zip,
+                 "analyze_sop_training": self._analyze_sop_training,
+                 "analyze_current_sop_library": self._analyze_current_sop_library,
+                 "get_sop_document": self._get_sop_document,
+                 "get_sop_html_report": self._get_sop_html_report,
+                 "get_phrasebook_libraries": self._get_phrasebook_libraries,
+                 "get_phrasebook_examples": self._get_phrasebook_examples,
+                 "save_phrasebook_example": self._save_phrasebook_example,
+                 "delete_phrasebook_examples": self._delete_phrasebook_examples,
+                 "exit": self._exit,
+             },
+         )
++        if self.startup_blocking_error:
++            self.ui._set_managed_mode = self._blocked_managed_mode
+ 
+     def start(self) -> None:
++        if self.startup_blocking_error:
++            self.ui.set_status(self.startup_blocking_error)
++            self.ui.mainloop()
++            self.running = False
++            return
+         self.ui.set_status(MSG["waiting"] if self.settings.api_key else MSG["no_key"])
+         threading.Thread(target=self._monitor_loop, daemon=True).start()
+         self.ui.root.after(250, self._ui_loop)
+         # 首次使用群聊功能：用户名未填写 → 弹提示（UI 线程）
+         if not self.settings.wecom_account_name.strip():
+             self.ui.root.after(900, self._prompt_account_name)
+         self.ui.mainloop()
+         self.running = False
+ 
+     def _prompt_account_name(self) -> None:
+         """首次弹提示让用户填写当前账号用户名；填写后保存并回填输入框。"""
+         try:
+             import tkinter.simpledialog as simpledialog
+ 
+             name = simpledialog.askstring(
+@@ -520,30 +606,33 @@ class WeChatStyleReplyAssistant:
+         question = self.group_handler.extract_question(
+             self.group_handler.latest_other_message(context), account_name
+         )
+         sender_name = self.group_handler.extract_sender_name(context)
+         if not question.strip():
+             return
+         replies = self.engine.generate(question, "群聊")
+         if not replies:
+             self.queue.put(("status", f"群聊 @ 回复：未找到合适回答（问题：{question[:30]}）"))
+             return
+         final_reply = self.group_handler.build_reply(sender_name, replies[0])
+         self._send_group_reply(wechat, final_reply, question)
+ 
+     def _send_group_reply(self, wechat: WeChatWindow, text: str, question: str) -> None:
+         """群聊回复发送（后台线程，避免阻塞监控循环）。"""
++        if not self._managed_reply_readiness_allows_send():
++            return
++
+         def _do_send() -> None:
+             try:
+                 ok, message = self.sender.send(wechat, text)
+                 if ok:
+                     self.queue.put(("status", f"群聊 @ 回复已发送：{text[:40]}"))
+                 else:
+                     self.queue.put(("status", f"群聊回复发送失败：{message}"))
+             except Exception as exc:
+                 self.queue.put(("status", f"群聊回复发送异常：{exc}"))
+ 
+         threading.Thread(target=_do_send, daemon=True).start()
+ 
+     def _read_top_title(self, full_window_image) -> str:
+         """顶部标题栏 OCR（会话标题/系统号名称）。"""
+         try:
+@@ -992,89 +1081,146 @@ class WeChatStyleReplyAssistant:
+             raise ValueError("未找到要删除的话术，可能已被更新，请刷新后再试。")
+         self.memory.save()
+         self.memory.load()
+         self.engine = ReplyEngine(self.settings, self.memory)
+         return f"已删除 {removed} 条话术，已重建本地向量库。"
+ 
+     def _recognize_current(self) -> None:
+         wechat = self._target_wechat_window()
+         if not wechat:
+             self.ui.set_status(MSG["no_window"])
+             return
+         self.current_window = wechat
+         threading.Thread(target=lambda: self._process_window(wechat, force=True), daemon=True).start()
+ 
+     def _auto_changed(self, enabled: bool) -> None:
++        if getattr(self, "startup_blocking_error", ""):
++            self.settings.auto_recognize = False
++            self.settings.training_mode = False
++            auto_var = getattr(self.ui, "auto_var", None)
++            if auto_var is not None:
++                auto_var.set(False)
++            self.ui.set_status(self.startup_blocking_error)
++            return
+         self.current_hash = ""
+         self.last_capture = 0.0
+         self.ui.set_status(MSG["auto_on"] if enabled else MSG["auto_off"])
+         if enabled:
+             wechat = self._target_wechat_window()
+             if wechat:
+                 self.current_window = wechat
+                 threading.Thread(target=lambda: self._process_window(wechat, force=True), daemon=True).start()
+ 
+     def _training_changed(self, enabled: bool) -> None:
++        if getattr(self, "startup_blocking_error", ""):
++            self.settings.auto_recognize = False
++            self.settings.training_mode = False
++            training_var = getattr(self.ui, "training_var", None)
++            if training_var is not None:
++                training_var.set(False)
++            self.ui.set_status(self.startup_blocking_error)
++            return
+         self.settings.training_mode = enabled
+         self.settings.save()
+         self.current_hash = ""
+         self.last_capture = 0.0
+         self.ui.set_status(MSG["training_on"] if enabled else MSG["training_off"])
+         if enabled:
+             wechat = self._target_wechat_window()
+             if wechat:
+                 self.current_window = wechat
+                 threading.Thread(target=lambda: self._process_window(wechat, force=False), daemon=True).start()
+ 
+     def _managed_changed(self, enabled: bool) -> None:
++        if getattr(self, "startup_blocking_error", ""):
++            self._blocked_managed_mode("off")
++            return
+         self.settings.managed_auto_reply = enabled
+         if enabled:
+             self.settings.auto_recognize = True
+             self.last_capture = 0.0
+             self.managed_waiting_for_own_echo = False
+             self.managed_last_handled_turn_messages = []
+             self.managed_last_handled_turn_key = ""
+             self.managed_last_sent_at = 0.0
+             self.managed_last_handled_partner = ""
+         self.settings.save()
+         self.ui.set_status(MSG["managed_on"] if enabled else MSG["managed_off"])
+         if enabled:
+             self.current_hash = ""
+             wechat = self._target_wechat_window()
+             if wechat:
+                 self.current_window = wechat
+                 threading.Thread(target=lambda: self._process_window(wechat, force=True), daemon=True).start()
+             else:
+                 self.ui.set_status(MSG["no_window"])
+ 
++    def _blocked_managed_mode(self, _mode: str, *, persist: bool = True) -> None:
++        del persist
++        self.settings.managed_mode = "off"
++        managed_var = getattr(self.ui, "managed_var", None)
++        if managed_var is not None:
++            managed_var.set("off")
++        self.ui.set_status(self.startup_blocking_error)
++
++    def _install_blocking_startup_guards(self) -> None:
++        self.settings.managed_mode = "off"
++        self.settings.auto_recognize = False
++        self.settings.training_mode = False
++        self.settings.save = self._blocked_settings_save
++
++    def _blocked_settings_save(self) -> None:
++        self.settings.managed_mode = "off"
++        self.settings.auto_recognize = False
++        self.settings.training_mode = False
++
++    def _managed_reply_readiness_allows_send(self) -> bool:
++        if getattr(self, "startup_blocking_error", ""):
++            self.settings.managed_mode = "off"
++            self.queue.put(("status", self.startup_blocking_error))
++            return False
++        memory = getattr(self, "memory", None)
++        if memory is None:
++            return True
++        try:
++            memory.assert_ready_for_managed_reply()
++        except VectorIndexError:
++            self.settings.managed_mode = "off"
++            _diag("[send-block] vector_index_not_ready")
++            self.queue.put(("status", MSG["managed_vector_blocked"]))
++            return False
++        return True
++
+     def _source_mode_changed(self, mode: str) -> None:
+         self.settings.reply_source_mode = mode if mode in {"model", "memory", "model_memory"} else "model_memory"
+         self.settings.save()
+         names = {"model": "大模型", "memory": "话术库", "model_memory": "大模型+话术库"}
+         self.ui.set_status(f"回复来源已切换为：{names.get(self.settings.reply_source_mode, '大模型+话术库')}")
+ 
+     def _target_wechat_window(self) -> WeChatWindow | None:
+         return _choose_target_wechat_window(
+             self.detector.foreground_chat(),
+             self.detector.any_chat_window(),
+             self.current_window,
+         )
+ 
+     def _maybe_managed_send(self, context: str, replies: list[str]) -> None:
+         if not self.settings.managed_auto_reply or not replies or not self.current_window:
+             _diag("[send-skip] 前置条件不满足", "managed=", self.settings.managed_auto_reply, "replies=", len(replies), "window=", self.current_window is not None)
+             return
++        if not self._managed_reply_readiness_allows_send():
++            return
+         send_window = self.current_window
+         if _managed_api_failure_blocks_send(self.settings, self.engine):
+             _diag("[send-block] api_failure_blocks_send", "last_error=", self.engine.last_error, "last_source=", self.engine.last_source)
+             self.queue.put(("status", MSG["api_failed_stop_send"]))
+             return
+         unreplied_messages = _current_unreplied_turn(context)
+         latest_role, latest_text = latest_meaningful_message(context)
+         if latest_role != "对方" and not unreplied_messages:
+             _diag("[send-block] 最后消息非对方且无未回复", "latest_role=", latest_role, "unreplied=", unreplied_messages)
+             self.queue.put(("status", MSG["wait_other"]))
+             return
+         if not unreplied_messages:
+             _diag("[send-block] 无未回复消息", "context=", context[:120])
+             self.queue.put(("status", MSG["wait_other"]))
+             return
+@@ -1244,30 +1390,32 @@ class WeChatStyleReplyAssistant:
+             self.queue.put(("status", message))
+ 
+         threading.Thread(target=work, daemon=True).start()
+         self.ui.root.after(700, self.ui.root.deiconify)
+ 
+     def _exit(self) -> None:
+         self.running = False
+         self.ui.close()
+ 
+     def _progress(self, text: str) -> None:
+         self.progress_steps.append(text)
+         self.queue.put(("progress", text))
+ 
+ 
+ def main() -> None:
++    if "--debug-session" in sys.argv:
++        enable_session_debug()
+     if "--self-check" in sys.argv:
+         from self_check import run_self_check
+ 
+         run_self_check()
+         return
+     if "--api-check" in sys.argv:
+         from self_check import run_api_check
+ 
+         run_api_check()
+         return
+     WeChatStyleReplyAssistant().start()
+ 
+ 
+ def _current_unreplied_turn(context: str) -> list[str]:
+     messages = unreplied_other_messages(context)
+
+===== DIFF: tests\test_persistence.py =====
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-5-baseline\\tests__test_persistence.py" "b/tests\\test_persistence.py"
+index bfed77a..454473d 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-5-baseline\\tests__test_persistence.py"	
++++ "b/tests\\test_persistence.py"
+@@ -1,49 +1,602 @@
+ from collections import Counter
+ import hashlib
++import importlib.util
+ import json
++import logging.handlers
+ import math
+ import os
++import subprocess
+ import sys
+ from pathlib import Path
+ 
+ import pytest
+ 
+ import app_paths
+ from atomic_json import JsonDataError, atomic_write_json, load_json
+ import memory as memory_module
+ from memory import StyleMemory
+ import settings as settings_module
+ 
+ 
++def _formal_runtime_file_snapshot(root):
++    root = Path(root)
++    if not root.exists():
++        return {}
++    snapshot = {}
++    for path in root.rglob("*"):
++        if not path.is_file():
++            continue
++        relative = path.relative_to(root)
++        lowered = str(relative).casefold()
++        if not any(token in lowered for token in ("memory", "settings", "vector", "log")):
++            continue
++        stat = path.stat()
++        snapshot[str(relative)] = (
++            hashlib.sha256(path.read_bytes()).hexdigest(),
++            stat.st_mtime_ns,
++        )
++    return snapshot
++
++
++@pytest.fixture(autouse=True)
++def isolate_data_root_and_preserve_formal_files(tmp_path, monkeypatch):
++    formal_root = Path(os.environ.get("APPDATA", "")) / app_paths.APP_NAME
++    before = _formal_runtime_file_snapshot(formal_root)
++    monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(tmp_path / "isolated-app-data"))
++    yield
++    after = _formal_runtime_file_snapshot(formal_root)
++    assert after == before
++
++
+ class FakeCredentialStore:
+     def __init__(self, initial=None, *, save_error=None, load_error=None):
+         self.values = dict(initial or {})
+         self.save_error = save_error
+         self.load_error = load_error
+ 
+     def load(self):
+         if self.load_error is not None:
+             raise self.load_error
+         return dict(self.values)
+ 
+     def save(self, keys):
+         if self.save_error is not None:
+             raise self.save_error
+         self.values = dict(keys)
+ 
+ 
++def test_runtime_event_redacts_private_values_and_keeps_audit_fields(tmp_path):
++    assert importlib.util.find_spec("runtime_logging") is not None
++    from runtime_logging import build_runtime_logger
++
++    logger = build_runtime_logger(tmp_path)
++    logger.info(
++        "managed-send",
++        extra={
++            "event_data": {
++                "chat_name": "张三",
++                "message": "身份证号码",
++                "reply": "私密回复",
++                "context": "完整上下文",
++                "api_key": "secret-key",
++                "Authorization": "Bearer secret-token",
++                "nested": {
++                    "API_KEY": "nested-secret",
++                    "authorization": "nested-token",
++                },
++                "record_id": "r1",
++                "score": 91,
++                "org_scope": "municipal",
++                "state": "blocked",
++                "error_category": "vector",
++                "event": "managed-send",
++                "timestamp": "2026-08-12T00:00:00+00:00",
++            }
++        },
++    )
++    line = (tmp_path / "runtime.log").read_text(encoding="utf-8").strip()
++    parsed = json.loads(line)
++
++    for private_value in (
++        "张三",
++        "身份证号码",
++        "私密回复",
++        "完整上下文",
++        "secret-key",
++        "secret-token",
++        "nested-secret",
++        "nested-token",
++    ):
++        assert private_value not in line
++    assert parsed == {
++        "error_category": "vector",
++        "event": "managed-send",
++        "org_scope": "municipal",
++        "record_id": "r1",
++        "score": 91,
++        "state": "blocked",
++        "timestamp": "2026-08-12T00:00:00+00:00",
++    }
++
++
++def test_runtime_event_recursively_drops_nested_private_and_credential_key_variants(tmp_path):
++    from runtime_logging import build_runtime_logger
++
++    logger = build_runtime_logger(tmp_path)
++    logger.info(
++        "nested-redaction",
++        extra={
++            "event_data": {
++                "event": "nested-redaction",
++                "state": {
++                    "safe": "kept",
++                    "ApiKey": "secret-one",
++                    "provider_api_keys": "secret-two",
++                    "proxy-Authorization": "secret-three",
++                    "message": "private-message",
++                    "message_text": "private-message-alias",
++                    "customer_chat_name": "private-name-alias",
++                    "reply_content": "private-reply-alias",
++                    "request_context": "private-context-alias",
++                    "nested": [
++                        "unkeyed-private",
++                        {
++                            "AUTHORIZATION": "secret-four",
++                            "chat_name": "private-name",
++                            "safe_id": "kept-id",
++                        }
++                    ],
++                },
++            }
++        },
++    )
++    text = (tmp_path / "runtime.log").read_text(encoding="utf-8")
++    parsed = json.loads(text)
++
++    for forbidden in (
++        "secret-one",
++        "secret-two",
++        "secret-three",
++        "secret-four",
++        "private-message",
++        "private-message-alias",
++        "private-name",
++        "private-name-alias",
++        "private-reply-alias",
++        "private-context-alias",
++        "unkeyed-private",
++        "apikey",
++        "authorization",
++    ):
++        assert forbidden not in text.casefold()
++    assert parsed["state"] == {"safe": "kept", "nested": [{"safe_id": "kept-id"}]}
++
++
++def test_runtime_logger_rotates_at_exact_limit_and_writes_parseable_jsonl(tmp_path):
++    from runtime_logging import build_runtime_logger
++
++    logger = build_runtime_logger(tmp_path)
++    handlers = [handler for handler in logger.handlers if isinstance(handler, logging.handlers.RotatingFileHandler)]
++    assert len(handlers) == 1
++    handler = handlers[0]
++    assert handler.maxBytes == 2_000_000
++    assert handler.backupCount == 5
++
++    for index in range(5):
++        logger.info(
++            "rotation-check",
++            extra={
++                "event_data": {
++                    "event": "rotation-check",
++                    "record_id": f"r{index}",
++                    "state": "x" * 700_000,
++                }
++            },
++        )
++    handler.flush()
++
++    log_files = sorted(tmp_path.glob("runtime.log*"))
++    assert 2 <= len(log_files) <= 6
++    parsed_lines = []
++    for path in log_files:
++        for line in path.read_text(encoding="utf-8").splitlines():
++            parsed_lines.append(json.loads(line))
++    assert {item["record_id"] for item in parsed_lines} == {"r0", "r1", "r2", "r3", "r4"}
++    assert all(item.get("timestamp") for item in parsed_lines)
++
++
++def test_runtime_logger_does_not_duplicate_handler_for_same_log_dir(tmp_path):
++    from runtime_logging import build_runtime_logger
++
++    first = build_runtime_logger(tmp_path)
++    second = build_runtime_logger(tmp_path)
++
++    assert first is second
++    handlers = [handler for handler in first.handlers if isinstance(handler, logging.handlers.RotatingFileHandler)]
++    assert len(handlers) == 1
++
++
++def test_importing_main_does_not_create_runtime_log(tmp_path):
++    isolated_root = tmp_path / "subprocess-app-data"
++    isolated_appdata = tmp_path / "subprocess-formal-appdata"
++    environment = os.environ.copy()
++    environment["WECHAT_ASSISTANT_DATA_DIR"] = str(isolated_root)
++    environment["APPDATA"] = str(isolated_appdata)
++
++    result = subprocess.run(
++        [sys.executable, "-c", "import main"],
++        cwd=Path(__file__).resolve().parents[1],
++        env=environment,
++        capture_output=True,
++        text=True,
++        timeout=30,
++    )
++
++    assert result.returncode == 0, result.stderr
++    assert not (isolated_root / "managed_send.log").exists()
++    assert not (isolated_root / "logs" / "runtime.log").exists()
++    assert not (isolated_appdata / app_paths.APP_NAME / "managed_send.log").exists()
++
++
++def test_one_session_debug_hashes_private_content_and_never_logs_credentials(tmp_path):
++    from runtime_logging import build_runtime_logger, enable_session_debug
++
++    enable_session_debug()
++    try:
++        logger = build_runtime_logger(tmp_path)
++        logger.info(
++            "debug-check",
++            extra={
++                "event_data": {
++                    "event": "debug-check",
++                    "chat_name": "张三",
++                    "message": "原消息",
++                    "reply": "原回复",
++                    "context": "原上下文",
++                    "ApiKey": "top-secret",
++                    "nested": {"AUTHORIZATION": "Bearer nested-secret"},
++                }
++            },
++        )
++    finally:
++        enable_session_debug(False)
++
++    first = json.loads((tmp_path / "runtime.log").read_text(encoding="utf-8").splitlines()[0])
++    for field in ("chat_name", "message", "reply", "context"):
++        assert first[field].startswith("sha256:")
++        assert len(first[field]) == len("sha256:") + 64
++    serialized = json.dumps(first, ensure_ascii=False).casefold()
++    for forbidden in ("张三", "原消息", "原回复", "原上下文", "top-secret", "nested-secret", "apikey", "authorization"):
++        assert forbidden.casefold() not in serialized
++    assert (tmp_path / ".runtime-salt").read_bytes()
++
++    logger.info(
++        "debug-disabled",
++        extra={"event_data": {"event": "debug-disabled", "message": "second-private"}},
++    )
++    second = json.loads((tmp_path / "runtime.log").read_text(encoding="utf-8").splitlines()[1])
++    assert second["event"] == "debug-disabled"
++    assert second["timestamp"]
++    assert set(second) == {"event", "timestamp"}
++    assert not (tmp_path / "session-debug-enabled").exists()
++
++
++@pytest.mark.parametrize(
++    ("settings_payload", "expected_error_type"),
++    [
++        (b"broken-json", JsonDataError),
++        (json.dumps({"config_version": 2, "managed_mode": "invalid"}).encode("utf-8"), settings_module.SettingsValidationError),
++    ],
++)
++def test_settings_typed_startup_error_returns_visible_managed_off_state_without_replacement(
++    tmp_path,
++    monkeypatch,
++    settings_payload,
++    expected_error_type,
++):
++    from main import load_startup_state_for_test
++
++    data_root = tmp_path / "startup-settings"
++    monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(data_root))
++    data_root.mkdir(parents=True)
++    settings_path = data_root / "settings.json"
++    settings_path.write_bytes(settings_payload)
++
++    state = load_startup_state_for_test()
++
++    assert state.managed_mode == "off"
++    assert state.settings.managed_mode == "off"
++    assert state.settings.managed_auto_reply is False
++    assert "配置" in state.blocking_error
++    assert "手动诊断" in state.blocking_error
++    assert state.error_type is expected_error_type
++    assert settings_path.read_bytes() == settings_payload
++    assert not (data_root / "memory.json").exists()
++    assert not (data_root / "vector_memory.json").exists()
++
++
++def test_memory_json_startup_error_returns_visible_managed_off_state_without_replacement(tmp_path, monkeypatch):
++    from main import load_startup_state_for_test
++
++    data_root = tmp_path / "startup-memory"
++    monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(data_root))
++    data_root.mkdir(parents=True)
++    settings_payload = {"config_version": 2, "managed_mode": "full"}
++    (data_root / "settings.json").write_text(json.dumps(settings_payload), encoding="utf-8")
++    memory_path = data_root / "memory.json"
++    memory_payload = b"broken-memory"
++    memory_path.write_bytes(memory_payload)
++
++    state = load_startup_state_for_test()
++
++    assert state.managed_mode == "off"
++    assert state.settings.managed_mode == "off"
++    assert state.settings.managed_auto_reply is False
++    assert "记忆" in state.blocking_error
++    assert "手动诊断" in state.blocking_error
++    assert state.error_type is JsonDataError
++    assert memory_path.read_bytes() == memory_payload
++    assert not (data_root / "vector_memory.json").exists()
++
++
++def test_vector_startup_error_returns_visible_managed_off_state_without_replacement(tmp_path, monkeypatch):
++    from main import load_startup_state_for_test
++    from memory import VectorIndexError
++
++    data_root = tmp_path / "startup-vector"
++    monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(data_root))
++    data_root.mkdir(parents=True)
++    (data_root / "settings.json").write_text(
++        json.dumps({"config_version": 2, "managed_mode": "full"}),
++        encoding="utf-8",
++    )
++    memory_path = data_root / "memory.json"
++    memory_payload = json.dumps(_valid_memory([_valid_example(1)]), ensure_ascii=False).encode("utf-8")
++    memory_path.write_bytes(memory_payload)
++    real_atomic_write_json = memory_module.atomic_write_json
++
++    def fail_vector_write(destination, data, validator, backup_count=5):
++        if Path(destination) == data_root / "vector_memory.json":
++            raise OSError("simulated vector failure")
++        return real_atomic_write_json(destination, data, validator, backup_count)
++
++    monkeypatch.setattr(memory_module, "atomic_write_json", fail_vector_write)
++
++    state = load_startup_state_for_test()
++
++    assert state.managed_mode == "off"
++    assert state.settings.managed_mode == "off"
++    assert state.settings.managed_auto_reply is False
++    assert "向量" in state.blocking_error
++    assert "手动诊断" in state.blocking_error
++    assert state.error_type is VectorIndexError
++    assert memory_path.read_bytes() == memory_payload
++    assert not (data_root / "vector_memory.json").exists()
++
++
++def test_blocking_startup_enters_manual_ui_without_starting_background_monitor(monkeypatch):
++    import main as main_module
++
++    class ManualDiagnosticUI:
++        def __init__(self):
++            self.statuses = []
++            self.mainloop_calls = 0
++
++        def set_status(self, text):
++            self.statuses.append(text)
++
++        def mainloop(self):
++            self.mainloop_calls += 1
++
++    app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
++    app.settings = settings_module.AppSettings()
++    app.startup_blocking_error = "配置读取失败，已关闭托管模式；请使用手动诊断。"
++    app.ui = ManualDiagnosticUI()
++    app.running = True
++
++    def fail_if_background_monitor_starts(*args, **kwargs):
++        raise AssertionError("blocking startup must not start the background monitor")
++
++    monkeypatch.setattr(main_module.threading, "Thread", fail_if_background_monitor_starts)
++
++    app.start()
++
++    assert app.ui.statuses == [app.startup_blocking_error]
++    assert app.ui.mainloop_calls == 1
++    assert app.running is False
++
++
++def test_managed_send_blocks_before_sender_when_vector_index_is_not_ready(tmp_path, monkeypatch):
++    import main as main_module
++
++    class RecordingQueue:
++        def __init__(self):
++            self.items = []
++
++        def put(self, item):
++            self.items.append(item)
++
++    class RecordingSender:
++        def __init__(self):
++            self.calls = []
++
++        def send(self, window, text):
++            self.calls.append((window, text))
++            return True, "sent"
++
++    class InlineThread:
++        def __init__(self, target, **kwargs):
++            self.target = target
++
++        def start(self):
++            self.target()
++
++    settings = settings_module.AppSettings()
++    settings.managed_mode = "full"
++    settings.auto_reply_delay_seconds = 0
++    memory = StyleMemory(path=tmp_path / "memory.json")
++    memory.vector_ready = False
++    memory.last_vector_error = "vector index is invalid"
++    window = type("Window", (), {"title": "customer"})()
++    app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
++    app.settings = settings
++    app.memory = memory
++    app.current_window = window
++    app.current_context = "[对方] 请问如何办理"
++    app.engine = type("Engine", (), {"last_error": "", "last_source": "knowledge"})()
++    app.sender = RecordingSender()
++    app.queue = RecordingQueue()
++    app.detector = type("Detector", (), {"foreground_chat": lambda self: window})()
++    app._managed_preflight_context = lambda current_window: app.current_context
++    app.last_auto_reply_signature = ""
++    app.pending_auto_reply_signature = ""
++    app.handled_auto_reply_signatures = set()
++    app.managed_send_inflight = False
++    app.managed_waiting_for_own_echo = False
++    app.managed_last_handled_turn_messages = []
++    app.managed_last_handled_turn_key = ""
++    app.managed_last_handled_partner = ""
++    monkeypatch.setattr(main_module.threading, "Thread", InlineThread)
++
++    app._maybe_managed_send(app.current_context, ["请到服务窗口办理"])
++
++    assert app.sender.calls == []
++    assert app.settings.managed_mode == "off"
++    assert app.settings.managed_auto_reply is False
++    status_messages = [str(item[1]) for item in app.queue.items if item[0] == "status"]
++    assert any("向量" in message and "关闭" in message for message in status_messages)
++
++
++def test_group_managed_send_blocks_before_sender_when_vector_index_is_not_ready(tmp_path, monkeypatch):
++    import main as main_module
++
++    class InlineThread:
++        def __init__(self, target, **kwargs):
++            self.target = target
++
++        def start(self):
++            self.target()
++
++    settings = settings_module.AppSettings()
++    settings.managed_mode = "full"
++    memory = StyleMemory(path=tmp_path / "memory.json")
++    memory.vector_ready = False
++    memory.last_vector_error = "vector index is invalid"
++    app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
++    app.settings = settings
++    app.memory = memory
++    app.startup_blocking_error = ""
++    app.sender = type(
++        "Sender",
++        (),
++        {
++            "calls": [],
++            "send": lambda self, window, text: self.calls.append((window, text)) or (True, "sent"),
++        },
++    )()
++    app.queue = type("Queue", (), {"items": [], "put": lambda self, item: self.items.append(item)})()
++    monkeypatch.setattr(main_module.threading, "Thread", InlineThread)
++
++    app._send_group_reply(type("Window", (), {})(), "群聊回复", "群聊问题")
++
++    assert app.sender.calls == []
++    assert app.settings.managed_mode == "off"
++    status_messages = [str(item[1]) for item in app.queue.items if item[0] == "status"]
++    assert any("向量" in message and "关闭" in message for message in status_messages)
++
++
++def test_blocking_startup_rejects_managed_callback_without_overwriting_corrupt_settings_or_starting_thread(
++    tmp_path,
++    monkeypatch,
++):
++    import main as main_module
++
++    path = tmp_path / "settings.json"
++    original = b"broken-settings"
++    path.write_bytes(original)
++    settings = settings_module.AppSettings(config_path=path, credential_store=FakeCredentialStore())
++    app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
++    app.settings = settings
++    app.startup_blocking_error = "配置读取失败，已关闭托管模式；请使用手动诊断。"
++    app.ui = type("UI", (), {"statuses": [], "set_status": lambda self, text: self.statuses.append(text)})()
++    app._target_wechat_window = lambda: (_ for _ in ()).throw(
++        AssertionError("blocking startup must not inspect a send target")
++    )
++
++    def fail_if_thread_starts(*args, **kwargs):
++        raise AssertionError("blocking startup must not start a managed thread")
++
++    monkeypatch.setattr(main_module.threading, "Thread", fail_if_thread_starts)
++
++    app._managed_changed(True)
++
++    assert path.read_bytes() == original
++    assert settings.managed_mode == "off"
++    assert settings.managed_auto_reply is False
++    assert app.ui.statuses == [app.startup_blocking_error]
++
++
++@pytest.mark.parametrize("callback_name", ["_auto_changed", "_training_changed"])
++def test_blocking_startup_rejects_auto_and_training_ui_save_before_callback(
++    tmp_path,
++    monkeypatch,
++    callback_name,
++):
++    import main as main_module
++
++    path = tmp_path / "settings.json"
++    original = b"broken-settings"
++    path.write_bytes(original)
++    settings = settings_module.AppSettings(config_path=path, credential_store=FakeCredentialStore())
++    app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
++    app.settings = settings
++    app.startup_blocking_error = "配置读取失败，已关闭托管模式；请使用手动诊断。"
++    app.ui = type(
++        "UI",
++        (),
++        {
++            "statuses": [],
++            "set_status": lambda self, text: self.statuses.append(text),
++            "auto_var": type("Var", (), {"set": lambda self, value: setattr(self, "value", value)})(),
++            "training_var": type("Var", (), {"set": lambda self, value: setattr(self, "value", value)})(),
++        },
++    )()
++    app._target_wechat_window = lambda: (_ for _ in ()).throw(
++        AssertionError("blocking startup must not inspect a send target")
++    )
++
++    def fail_if_thread_starts(*args, **kwargs):
++        raise AssertionError("blocking startup must not start an automatic thread")
++
++    monkeypatch.setattr(main_module.threading, "Thread", fail_if_thread_starts)
++    app._install_blocking_startup_guards()
++
++    if callback_name == "_auto_changed":
++        settings.auto_recognize = True
++    else:
++        settings.training_mode = True
++    settings.save()
++    getattr(app, callback_name)(True)
++
++    assert path.read_bytes() == original
++    assert settings.managed_mode == "off"
++    assert settings.auto_recognize is False
++    assert settings.training_mode is False
++    assert app.ui.statuses == [app.startup_blocking_error]
++
++
+ def test_source_and_frozen_use_same_explicit_data_root(tmp_path, monkeypatch):
+     monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(tmp_path))
+     assert app_paths.config_path() == tmp_path / "settings.json"
+     assert app_paths.memory_path() == tmp_path / "memory.json"
+     assert app_paths.vector_path() == tmp_path / "vector_memory.json"
+ 
+ 
+ def test_default_root_is_appdata_even_when_frozen(tmp_path, monkeypatch):
+     monkeypatch.delenv("WECHAT_ASSISTANT_DATA_DIR", raising=False)
+     monkeypatch.setenv("APPDATA", str(tmp_path))
+     monkeypatch.setattr(sys, "frozen", True, raising=False)
+     assert app_paths.data_dir() == tmp_path / "WeChatStyleReplyAssistant"
+ 
+ 
+ def _require_examples_dict(value):
+
+===== PHASE HASH MANIFEST =====
+{
+  "algorithm": "sha256",
+  "files": {
+    "app_paths.py": "f8f5ff09720facc8b5384d302ae1f6a9083042a573cea5ecbde2060d1a530440",
+    "atomic_json.py": "7aa66d59f228bcfe404c471a3f700aa06b53889068a944b686059c8b70874e1b",
+    "secure_store.py": "5dd70dcd1d5c5b33f4622687cc9862102a8cf5bba25c12b8f4d3fcd848d49bba",
+    "runtime_logging.py": "4dc46b7c95ca99a141198c9d8bbb2758e4fb815d585fd572efe2855469d470ca",
+    "settings.py": "3ff501fa9c77c396636e59b4e402c6f3b3faad414e2118e1baf846fb27886ae3",
+    "memory.py": "3eb04ad35be57b66a961013889cc20586e480f7dbc3fe99848b712dd7b7a4c6b",
+    "float_ui.py": "fdbc5362b06f2d4ecdda11d6790fd9b2109ca947c9740dc438538b3f2a68e5bb",
+    "main.py": "fe2f8c847e75ffc1d98381449cbc31fa6731bef69e92d2ba1d58caf298bf7554"
+  }
+}
+
+===== JUNIT HASH =====
+
+
+Algorithm : SHA256
+Hash      : E735C12D7BD10EEE4945E00A2FE069920A2F15A879F7A10DE301AD3D48F43F4E
+Path      : D:\Vibe C\客服\wechat--main\artifacts\formal-hardening\2026-08-12\phase-01-persistence.xml
+
+
+
+

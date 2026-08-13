@@ -1,0 +1,60 @@
+{
+  "version": "wecom_5.0.9.6060_calibration_v2",
+  "status": "已按 2026-08-07 真实截图（986x650）校准：左侧工具栏列约 0~75px，会话列表约 75~295px，聊天区 300px+（浅色主题）",
+  "conversation_list_area": {
+    "x_left": 0.08,
+    "x_right": 0.30,
+    "y_top": 0.12,
+    "y_bottom": 1.0,
+    "note": "会话列表区从工具栏列右侧起（x 8%~30%）：最左窄列是消息/邮件/文档工具栏（含红点角标，必须排除），其右侧才是会话列表；顶部 12% 起为会话行"
+  },
+  "top_title_area": {
+    "x_left": 0.29,
+    "x_right": 1.0,
+    "y_top": 0.0,
+    "y_bottom": 0.10,
+    "note": "顶部标题栏区（聊天区裁剪 y 从 10% 起，标题栏在 0~10%）"
+  },
+  "avatar_area": {
+    "x_left": 0.30,
+    "x_right": 0.44,
+    "y_top": 0.012,
+    "y_bottom": 0.085,
+    "note": "标题栏内头像区域（左侧标题文字前），以标题栏左侧 30%~44% 区域"
+  },
+  "red_dot_rgb": {
+    "r_min": 230,
+    "g_max": 90,
+    "b_max": 90,
+    "min_diameter_px": 5,
+    "max_diameter_px": 16,
+    "note": "红点像素特征（文档给定 R>230, G<90, B<90），直径范围按典型会话列表红点"
+  },
+  "avatar_grid": {
+    "grid": 3,
+    "boundary_jump_min": 18,
+    "note": "3x3 子块主色边界差异阈值（0~255 每通道平均差）；九宫格跳变 >= 阈值，单头像连续渐变 < 阈值。待实测样本校准"
+  },
+  "click_target": {
+    "avatar_x_ratio": 0.18,
+    "note": "点击会话行头像区（x=列表区内 18% 处，约工具栏右缘+25px，落在会话行头像），不点红点本身"
+  },
+  "timing": {
+    "self_stable_seconds": 2.0,
+    "scan_interval_seconds": 2.0,
+    "switch_wait_seconds": 1.2,
+    "user_typing_seconds": 1.5,
+    "fail_pause_seconds": 300,
+    "max_consecutive_failures": 3,
+    "retry_per_failure": 1
+  },
+  "system_whitelist": [
+    "客户联系",
+    "邮件提醒",
+    "行业资讯",
+    "企业微信团队",
+    "腾讯云企业服务",
+    "管理企业"
+  ],
+  "system_keywords": ["团队", "客服", "服务", "提醒", "管理", "联系"]
+}

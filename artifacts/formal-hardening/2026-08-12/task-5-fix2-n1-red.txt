@@ -1,0 +1,45 @@
+﻿COMMAND=.venv\Scripts\python.exe -m pytest tests/test_persistence.py::test_all_production_diag_calls_use_explicit_enum_codes_and_remain_distinguishable -q
+EXIT_CODE=1
+F                                                                        [100%]
+================================== FAILURES ===================================
+_ test_all_production_diag_calls_use_explicit_enum_codes_and_remain_distinguishable _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-109/test_all_production_diag_calls0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D77C671C10>
+
+    def test_all_production_diag_calls_use_explicit_enum_codes_and_remain_distinguishable(tmp_path, monkeypatch):
+        import main as main_module
+        from runtime_logging import build_runtime_logger
+    
+        expected_codes = {
+            "vector_index_not_ready",
+            "managed_preconditions_not_met",
+            "api_failure",
+            "latest_message_not_partner",
+            "no_unreplied_message",
+            "turn_already_handled",
+            "send_already_pending",
+            "no_candidate_selected",
+            "send_queued",
+            "preflight_checked",
+            "preflight_rejected",
+            "send_result",
+        }
+        tree = ast.parse(Path(main_module.__file__).read_text(encoding="utf-8"))
+        diag_calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_diag"
+        ]
+        assert diag_calls
+>       assert all(
+            len(call.args) == 1 and isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str)
+            for call in diag_calls
+        )
+E       assert False
+E        +  where False = all(<generator object test_all_production_diag_calls_use_explicit_enum_codes_and_remain_distinguishable.<locals>.<genexpr> at 0x000001D77C746A40>)
+
+tests\test_persistence.py:392: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_persistence.py::test_all_production_diag_calls_use_explicit_enum_codes_and_remain_distinguishable
+1 failed in 1.43s

@@ -1,0 +1,232 @@
+﻿Task 2 non-Git review package
+Plan task: Atomic JSON and Five-Version Recovery
+Report: 
+D:\Vibe C\客服\wechat--main\.superpowers\sdd\2026-08-12-01-persistence-and-settings-hardening\task-2-report.md
+
+
+===== DIFF: atomic_json.py =====
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-2-baseline\\__empty__" b/atomic_json.py
+index e69de29..ccdc180 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-2-baseline\\__empty__"	
++++ b/atomic_json.py
+@@ -0,0 +1,95 @@
++"""Validated JSON persistence with recoverable backups."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++import json
++import os
++from pathlib import Path
++import shutil
++import tempfile
++from typing import Callable
++
++
++JsonValidator = Callable[[object], None]
++
++
++class JsonDataError(RuntimeError):
++    """Raised when no valid JSON candidate is available."""
++
++    def __init__(self, path: Path, reasons: list[tuple[Path, str]]):
++        self.path = path
++        self.reasons = tuple(reasons)
++        details = "; ".join(f"{candidate}: {reason}" for candidate, reason in reasons)
++        super().__init__(f"No valid JSON data for {path}: {details}")
++
++
++@dataclass(frozen=True)
++class JsonLoadResult:
++    data: dict[str, object]
++    source: Path
++    recovered: bool
++
++
++def _read_valid_json(path: Path, validator: JsonValidator) -> dict[str, object]:
++    value = json.loads(path.read_text(encoding="utf-8"))
++    if not isinstance(value, dict):
++        raise ValueError("JSON root must be an object")
++    validator(value)
++    return value
++
++
++def load_json(path: Path, validator: JsonValidator) -> JsonLoadResult:
++    """Load the primary JSON file or the newest valid backup."""
++    path = Path(path)
++    candidates = [path, *(path.with_name(f"{path.name}.bak.{index}") for index in range(1, 6))]
++    reasons: list[tuple[Path, str]] = []
++    for candidate in candidates:
++        try:
++            return JsonLoadResult(
++                data=_read_valid_json(candidate, validator),
++                source=candidate,
++                recovered=candidate != path,
++            )
++        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
++            reasons.append((candidate, f"{type(error).__name__}: {error}"))
++    raise JsonDataError(path, reasons)
++
++
++def _rotate_backups(path: Path, validator: JsonValidator, backup_count: int) -> None:
++    if backup_count <= 0:
++        return
++    for index in range(backup_count, 1, -1):
++        older = path.with_name(f"{path.name}.bak.{index - 1}")
++        newer = path.with_name(f"{path.name}.bak.{index}")
++        if older.exists():
++            os.replace(older, newer)
++    try:
++        _read_valid_json(path, validator)
++    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
++        return
++    shutil.copy2(path, path.with_name(f"{path.name}.bak.1"))
++
++
++def atomic_write_json(
++    path: Path,
++    data: dict[str, object],
++    validator: JsonValidator,
++    backup_count: int = 5,
++) -> None:
++    """Validate, durably stage, and atomically replace a JSON document."""
++    validator(data)
++    path = Path(path)
++    path.parent.mkdir(parents=True, exist_ok=True)
++    payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
++    descriptor, temp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
++    try:
++        with os.fdopen(descriptor, "wb") as stream:
++            stream.write(payload)
++            stream.flush()
++            os.fsync(stream.fileno())
++        _rotate_backups(path, validator, backup_count)
++        os.replace(temp_name, path)
++    finally:
++        if os.path.exists(temp_name):
++            os.unlink(temp_name)
+
+===== DIFF: tests\test_persistence.py =====
+diff --git "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-2-baseline\\test_persistence.py" "b/tests\\test_persistence.py"
+index acae0ee..ad5a7c8 100644
+--- "a/D:\\Vibe C\\\345\256\242\346\234\215\\wechat--main\\.superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\task-2-baseline\\test_persistence.py"	
++++ "b/tests\\test_persistence.py"
+@@ -1,17 +1,104 @@
++import json
+ import sys
+ 
++import pytest
++
+ import app_paths
++from atomic_json import JsonDataError, atomic_write_json, load_json
+ 
+ 
+ def test_source_and_frozen_use_same_explicit_data_root(tmp_path, monkeypatch):
+     monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(tmp_path))
+     assert app_paths.config_path() == tmp_path / "settings.json"
+     assert app_paths.memory_path() == tmp_path / "memory.json"
+     assert app_paths.vector_path() == tmp_path / "vector_memory.json"
+ 
+ 
+ def test_default_root_is_appdata_even_when_frozen(tmp_path, monkeypatch):
+     monkeypatch.delenv("WECHAT_ASSISTANT_DATA_DIR", raising=False)
+     monkeypatch.setenv("APPDATA", str(tmp_path))
+     monkeypatch.setattr(sys, "frozen", True, raising=False)
+     assert app_paths.data_dir() == tmp_path / "WeChatStyleReplyAssistant"
++
++
++def _require_examples_dict(value):
++    if not isinstance(value, dict) or "examples" not in value:
++        raise ValueError("examples must be a dictionary field")
++
++
++def _require_numeric_config_version(value):
++    if not isinstance(value, dict) or not isinstance(value.get("config_version"), int):
++        raise ValueError("config_version must be an integer")
++
++
++def test_load_recovers_newest_valid_backup(tmp_path):
++    path = tmp_path / "memory.json"
++    path.write_text("{broken", encoding="utf-8")
++    (tmp_path / "memory.json.bak.1").write_text("{broken", encoding="utf-8")
++    (tmp_path / "memory.json.bak.2").write_text('{"examples": [1]}', encoding="utf-8")
++    (tmp_path / "memory.json.bak.3").write_text('{"examples": [2]}', encoding="utf-8")
++
++    result = load_json(path, _require_examples_dict)
++
++    assert result.data == {"examples": [1]}
++    assert result.source == tmp_path / "memory.json.bak.2"
++    assert result.recovered is True
++
++
++def test_atomic_write_failed_validation_does_not_replace_existing_file(tmp_path):
++    path = tmp_path / "settings.json"
++    path.write_text('{"config_version": 2}', encoding="utf-8")
++
++    with pytest.raises(ValueError):
++        atomic_write_json(path, {"config_version": "bad"}, _require_numeric_config_version)
++
++    assert json.loads(path.read_text(encoding="utf-8")) == {"config_version": 2}
++
++
++def test_atomic_write_rotates_five_backups(tmp_path):
++    path = tmp_path / "settings.json"
++    path.write_text('{"config_version": 0}', encoding="utf-8")
++    for index in range(1, 6):
++        (tmp_path / f"settings.json.bak.{index}").write_text(
++            json.dumps({"config_version": index}), encoding="utf-8"
++        )
++
++    atomic_write_json(path, {"config_version": 6}, _require_numeric_config_version)
++
++    assert json.loads(path.read_text(encoding="utf-8")) == {"config_version": 6}
++    assert [
++        json.loads((tmp_path / f"settings.json.bak.{index}").read_text(encoding="utf-8"))
++        for index in range(1, 6)
++    ] == [{"config_version": value} for value in range(0, 5)]
++
++
++def test_atomic_replace_failure_leaves_original_primary_readable(tmp_path, monkeypatch):
++    path = tmp_path / "settings.json"
++    path.write_text('{"config_version": 2}', encoding="utf-8")
++
++    import atomic_json
++
++    original_replace = atomic_json.os.replace
++
++    def fail_primary_replace(source, destination):
++        if destination == path:
++            raise OSError("simulated replace failure")
++        return original_replace(source, destination)
++
++    monkeypatch.setattr(atomic_json.os, "replace", fail_primary_replace)
++
++    with pytest.raises(OSError, match="simulated replace failure"):
++        atomic_write_json(path, {"config_version": 3}, _require_numeric_config_version)
++
++    assert json.loads(path.read_text(encoding="utf-8")) == {"config_version": 2}
++
++
++def test_load_json_all_invalid_candidates_raises_without_creating_file(tmp_path):
++    path = tmp_path / "memory.json"
++    (tmp_path / "memory.json.bak.1").write_text("[]", encoding="utf-8")
++
++    with pytest.raises(JsonDataError) as error:
++        load_json(path, _require_examples_dict)
++
++    assert not path.exists()
++    assert "memory.json" in str(error.value)
+
+===== CHECKPOINT =====
+[
+  {
+    "Algorithm": "SHA256",
+    "Hash": "584CA252CD11601BDA23D025C006BF7111D788F210C6D40464282B816093A7A5",
+    "Path": "D:\\Vibe C\\客服\\wechat--main\\atomic_json.py"
+  },
+  {
+    "Algorithm": "SHA256",
+    "Hash": "1CB8C165A8C7863D5E2CC21845AAB9FBCD2C23041851F71C62562FD43C457627",
+    "Path": "D:\\Vibe C\\客服\\wechat--main\\tests\\test_persistence.py"
+  }
+]

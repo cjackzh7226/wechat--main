@@ -1,0 +1,18 @@
+﻿[
+    {
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\settings.py",
+        "Hash":  "A984D012D77E05433FD900C3174BB094EEC60633FFA1DE3EFC056355C5E13830"
+    },
+    {
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\float_ui.py",
+        "Hash":  "F5E72008B0C52325C1C4F634D855633A84C1F517D68D5A3BA21377E28BF589E3"
+    },
+    {
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\tests\\test_persistence.py",
+        "Hash":  "67ED22B7DB3C2EAE16506673ACEA4EDAA0DE78350B266733FE078337627836F6"
+    },
+    {
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\tests\\test_core.py",
+        "Hash":  "7940AEE37A9D2AD6C3BB1C40A456C3856A0EF792C88B142E0104C03A6C4EE91D"
+    }
+]

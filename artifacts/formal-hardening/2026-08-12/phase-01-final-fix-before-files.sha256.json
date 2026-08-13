@@ -1,0 +1,218 @@
+﻿[
+    {
+        "path":  ".superpowers\\sdd\\2026-08-12-01-persistence-and-settings-hardening\\phase-01-final-review.md",
+        "size":  23986,
+        "sha256":  "03b3958995fbafbaa3b593001f60c861f596c06bb9d3bd24e85945ef3ee0e405",
+        "mtime_utc":  "2026-08-12T00:10:36.2552830Z"
+    },
+    {
+        "path":  "__init__.py",
+        "size":  1,
+        "sha256":  "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "mtime_utc":  "2026-07-08T02:58:54.0000000Z"
+    },
+    {
+        "path":  "app_paths.py",
+        "size":  875,
+        "sha256":  "f8f5ff09720facc8b5384d302ae1f6a9083042a573cea5ecbde2060d1a530440",
+        "mtime_utc":  "2026-08-11T20:53:32.2165401Z"
+    },
+    {
+        "path":  "atomic_json.py",
+        "size":  4147,
+        "sha256":  "7aa66d59f228bcfe404c471a3f700aa06b53889068a944b686059c8b70874e1b",
+        "mtime_utc":  "2026-08-11T21:09:50.3055410Z"
+    },
+    {
+        "path":  "build_release.py",
+        "size":  8134,
+        "sha256":  "df2186cb22134ebb2bf083d6e41f5ed01151846059ba783320ae5671b6946877",
+        "mtime_utc":  "2026-08-03T14:34:37.1985568Z"
+    },
+    {
+        "path":  "capture_ocr.py",
+        "size":  29961,
+        "sha256":  "af7be8f9f1fefeb123c0d6558614e0b55b6b1c28ac7c9d0b4928e11d7475da0f",
+        "mtime_utc":  "2026-08-02T18:04:21.8876476Z"
+    },
+    {
+        "path":  "chat_training.py",
+        "size":  40120,
+        "sha256":  "fb138bf57e75b3357559c3d6cb710674382fec432f4f976d830551251c6684c3",
+        "mtime_utc":  "2026-08-05T19:41:29.3460523Z"
+    },
+    {
+        "path":  "conversation_list.py",
+        "size":  17828,
+        "sha256":  "38390c13619c6f3d3371a90055fbba424f1a9f8abb8a6e443124dac8f6a440ad",
+        "mtime_utc":  "2026-08-07T09:00:36.2241677Z"
+    },
+    {
+        "path":  "docs\\superpowers\\plans\\2026-08-12-01-persistence-and-settings-hardening.md",
+        "size":  19273,
+        "sha256":  "3e2bab7bc9386a814c59d62972f04076991035a64719053696087cae7e13e37e",
+        "mtime_utc":  "2026-08-11T20:47:46.9502444Z"
+    },
+    {
+        "path":  "docs\\superpowers\\plans\\2026-08-12-03-serialized-safe-send-runtime.md",
+        "size":  22123,
+        "sha256":  "f004b9a291130713a41bf476ff3a3ad68cfce6b00b0833d9086a50abddcbe0f6",
+        "mtime_utc":  "2026-08-11T20:47:46.9527779Z"
+    },
+    {
+        "path":  "docs\\superpowers\\specs\\2026-08-12-formal-use-hardening-design.md",
+        "size":  16181,
+        "sha256":  "d37865cfec15f9777232e53bbe3c111b494b519932fcb1ee3fdbaa7d5acfba59",
+        "mtime_utc":  "2026-08-11T20:32:28.2866546Z"
+    },
+    {
+        "path":  "enterprise_kb.py",
+        "size":  11691,
+        "sha256":  "b59e0037cee3d2fa434a73aeff428d2bf159fa37d93e5b4294cc1f349204e5ca",
+        "mtime_utc":  "2026-08-03T11:41:58.0120733Z"
+    },
+    {
+        "path":  "float_ui.py",
+        "size":  83902,
+        "sha256":  "fdbc5362b06f2d4ecdda11d6790fd9b2109ca947c9740dc438538b3f2a68e5bb",
+        "mtime_utc":  "2026-08-11T21:40:16.9489321Z"
+    },
+    {
+        "path":  "generate_builtin_scenarios.py",
+        "size":  5409,
+        "sha256":  "83fe54d62537f99c038944966ec1cdbf0341fb5d769a5099196b55813deb1c2b",
+        "mtime_utc":  "2026-07-08T02:58:54.0000000Z"
+    },
+    {
+        "path":  "generate_sop_flow_demo.py",
+        "size":  1144,
+        "sha256":  "4d62dd41db3c9e6d7d0cad0171ca7daf80d7f6d9c936c823be8e6547915f4a7a",
+        "mtime_utc":  "2026-07-08T02:58:54.0000000Z"
+    },
+    {
+        "path":  "group_chat_handler.py",
+        "size":  7953,
+        "sha256":  "6436c63892bcc8ae6b7c2ca59953a4d1d20777ec04f11106d46ca9504b887da4",
+        "mtime_utc":  "2026-08-07T13:28:36.9812354Z"
+    },
+    {
+        "path":  "llm_clients.py",
+        "size":  6909,
+        "sha256":  "8468f148bb6a030a466882c41b75011e43d357fad4a9ae33632c711debe3fd7f",
+        "mtime_utc":  "2026-08-02T20:13:15.0685069Z"
+    },
+    {
+        "path":  "main.py",
+        "size":  94620,
+        "sha256":  "0ffddeb09a056d982b17c931a257ec5315c5487cd301273e6fd49717457184ea",
+        "mtime_utc":  "2026-08-11T23:34:25.6933729Z"
+    },
+    {
+        "path":  "memory.py",
+        "size":  48910,
+        "sha256":  "3eb04ad35be57b66a961013889cc20586e480f7dbc3fe99848b712dd7b7a4c6b",
+        "mtime_utc":  "2026-08-11T22:27:25.8059856Z"
+    },
+    {
+        "path":  "reply_engine.py",
+        "size":  53115,
+        "sha256":  "7f9324560047b37d8b80aa3c356991ff89f67983895c45b90fc3990b3e5c58f9",
+        "mtime_utc":  "2026-08-05T15:41:14.6624718Z"
+    },
+    {
+        "path":  "reply_humanize.py",
+        "size":  2114,
+        "sha256":  "545f88b50cfe6bd7e9aa779c15e3cb0fa07bac3ba6939f129f7af94ef734d8d9",
+        "mtime_utc":  "2026-07-08T02:58:54.0000000Z"
+    },
+    {
+        "path":  "runtime_logging.py",
+        "size":  6160,
+        "sha256":  "d3c2f6cb9c459b9dd672924cd36727ffd85c786cb2911c7aa45ce80e7c1b5cbb",
+        "mtime_utc":  "2026-08-11T23:33:24.2016349Z"
+    },
+    {
+        "path":  "scenario_bank.py",
+        "size":  2518,
+        "sha256":  "157c4c2a673591ca953df897b371b69cffe7de8fd692bd69c17fe3a93aa42709",
+        "mtime_utc":  "2026-07-08T02:58:54.0000000Z"
+    },
+    {
+        "path":  "secure_store.py",
+        "size":  4699,
+        "sha256":  "5dd70dcd1d5c5b33f4622687cc9862102a8cf5bba25c12b8f4d3fcd848d49bba",
+        "mtime_utc":  "2026-08-11T21:24:02.8490846Z"
+    },
+    {
+        "path":  "self_check.py",
+        "size":  6719,
+        "sha256":  "d4b34f7682dbaebeda07d07afd46c37ca0b97e02d8f3a23fd17a7cf31a7bd4e6",
+        "mtime_utc":  "2026-07-08T02:58:54.0000000Z"
+    },
+    {
+        "path":  "sender.py",
+        "size":  4482,
+        "sha256":  "d91b35622aee9e021ba82303133e7a50cc7fa2adf6d6c85ef5787f85c551a30d",
+        "mtime_utc":  "2026-08-02T18:22:36.7689187Z"
+    },
+    {
+        "path":  "settings.py",
+        "size":  23144,
+        "sha256":  "0c83c8efb7f5a2a4f5cdb68f09b96a95cb437bdf88834b0ef33d2258a378e541",
+        "mtime_utc":  "2026-08-11T23:17:22.5892733Z"
+    },
+    {
+        "path":  "sop_analyzer.py",
+        "size":  52011,
+        "sha256":  "00403fa85c1430b9a6a0cfd2b37be151787bf930b546dd1edaf711ba06dc602f",
+        "mtime_utc":  "2026-07-08T02:58:54.0000000Z"
+    },
+    {
+        "path":  "tests\\conftest.py",
+        "size":  2469,
+        "sha256":  "5c1c67648a5c77c3d6a7dbf34dd3770a436c6f3ca6f4e4720aaf1864ebf3d2a8",
+        "mtime_utc":  "2026-08-11T23:16:25.3116560Z"
+    },
+    {
+        "path":  "tests\\test_conversation_list.py",
+        "size":  11490,
+        "sha256":  "e74d520157863a1a87b2090ba8fb36af207e40f00dd75365a36dd517519fd813",
+        "mtime_utc":  "2026-08-07T09:00:06.0125613Z"
+    },
+    {
+        "path":  "tests\\test_core.py",
+        "size":  233886,
+        "sha256":  "1d92460f414c875ef103042daefdbd20798ed82ff12f81d82703c4ebdd92f5f3",
+        "mtime_utc":  "2026-08-11T23:19:08.4786738Z"
+    },
+    {
+        "path":  "tests\\test_group_chat.py",
+        "size":  5880,
+        "sha256":  "9bca320c87af4d73f2f861be031944b10e98228687a2476df4a885b779c89d30",
+        "mtime_utc":  "2026-08-07T13:30:34.0185301Z"
+    },
+    {
+        "path":  "tests\\test_persistence.py",
+        "size":  71470,
+        "sha256":  "e3df1e32be627df6d9346e27b39b2631264c910b6259bee1097f069394a800d0",
+        "mtime_utc":  "2026-08-11T23:35:15.3071407Z"
+    },
+    {
+        "path":  "visible_content.py",
+        "size":  13595,
+        "sha256":  "a768ff79cac261ff0dac60cddb9dfc73008d03599d4be23f6d1f4bb9c93a92f3",
+        "mtime_utc":  "2026-07-08T02:58:54.0000000Z"
+    },
+    {
+        "path":  "web_search.py",
+        "size":  6843,
+        "sha256":  "716de26a1b1ccddca9785702accc6d70e0382175ffa828198533dd30389d993f",
+        "mtime_utc":  "2026-08-02T19:59:14.8019671Z"
+    },
+    {
+        "path":  "wechat_window.py",
+        "size":  10372,
+        "sha256":  "2f3f507e5100023a62d12fff5b3f791fbf0b12b1c8768e969af42ceb7d034aff",
+        "mtime_utc":  "2026-08-04T21:09:42.5115289Z"
+    }
+]

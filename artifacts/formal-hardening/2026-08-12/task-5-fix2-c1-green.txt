@@ -1,0 +1,4 @@
+﻿COMMAND=.venv\Scripts\python.exe -m pytest tests/test_persistence.py::test_runtime_schema_rejects_legal_shape_smuggling_hashes_record_id_and_ignores_caller_timestamp -q
+EXIT_CODE=0
+..                                                                       [100%]
+2 passed in 0.17s

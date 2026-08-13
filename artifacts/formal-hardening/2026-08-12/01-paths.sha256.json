@@ -1,0 +1,17 @@
+﻿[
+    {
+        "Algorithm":  "SHA256",
+        "Hash":  "F8F5FF09720FACC8B5384D302AE1F6A9083042A573CEA5ECBDE2060D1A530440",
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\app_paths.py"
+    },
+    {
+        "Algorithm":  "SHA256",
+        "Hash":  "A984D012D77E05433FD900C3174BB094EEC60633FFA1DE3EFC056355C5E13830",
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\settings.py"
+    },
+    {
+        "Algorithm":  "SHA256",
+        "Hash":  "1A03CE8B389A97A8F850207B01E9508231C71C62697113EFEB7518FA690E7822",
+        "Path":  "D:\\Vibe C\\客服\\wechat--main\\memory.py"
+    }
+]

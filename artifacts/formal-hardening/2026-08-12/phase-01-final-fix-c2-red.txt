@@ -1,0 +1,695 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- D:\Vibe C\客服\wechat--main\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\Vibe C\客服\wechat--main
+collecting ... collected 17 items / 4 deselected / 13 selected
+
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[consistent-string-false] FAILED [  7%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[consistent-string-true] FAILED [ 15%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[consistent-zero] FAILED [ 23%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[consistent-one] FAILED [ 30%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[chosen-float] FAILED [ 38%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[chosen-bool] FAILED [ 46%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[chosen-string] FAILED [ 53%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[extra-key] FAILED [ 61%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[missing-consistent] FAILED [ 69%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[missing-chosen] FAILED [ 76%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[explicit-inconsistent] FAILED [ 84%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[parse-error] FAILED [ 92%]
+tests/test_phase1_final_fix.py::test_enterprise_judgement_returns_only_selected_knowledge_answer_for_exact_valid_json PASSED [100%]
+
+================================== FAILURES ===================================
+_ test_enterprise_judgement_is_strict_json_and_fail_closed[consistent-string-false] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-115/test_enterprise_judgement_is_s0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F7EF29CC50>
+payload = {'chosen': 1, 'consistent': 'false'}
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"chosen": 1, "consistent": "false"},
+            {"chosen": 1, "consistent": "true"},
+            {"chosen": 1, "consistent": 0},
+            {"chosen": 1, "consistent": 1},
+            {"chosen": 1.0, "consistent": True},
+            {"chosen": True, "consistent": True},
+            {"chosen": "1", "consistent": True},
+            {"chosen": 1, "consistent": True, "answer": "MODEL_AUTHORED_TEXT"},
+            {"chosen": 1},
+            {"consistent": True},
+            {"chosen": 1, "consistent": False},
+            "not-json",
+        ],
+        ids=[
+            "consistent-string-false",
+            "consistent-string-true",
+            "consistent-zero",
+            "consistent-one",
+            "chosen-float",
+            "chosen-bool",
+            "chosen-string",
+            "extra-key",
+            "missing-consistent",
+            "missing-chosen",
+            "explicit-inconsistent",
+            "parse-error",
+        ],
+    )
+    def test_enterprise_judgement_is_strict_json_and_fail_closed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: object
+    ) -> None:
+        engine = _judgement_engine(tmp_path, monkeypatch, payload)
+        candidates = [{"question": "如何办理？", "reply": "APPROVED_KB_ANSWER", "record_id": "r1"}]
+    
+>       assert engine._enterprise_answer_via_judgement("如何办理？", candidates) == [EXACT_NO_ANSWER]
+E       AssertionError: assert ['APPROVED_KB_ANSWER'] == ['暂未查到对应答案']
+E         
+E         At index 0 diff: 'APPROVED_KB_ANSWER' != '暂未查到对应答案'
+E         
+E         Full diff:
+E           [
+E         -     '暂未查到对应答案',
+E         +     'APPROVED_KB_ANSWER',
+E           ]
+
+tests\test_phase1_final_fix.py:111: AssertionError
+_ test_enterprise_judgement_is_strict_json_and_fail_closed[consistent-string-true] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-115/test_enterprise_judgement_is_s1')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F7EF29CB10>
+payload = {'chosen': 1, 'consistent': 'true'}
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"chosen": 1, "consistent": "false"},
+            {"chosen": 1, "consistent": "true"},
+            {"chosen": 1, "consistent": 0},
+            {"chosen": 1, "consistent": 1},
+            {"chosen": 1.0, "consistent": True},
+            {"chosen": True, "consistent": True},
+            {"chosen": "1", "consistent": True},
+            {"chosen": 1, "consistent": True, "answer": "MODEL_AUTHORED_TEXT"},
+            {"chosen": 1},
+            {"consistent": True},
+            {"chosen": 1, "consistent": False},
+            "not-json",
+        ],
+        ids=[
+            "consistent-string-false",
+            "consistent-string-true",
+            "consistent-zero",
+            "consistent-one",
+            "chosen-float",
+            "chosen-bool",
+            "chosen-string",
+            "extra-key",
+            "missing-consistent",
+            "missing-chosen",
+            "explicit-inconsistent",
+            "parse-error",
+        ],
+    )
+    def test_enterprise_judgement_is_strict_json_and_fail_closed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: object
+    ) -> None:
+        engine = _judgement_engine(tmp_path, monkeypatch, payload)
+        candidates = [{"question": "如何办理？", "reply": "APPROVED_KB_ANSWER", "record_id": "r1"}]
+    
+>       assert engine._enterprise_answer_via_judgement("如何办理？", candidates) == [EXACT_NO_ANSWER]
+E       AssertionError: assert ['APPROVED_KB_ANSWER'] == ['暂未查到对应答案']
+E         
+E         At index 0 diff: 'APPROVED_KB_ANSWER' != '暂未查到对应答案'
+E         
+E         Full diff:
+E           [
+E         -     '暂未查到对应答案',
+E         +     'APPROVED_KB_ANSWER',
+E           ]
+
+tests\test_phase1_final_fix.py:111: AssertionError
+__ test_enterprise_judgement_is_strict_json_and_fail_closed[consistent-zero] __
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-115/test_enterprise_judgement_is_s2')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F7EF2D9690>
+payload = {'chosen': 1, 'consistent': 0}
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"chosen": 1, "consistent": "false"},
+            {"chosen": 1, "consistent": "true"},
+            {"chosen": 1, "consistent": 0},
+            {"chosen": 1, "consistent": 1},
+            {"chosen": 1.0, "consistent": True},
+            {"chosen": True, "consistent": True},
+            {"chosen": "1", "consistent": True},
+            {"chosen": 1, "consistent": True, "answer": "MODEL_AUTHORED_TEXT"},
+            {"chosen": 1},
+            {"consistent": True},
+            {"chosen": 1, "consistent": False},
+            "not-json",
+        ],
+        ids=[
+            "consistent-string-false",
+            "consistent-string-true",
+            "consistent-zero",
+            "consistent-one",
+            "chosen-float",
+            "chosen-bool",
+            "chosen-string",
+            "extra-key",
+            "missing-consistent",
+            "missing-chosen",
+            "explicit-inconsistent",
+            "parse-error",
+        ],
+    )
+    def test_enterprise_judgement_is_strict_json_and_fail_closed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: object
+    ) -> None:
+        engine = _judgement_engine(tmp_path, monkeypatch, payload)
+        candidates = [{"question": "如何办理？", "reply": "APPROVED_KB_ANSWER", "record_id": "r1"}]
+    
+>       assert engine._enterprise_answer_via_judgement("如何办理？", candidates) == [EXACT_NO_ANSWER]
+E       AssertionError: assert ['未在当前企业年报知识库中找到对应答案。'] == ['暂未查到对应答案']
+E         
+E         At index 0 diff: '未在当前企业年报知识库中找到对应答案。' != '暂未查到对应答案'
+E         
+E         Full diff:
+E           [
+E         -     '暂未查到对应答案',
+E         +     '未在当前企业年报知识库中找到对应答案。',
+E           ]
+
+tests\test_phase1_final_fix.py:111: AssertionError
+__ test_enterprise_judgement_is_strict_json_and_fail_closed[consistent-one] ___
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-115/test_enterprise_judgement_is_s3')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F7EF2F8C90>
+payload = {'chosen': 1, 'consistent': 1}
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"chosen": 1, "consistent": "false"},
+            {"chosen": 1, "consistent": "true"},
+            {"chosen": 1, "consistent": 0},
+            {"chosen": 1, "consistent": 1},
+            {"chosen": 1.0, "consistent": True},
+            {"chosen": True, "consistent": True},
+            {"chosen": "1", "consistent": True},
+            {"chosen": 1, "consistent": True, "answer": "MODEL_AUTHORED_TEXT"},
+            {"chosen": 1},
+            {"consistent": True},
+            {"chosen": 1, "consistent": False},
+            "not-json",
+        ],
+        ids=[
+            "consistent-string-false",
+            "consistent-string-true",
+            "consistent-zero",
+            "consistent-one",
+            "chosen-float",
+            "chosen-bool",
+            "chosen-string",
+            "extra-key",
+            "missing-consistent",
+            "missing-chosen",
+            "explicit-inconsistent",
+            "parse-error",
+        ],
+    )
+    def test_enterprise_judgement_is_strict_json_and_fail_closed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: object
+    ) -> None:
+        engine = _judgement_engine(tmp_path, monkeypatch, payload)
+        candidates = [{"question": "如何办理？", "reply": "APPROVED_KB_ANSWER", "record_id": "r1"}]
+    
+>       assert engine._enterprise_answer_via_judgement("如何办理？", candidates) == [EXACT_NO_ANSWER]
+E       AssertionError: assert ['APPROVED_KB_ANSWER'] == ['暂未查到对应答案']
+E         
+E         At index 0 diff: 'APPROVED_KB_ANSWER' != '暂未查到对应答案'
+E         
+E         Full diff:
+E           [
+E         -     '暂未查到对应答案',
+E         +     'APPROVED_KB_ANSWER',
+E           ]
+
+tests\test_phase1_final_fix.py:111: AssertionError
+___ test_enterprise_judgement_is_strict_json_and_fail_closed[chosen-float] ____
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-115/test_enterprise_judgement_is_s4')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F7EF29C410>
+payload = {'chosen': 1.0, 'consistent': True}
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"chosen": 1, "consistent": "false"},
+            {"chosen": 1, "consistent": "true"},
+            {"chosen": 1, "consistent": 0},
+            {"chosen": 1, "consistent": 1},
+            {"chosen": 1.0, "consistent": True},
+            {"chosen": True, "consistent": True},
+            {"chosen": "1", "consistent": True},
+            {"chosen": 1, "consistent": True, "answer": "MODEL_AUTHORED_TEXT"},
+            {"chosen": 1},
+            {"consistent": True},
+            {"chosen": 1, "consistent": False},
+            "not-json",
+        ],
+        ids=[
+            "consistent-string-false",
+            "consistent-string-true",
+            "consistent-zero",
+            "consistent-one",
+            "chosen-float",
+            "chosen-bool",
+            "chosen-string",
+            "extra-key",
+            "missing-consistent",
+            "missing-chosen",
+            "explicit-inconsistent",
+            "parse-error",
+        ],
+    )
+    def test_enterprise_judgement_is_strict_json_and_fail_closed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: object
+    ) -> None:
+        engine = _judgement_engine(tmp_path, monkeypatch, payload)
+        candidates = [{"question": "如何办理？", "reply": "APPROVED_KB_ANSWER", "record_id": "r1"}]
+    
+>       assert engine._enterprise_answer_via_judgement("如何办理？", candidates) == [EXACT_NO_ANSWER]
+E       AssertionError: assert ['APPROVED_KB_ANSWER'] == ['暂未查到对应答案']
+E         
+E         At index 0 diff: 'APPROVED_KB_ANSWER' != '暂未查到对应答案'
+E         
+E         Full diff:
+E           [
+E         -     '暂未查到对应答案',
+E         +     'APPROVED_KB_ANSWER',
+E           ]
+
+tests\test_phase1_final_fix.py:111: AssertionError
+____ test_enterprise_judgement_is_strict_json_and_fail_closed[chosen-bool] ____
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-115/test_enterprise_judgement_is_s5')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F7EF2F45D0>
+payload = {'chosen': True, 'consistent': True}
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"chosen": 1, "consistent": "false"},
+            {"chosen": 1, "consistent": "true"},
+            {"chosen": 1, "consistent": 0},
+            {"chosen": 1, "consistent": 1},
+            {"chosen": 1.0, "consistent": True},
+            {"chosen": True, "consistent": True},
+            {"chosen": "1", "consistent": True},
+            {"chosen": 1, "consistent": True, "answer": "MODEL_AUTHORED_TEXT"},
+            {"chosen": 1},
+            {"consistent": True},
+            {"chosen": 1, "consistent": False},
+            "not-json",
+        ],
+        ids=[
+            "consistent-string-false",
+            "consistent-string-true",
+            "consistent-zero",
+            "consistent-one",
+            "chosen-float",
+            "chosen-bool",
+            "chosen-string",
+            "extra-key",
+            "missing-consistent",
+            "missing-chosen",
+            "explicit-inconsistent",
+            "parse-error",
+        ],
+    )
+    def test_enterprise_judgement_is_strict_json_and_fail_closed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: object
+    ) -> None:
+        engine = _judgement_engine(tmp_path, monkeypatch, payload)
+        candidates = [{"question": "如何办理？", "reply": "APPROVED_KB_ANSWER", "record_id": "r1"}]
+    
+>       assert engine._enterprise_answer_via_judgement("如何办理？", candidates) == [EXACT_NO_ANSWER]
+E       AssertionError: assert ['APPROVED_KB_ANSWER'] == ['暂未查到对应答案']
+E         
+E         At index 0 diff: 'APPROVED_KB_ANSWER' != '暂未查到对应答案'
+E         
+E         Full diff:
+E           [
+E         -     '暂未查到对应答案',
+E         +     'APPROVED_KB_ANSWER',
+E           ]
+
+tests\test_phase1_final_fix.py:111: AssertionError
+___ test_enterprise_judgement_is_strict_json_and_fail_closed[chosen-string] ___
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-115/test_enterprise_judgement_is_s6')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F7EF3039D0>
+payload = {'chosen': '1', 'consistent': True}
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"chosen": 1, "consistent": "false"},
+            {"chosen": 1, "consistent": "true"},
+            {"chosen": 1, "consistent": 0},
+            {"chosen": 1, "consistent": 1},
+            {"chosen": 1.0, "consistent": True},
+            {"chosen": True, "consistent": True},
+            {"chosen": "1", "consistent": True},
+            {"chosen": 1, "consistent": True, "answer": "MODEL_AUTHORED_TEXT"},
+            {"chosen": 1},
+            {"consistent": True},
+            {"chosen": 1, "consistent": False},
+            "not-json",
+        ],
+        ids=[
+            "consistent-string-false",
+            "consistent-string-true",
+            "consistent-zero",
+            "consistent-one",
+            "chosen-float",
+            "chosen-bool",
+            "chosen-string",
+            "extra-key",
+            "missing-consistent",
+            "missing-chosen",
+            "explicit-inconsistent",
+            "parse-error",
+        ],
+    )
+    def test_enterprise_judgement_is_strict_json_and_fail_closed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: object
+    ) -> None:
+        engine = _judgement_engine(tmp_path, monkeypatch, payload)
+        candidates = [{"question": "如何办理？", "reply": "APPROVED_KB_ANSWER", "record_id": "r1"}]
+    
+>       assert engine._enterprise_answer_via_judgement("如何办理？", candidates) == [EXACT_NO_ANSWER]
+E       AssertionError: assert ['APPROVED_KB_ANSWER'] == ['暂未查到对应答案']
+E         
+E         At index 0 diff: 'APPROVED_KB_ANSWER' != '暂未查到对应答案'
+E         
+E         Full diff:
+E           [
+E         -     '暂未查到对应答案',
+E         +     'APPROVED_KB_ANSWER',
+E           ]
+
+tests\test_phase1_final_fix.py:111: AssertionError
+_____ test_enterprise_judgement_is_strict_json_and_fail_closed[extra-key] _____
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-115/test_enterprise_judgement_is_s7')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F7EF2F4550>
+payload = {'chosen': 1, 'consistent': True, 'answer': 'MODEL_AUTHORED_TEXT'}
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"chosen": 1, "consistent": "false"},
+            {"chosen": 1, "consistent": "true"},
+            {"chosen": 1, "consistent": 0},
+            {"chosen": 1, "consistent": 1},
+            {"chosen": 1.0, "consistent": True},
+            {"chosen": True, "consistent": True},
+            {"chosen": "1", "consistent": True},
+            {"chosen": 1, "consistent": True, "answer": "MODEL_AUTHORED_TEXT"},
+            {"chosen": 1},
+            {"consistent": True},
+            {"chosen": 1, "consistent": False},
+            "not-json",
+        ],
+        ids=[
+            "consistent-string-false",
+            "consistent-string-true",
+            "consistent-zero",
+            "consistent-one",
+            "chosen-float",
+            "chosen-bool",
+            "chosen-string",
+            "extra-key",
+            "missing-consistent",
+            "missing-chosen",
+            "explicit-inconsistent",
+            "parse-error",
+        ],
+    )
+    def test_enterprise_judgement_is_strict_json_and_fail_closed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: object
+    ) -> None:
+        engine = _judgement_engine(tmp_path, monkeypatch, payload)
+        candidates = [{"question": "如何办理？", "reply": "APPROVED_KB_ANSWER", "record_id": "r1"}]
+    
+>       assert engine._enterprise_answer_via_judgement("如何办理？", candidates) == [EXACT_NO_ANSWER]
+E       AssertionError: assert ['APPROVED_KB_ANSWER'] == ['暂未查到对应答案']
+E         
+E         At index 0 diff: 'APPROVED_KB_ANSWER' != '暂未查到对应答案'
+E         
+E         Full diff:
+E           [
+E         -     '暂未查到对应答案',
+E         +     'APPROVED_KB_ANSWER',
+E           ]
+
+tests\test_phase1_final_fix.py:111: AssertionError
+_ test_enterprise_judgement_is_strict_json_and_fail_closed[missing-consistent] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-115/test_enterprise_judgement_is_s8')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F7EF30B250>
+payload = {'chosen': 1}
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"chosen": 1, "consistent": "false"},
+            {"chosen": 1, "consistent": "true"},
+            {"chosen": 1, "consistent": 0},
+            {"chosen": 1, "consistent": 1},
+            {"chosen": 1.0, "consistent": True},
+            {"chosen": True, "consistent": True},
+            {"chosen": "1", "consistent": True},
+            {"chosen": 1, "consistent": True, "answer": "MODEL_AUTHORED_TEXT"},
+            {"chosen": 1},
+            {"consistent": True},
+            {"chosen": 1, "consistent": False},
+            "not-json",
+        ],
+        ids=[
+            "consistent-string-false",
+            "consistent-string-true",
+            "consistent-zero",
+            "consistent-one",
+            "chosen-float",
+            "chosen-bool",
+            "chosen-string",
+            "extra-key",
+            "missing-consistent",
+            "missing-chosen",
+            "explicit-inconsistent",
+            "parse-error",
+        ],
+    )
+    def test_enterprise_judgement_is_strict_json_and_fail_closed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: object
+    ) -> None:
+        engine = _judgement_engine(tmp_path, monkeypatch, payload)
+        candidates = [{"question": "如何办理？", "reply": "APPROVED_KB_ANSWER", "record_id": "r1"}]
+    
+>       assert engine._enterprise_answer_via_judgement("如何办理？", candidates) == [EXACT_NO_ANSWER]
+E       AssertionError: assert ['未在当前企业年报知识库中找到对应答案。'] == ['暂未查到对应答案']
+E         
+E         At index 0 diff: '未在当前企业年报知识库中找到对应答案。' != '暂未查到对应答案'
+E         
+E         Full diff:
+E           [
+E         -     '暂未查到对应答案',
+E         +     '未在当前企业年报知识库中找到对应答案。',
+E           ]
+
+tests\test_phase1_final_fix.py:111: AssertionError
+__ test_enterprise_judgement_is_strict_json_and_fail_closed[missing-chosen] ___
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-115/test_enterprise_judgement_is_s9')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F7EF2A00D0>
+payload = {'consistent': True}
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"chosen": 1, "consistent": "false"},
+            {"chosen": 1, "consistent": "true"},
+            {"chosen": 1, "consistent": 0},
+            {"chosen": 1, "consistent": 1},
+            {"chosen": 1.0, "consistent": True},
+            {"chosen": True, "consistent": True},
+            {"chosen": "1", "consistent": True},
+            {"chosen": 1, "consistent": True, "answer": "MODEL_AUTHORED_TEXT"},
+            {"chosen": 1},
+            {"consistent": True},
+            {"chosen": 1, "consistent": False},
+            "not-json",
+        ],
+        ids=[
+            "consistent-string-false",
+            "consistent-string-true",
+            "consistent-zero",
+            "consistent-one",
+            "chosen-float",
+            "chosen-bool",
+            "chosen-string",
+            "extra-key",
+            "missing-consistent",
+            "missing-chosen",
+            "explicit-inconsistent",
+            "parse-error",
+        ],
+    )
+    def test_enterprise_judgement_is_strict_json_and_fail_closed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: object
+    ) -> None:
+        engine = _judgement_engine(tmp_path, monkeypatch, payload)
+        candidates = [{"question": "如何办理？", "reply": "APPROVED_KB_ANSWER", "record_id": "r1"}]
+    
+>       assert engine._enterprise_answer_via_judgement("如何办理？", candidates) == [EXACT_NO_ANSWER]
+E       AssertionError: assert ['未在当前企业年报知识库中找到对应答案。'] == ['暂未查到对应答案']
+E         
+E         At index 0 diff: '未在当前企业年报知识库中找到对应答案。' != '暂未查到对应答案'
+E         
+E         Full diff:
+E           [
+E         -     '暂未查到对应答案',
+E         +     '未在当前企业年报知识库中找到对应答案。',
+E           ]
+
+tests\test_phase1_final_fix.py:111: AssertionError
+_ test_enterprise_judgement_is_strict_json_and_fail_closed[explicit-inconsistent] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-115/test_enterprise_judgement_is_s10')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F7EF3051D0>
+payload = {'chosen': 1, 'consistent': False}
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"chosen": 1, "consistent": "false"},
+            {"chosen": 1, "consistent": "true"},
+            {"chosen": 1, "consistent": 0},
+            {"chosen": 1, "consistent": 1},
+            {"chosen": 1.0, "consistent": True},
+            {"chosen": True, "consistent": True},
+            {"chosen": "1", "consistent": True},
+            {"chosen": 1, "consistent": True, "answer": "MODEL_AUTHORED_TEXT"},
+            {"chosen": 1},
+            {"consistent": True},
+            {"chosen": 1, "consistent": False},
+            "not-json",
+        ],
+        ids=[
+            "consistent-string-false",
+            "consistent-string-true",
+            "consistent-zero",
+            "consistent-one",
+            "chosen-float",
+            "chosen-bool",
+            "chosen-string",
+            "extra-key",
+            "missing-consistent",
+            "missing-chosen",
+            "explicit-inconsistent",
+            "parse-error",
+        ],
+    )
+    def test_enterprise_judgement_is_strict_json_and_fail_closed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: object
+    ) -> None:
+        engine = _judgement_engine(tmp_path, monkeypatch, payload)
+        candidates = [{"question": "如何办理？", "reply": "APPROVED_KB_ANSWER", "record_id": "r1"}]
+    
+>       assert engine._enterprise_answer_via_judgement("如何办理？", candidates) == [EXACT_NO_ANSWER]
+E       AssertionError: assert ['未在当前企业年报知识库中找到对应答案。'] == ['暂未查到对应答案']
+E         
+E         At index 0 diff: '未在当前企业年报知识库中找到对应答案。' != '暂未查到对应答案'
+E         
+E         Full diff:
+E           [
+E         -     '暂未查到对应答案',
+E         +     '未在当前企业年报知识库中找到对应答案。',
+E           ]
+
+tests\test_phase1_final_fix.py:111: AssertionError
+____ test_enterprise_judgement_is_strict_json_and_fail_closed[parse-error] ____
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-115/test_enterprise_judgement_is_s11')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001F7EF2A23D0>
+payload = 'not-json'
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"chosen": 1, "consistent": "false"},
+            {"chosen": 1, "consistent": "true"},
+            {"chosen": 1, "consistent": 0},
+            {"chosen": 1, "consistent": 1},
+            {"chosen": 1.0, "consistent": True},
+            {"chosen": True, "consistent": True},
+            {"chosen": "1", "consistent": True},
+            {"chosen": 1, "consistent": True, "answer": "MODEL_AUTHORED_TEXT"},
+            {"chosen": 1},
+            {"consistent": True},
+            {"chosen": 1, "consistent": False},
+            "not-json",
+        ],
+        ids=[
+            "consistent-string-false",
+            "consistent-string-true",
+            "consistent-zero",
+            "consistent-one",
+            "chosen-float",
+            "chosen-bool",
+            "chosen-string",
+            "extra-key",
+            "missing-consistent",
+            "missing-chosen",
+            "explicit-inconsistent",
+            "parse-error",
+        ],
+    )
+    def test_enterprise_judgement_is_strict_json_and_fail_closed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: object
+    ) -> None:
+        engine = _judgement_engine(tmp_path, monkeypatch, payload)
+        candidates = [{"question": "如何办理？", "reply": "APPROVED_KB_ANSWER", "record_id": "r1"}]
+    
+>       assert engine._enterprise_answer_via_judgement("如何办理？", candidates) == [EXACT_NO_ANSWER]
+E       AssertionError: assert ['未在当前企业年报知识库中找到对应答案。'] == ['暂未查到对应答案']
+E         
+E         At index 0 diff: '未在当前企业年报知识库中找到对应答案。' != '暂未查到对应答案'
+E         
+E         Full diff:
+E           [
+E         -     '暂未查到对应答案',
+E         +     '未在当前企业年报知识库中找到对应答案。',
+E           ]
+
+tests\test_phase1_final_fix.py:111: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[consistent-string-false]
+FAILED tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[consistent-string-true]
+FAILED tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[consistent-zero]
+FAILED tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[consistent-one]
+FAILED tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[chosen-float]
+FAILED tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[chosen-bool]
+FAILED tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[chosen-string]
+FAILED tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[extra-key]
+FAILED tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[missing-consistent]
+FAILED tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[missing-chosen]
+FAILED tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[explicit-inconsistent]
+FAILED tests/test_phase1_final_fix.py::test_enterprise_judgement_is_strict_json_and_fail_closed[parse-error]
+================= 12 failed, 1 passed, 4 deselected in 0.90s ==================

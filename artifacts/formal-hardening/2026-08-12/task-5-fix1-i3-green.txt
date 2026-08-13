@@ -1,0 +1,4 @@
+﻿COMMAND=.venv\Scripts\python.exe -m pytest tests/test_persistence.py::test_entire_suite_uses_session_data_root_isolation tests/test_persistence.py::test_full_data_directory_snapshot_includes_credentials_ledger_logs_salt_and_backups -q
+EXIT_CODE=0
+..                                                                       [100%]
+2 passed in 0.29s

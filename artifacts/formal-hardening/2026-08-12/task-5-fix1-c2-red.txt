@@ -1,0 +1,518 @@
+﻿COMMAND=.venv\Scripts\python.exe -m pytest tests/test_persistence.py::test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send -q
+EXIT_CODE=1
+FFFFFF                                                                   [100%]
+================================== FAILURES ===================================
+_ test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send[off-personal] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-93/test_queued_managed_workers_re0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x00000251E28A57D0>
+path = 'personal', transition = 'off'
+
+    @pytest.mark.parametrize("path", ["personal", "group"])
+    @pytest.mark.parametrize("transition", ["off", "vector_invalid", "memory_missing"])
+    def test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send(
+        tmp_path,
+        monkeypatch,
+        path,
+        transition,
+    ):
+        import main as main_module
+    
+        pending = []
+    
+        class DeferredThread:
+            def __init__(self, target, **kwargs):
+                self.target = target
+    
+            def start(self):
+                pending.append(self.target)
+    
+        class RecordingSender:
+            def __init__(self):
+                self.calls = []
+    
+            def send(self, window, text):
+                self.calls.append((window, text))
+                return True, "sent"
+    
+        window = type("Window", (), {"title": "customer"})()
+        settings = settings_module.AppSettings()
+        settings.managed_mode = "full"
+        settings.auto_reply_delay_seconds = 0
+        memory = StyleMemory(path=tmp_path / "memory.json")
+        memory.vector_ready = True
+        app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
+        app.settings = settings
+        app.memory = memory
+        app.startup_blocking_error = ""
+        app.sender = RecordingSender()
+        app.queue = type("Queue", (), {"items": [], "put": lambda self, item: self.items.append(item)})()
+        app.current_window = window
+        app.current_context = "[�Է�] ������ΰ���"
+        app.engine = type("Engine", (), {"last_error": "", "last_source": "knowledge"})()
+        app.detector = type("Detector", (), {})()
+        app._managed_preflight_context = lambda current_window: app.current_context
+        app.last_auto_reply_signature = ""
+        app.pending_auto_reply_signature = ""
+        app.handled_auto_reply_signatures = set()
+        app.managed_send_inflight = False
+        app.managed_waiting_for_own_echo = False
+        app.managed_last_handled_turn_messages = []
+        app.managed_last_handled_turn_key = ""
+        app.managed_last_handled_partner = ""
+        monkeypatch.setattr(main_module.threading, "Thread", DeferredThread)
+        monkeypatch.setattr(main_module, "_managed_live_send_window", lambda detector, expected: expected)
+    
+        if path == "personal":
+            app._maybe_managed_send(app.current_context, ["�뵽���񴰿ڰ���"])
+        else:
+            app._send_group_reply(window, "Ⱥ�Ļظ�", "Ⱥ������")
+        assert len(pending) == 1
+    
+        if transition == "off":
+            settings.managed_mode = "off"
+        elif transition == "vector_invalid":
+            memory.vector_ready = False
+            memory.last_vector_error = "vector invalid after queue"
+        else:
+            app.memory = None
+        pending.pop()()
+    
+>       assert app.sender.calls == []
+E       AssertionError: assert [(<test_persi..., '�뵽���񴰿ڰ���')] == []
+E         
+E         Left contains one more item: (<test_persistence.Window object at 0x00000251E2844290>, '�뵽���񴰿ڰ���')
+E         Use -v to get more diff
+
+tests\test_persistence.py:618: AssertionError
+_ test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send[off-group] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-93/test_queued_managed_workers_re1')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x00000251E28A5ED0>
+path = 'group', transition = 'off'
+
+    @pytest.mark.parametrize("path", ["personal", "group"])
+    @pytest.mark.parametrize("transition", ["off", "vector_invalid", "memory_missing"])
+    def test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send(
+        tmp_path,
+        monkeypatch,
+        path,
+        transition,
+    ):
+        import main as main_module
+    
+        pending = []
+    
+        class DeferredThread:
+            def __init__(self, target, **kwargs):
+                self.target = target
+    
+            def start(self):
+                pending.append(self.target)
+    
+        class RecordingSender:
+            def __init__(self):
+                self.calls = []
+    
+            def send(self, window, text):
+                self.calls.append((window, text))
+                return True, "sent"
+    
+        window = type("Window", (), {"title": "customer"})()
+        settings = settings_module.AppSettings()
+        settings.managed_mode = "full"
+        settings.auto_reply_delay_seconds = 0
+        memory = StyleMemory(path=tmp_path / "memory.json")
+        memory.vector_ready = True
+        app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
+        app.settings = settings
+        app.memory = memory
+        app.startup_blocking_error = ""
+        app.sender = RecordingSender()
+        app.queue = type("Queue", (), {"items": [], "put": lambda self, item: self.items.append(item)})()
+        app.current_window = window
+        app.current_context = "[�Է�] ������ΰ���"
+        app.engine = type("Engine", (), {"last_error": "", "last_source": "knowledge"})()
+        app.detector = type("Detector", (), {})()
+        app._managed_preflight_context = lambda current_window: app.current_context
+        app.last_auto_reply_signature = ""
+        app.pending_auto_reply_signature = ""
+        app.handled_auto_reply_signatures = set()
+        app.managed_send_inflight = False
+        app.managed_waiting_for_own_echo = False
+        app.managed_last_handled_turn_messages = []
+        app.managed_last_handled_turn_key = ""
+        app.managed_last_handled_partner = ""
+        monkeypatch.setattr(main_module.threading, "Thread", DeferredThread)
+        monkeypatch.setattr(main_module, "_managed_live_send_window", lambda detector, expected: expected)
+    
+        if path == "personal":
+            app._maybe_managed_send(app.current_context, ["�뵽���񴰿ڰ���"])
+        else:
+            app._send_group_reply(window, "Ⱥ�Ļظ�", "Ⱥ������")
+        assert len(pending) == 1
+    
+        if transition == "off":
+            settings.managed_mode = "off"
+        elif transition == "vector_invalid":
+            memory.vector_ready = False
+            memory.last_vector_error = "vector invalid after queue"
+        else:
+            app.memory = None
+        pending.pop()()
+    
+>       assert app.sender.calls == []
+E       AssertionError: assert [(<test_persi...890>, 'Ⱥ�Ļظ�')] == []
+E         
+E         Left contains one more item: (<test_persistence.Window object at 0x00000251FED93890>, 'Ⱥ�Ļظ�')
+E         Use -v to get more diff
+
+tests\test_persistence.py:618: AssertionError
+_ test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send[vector_invalid-personal] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-93/test_queued_managed_workers_re2')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x00000251FF35B550>
+path = 'personal', transition = 'vector_invalid'
+
+    @pytest.mark.parametrize("path", ["personal", "group"])
+    @pytest.mark.parametrize("transition", ["off", "vector_invalid", "memory_missing"])
+    def test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send(
+        tmp_path,
+        monkeypatch,
+        path,
+        transition,
+    ):
+        import main as main_module
+    
+        pending = []
+    
+        class DeferredThread:
+            def __init__(self, target, **kwargs):
+                self.target = target
+    
+            def start(self):
+                pending.append(self.target)
+    
+        class RecordingSender:
+            def __init__(self):
+                self.calls = []
+    
+            def send(self, window, text):
+                self.calls.append((window, text))
+                return True, "sent"
+    
+        window = type("Window", (), {"title": "customer"})()
+        settings = settings_module.AppSettings()
+        settings.managed_mode = "full"
+        settings.auto_reply_delay_seconds = 0
+        memory = StyleMemory(path=tmp_path / "memory.json")
+        memory.vector_ready = True
+        app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
+        app.settings = settings
+        app.memory = memory
+        app.startup_blocking_error = ""
+        app.sender = RecordingSender()
+        app.queue = type("Queue", (), {"items": [], "put": lambda self, item: self.items.append(item)})()
+        app.current_window = window
+        app.current_context = "[�Է�] ������ΰ���"
+        app.engine = type("Engine", (), {"last_error": "", "last_source": "knowledge"})()
+        app.detector = type("Detector", (), {})()
+        app._managed_preflight_context = lambda current_window: app.current_context
+        app.last_auto_reply_signature = ""
+        app.pending_auto_reply_signature = ""
+        app.handled_auto_reply_signatures = set()
+        app.managed_send_inflight = False
+        app.managed_waiting_for_own_echo = False
+        app.managed_last_handled_turn_messages = []
+        app.managed_last_handled_turn_key = ""
+        app.managed_last_handled_partner = ""
+        monkeypatch.setattr(main_module.threading, "Thread", DeferredThread)
+        monkeypatch.setattr(main_module, "_managed_live_send_window", lambda detector, expected: expected)
+    
+        if path == "personal":
+            app._maybe_managed_send(app.current_context, ["�뵽���񴰿ڰ���"])
+        else:
+            app._send_group_reply(window, "Ⱥ�Ļظ�", "Ⱥ������")
+        assert len(pending) == 1
+    
+        if transition == "off":
+            settings.managed_mode = "off"
+        elif transition == "vector_invalid":
+            memory.vector_ready = False
+            memory.last_vector_error = "vector invalid after queue"
+        else:
+            app.memory = None
+        pending.pop()()
+    
+>       assert app.sender.calls == []
+E       AssertionError: assert [(<test_persi..., '�뵽���񴰿ڰ���')] == []
+E         
+E         Left contains one more item: (<test_persistence.Window object at 0x00000251FF358FD0>, '�뵽���񴰿ڰ���')
+E         Use -v to get more diff
+
+tests\test_persistence.py:618: AssertionError
+------------------------------ Captured log call ------------------------------
+INFO     wechat_assistant.runtime.84f01d381deb037de0cc128001eee6b2bba10bb1ab76888c0f53d318b1b42d23:main.py:72 managed-send-diagnostic
+INFO     wechat_assistant.runtime.84f01d381deb037de0cc128001eee6b2bba10bb1ab76888c0f53d318b1b42d23:main.py:72 managed-send-diagnostic
+INFO     wechat_assistant.runtime.84f01d381deb037de0cc128001eee6b2bba10bb1ab76888c0f53d318b1b42d23:main.py:72 managed-send-diagnostic
+_ test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send[vector_invalid-group] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-93/test_queued_managed_workers_re3')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x00000251FF409350>
+path = 'group', transition = 'vector_invalid'
+
+    @pytest.mark.parametrize("path", ["personal", "group"])
+    @pytest.mark.parametrize("transition", ["off", "vector_invalid", "memory_missing"])
+    def test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send(
+        tmp_path,
+        monkeypatch,
+        path,
+        transition,
+    ):
+        import main as main_module
+    
+        pending = []
+    
+        class DeferredThread:
+            def __init__(self, target, **kwargs):
+                self.target = target
+    
+            def start(self):
+                pending.append(self.target)
+    
+        class RecordingSender:
+            def __init__(self):
+                self.calls = []
+    
+            def send(self, window, text):
+                self.calls.append((window, text))
+                return True, "sent"
+    
+        window = type("Window", (), {"title": "customer"})()
+        settings = settings_module.AppSettings()
+        settings.managed_mode = "full"
+        settings.auto_reply_delay_seconds = 0
+        memory = StyleMemory(path=tmp_path / "memory.json")
+        memory.vector_ready = True
+        app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
+        app.settings = settings
+        app.memory = memory
+        app.startup_blocking_error = ""
+        app.sender = RecordingSender()
+        app.queue = type("Queue", (), {"items": [], "put": lambda self, item: self.items.append(item)})()
+        app.current_window = window
+        app.current_context = "[�Է�] ������ΰ���"
+        app.engine = type("Engine", (), {"last_error": "", "last_source": "knowledge"})()
+        app.detector = type("Detector", (), {})()
+        app._managed_preflight_context = lambda current_window: app.current_context
+        app.last_auto_reply_signature = ""
+        app.pending_auto_reply_signature = ""
+        app.handled_auto_reply_signatures = set()
+        app.managed_send_inflight = False
+        app.managed_waiting_for_own_echo = False
+        app.managed_last_handled_turn_messages = []
+        app.managed_last_handled_turn_key = ""
+        app.managed_last_handled_partner = ""
+        monkeypatch.setattr(main_module.threading, "Thread", DeferredThread)
+        monkeypatch.setattr(main_module, "_managed_live_send_window", lambda detector, expected: expected)
+    
+        if path == "personal":
+            app._maybe_managed_send(app.current_context, ["�뵽���񴰿ڰ���"])
+        else:
+            app._send_group_reply(window, "Ⱥ�Ļظ�", "Ⱥ������")
+        assert len(pending) == 1
+    
+        if transition == "off":
+            settings.managed_mode = "off"
+        elif transition == "vector_invalid":
+            memory.vector_ready = False
+            memory.last_vector_error = "vector invalid after queue"
+        else:
+            app.memory = None
+        pending.pop()()
+    
+>       assert app.sender.calls == []
+E       AssertionError: assert [(<test_persi...810>, 'Ⱥ�Ļظ�')] == []
+E         
+E         Left contains one more item: (<test_persistence.Window object at 0x00000251FF409810>, 'Ⱥ�Ļظ�')
+E         Use -v to get more diff
+
+tests\test_persistence.py:618: AssertionError
+_ test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send[memory_missing-personal] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-93/test_queued_managed_workers_re4')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x00000251FF358B10>
+path = 'personal', transition = 'memory_missing'
+
+    @pytest.mark.parametrize("path", ["personal", "group"])
+    @pytest.mark.parametrize("transition", ["off", "vector_invalid", "memory_missing"])
+    def test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send(
+        tmp_path,
+        monkeypatch,
+        path,
+        transition,
+    ):
+        import main as main_module
+    
+        pending = []
+    
+        class DeferredThread:
+            def __init__(self, target, **kwargs):
+                self.target = target
+    
+            def start(self):
+                pending.append(self.target)
+    
+        class RecordingSender:
+            def __init__(self):
+                self.calls = []
+    
+            def send(self, window, text):
+                self.calls.append((window, text))
+                return True, "sent"
+    
+        window = type("Window", (), {"title": "customer"})()
+        settings = settings_module.AppSettings()
+        settings.managed_mode = "full"
+        settings.auto_reply_delay_seconds = 0
+        memory = StyleMemory(path=tmp_path / "memory.json")
+        memory.vector_ready = True
+        app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
+        app.settings = settings
+        app.memory = memory
+        app.startup_blocking_error = ""
+        app.sender = RecordingSender()
+        app.queue = type("Queue", (), {"items": [], "put": lambda self, item: self.items.append(item)})()
+        app.current_window = window
+        app.current_context = "[�Է�] ������ΰ���"
+        app.engine = type("Engine", (), {"last_error": "", "last_source": "knowledge"})()
+        app.detector = type("Detector", (), {})()
+        app._managed_preflight_context = lambda current_window: app.current_context
+        app.last_auto_reply_signature = ""
+        app.pending_auto_reply_signature = ""
+        app.handled_auto_reply_signatures = set()
+        app.managed_send_inflight = False
+        app.managed_waiting_for_own_echo = False
+        app.managed_last_handled_turn_messages = []
+        app.managed_last_handled_turn_key = ""
+        app.managed_last_handled_partner = ""
+        monkeypatch.setattr(main_module.threading, "Thread", DeferredThread)
+        monkeypatch.setattr(main_module, "_managed_live_send_window", lambda detector, expected: expected)
+    
+        if path == "personal":
+            app._maybe_managed_send(app.current_context, ["�뵽���񴰿ڰ���"])
+        else:
+            app._send_group_reply(window, "Ⱥ�Ļظ�", "Ⱥ������")
+        assert len(pending) == 1
+    
+        if transition == "off":
+            settings.managed_mode = "off"
+        elif transition == "vector_invalid":
+            memory.vector_ready = False
+            memory.last_vector_error = "vector invalid after queue"
+        else:
+            app.memory = None
+        pending.pop()()
+    
+>       assert app.sender.calls == []
+E       AssertionError: assert [(<test_persi..., '�뵽���񴰿ڰ���')] == []
+E         
+E         Left contains one more item: (<test_persistence.Window object at 0x00000251FF35BB90>, '�뵽���񴰿ڰ���')
+E         Use -v to get more diff
+
+tests\test_persistence.py:618: AssertionError
+------------------------------ Captured log call ------------------------------
+INFO     wechat_assistant.runtime.84f01d381deb037de0cc128001eee6b2bba10bb1ab76888c0f53d318b1b42d23:main.py:72 managed-send-diagnostic
+INFO     wechat_assistant.runtime.84f01d381deb037de0cc128001eee6b2bba10bb1ab76888c0f53d318b1b42d23:main.py:72 managed-send-diagnostic
+INFO     wechat_assistant.runtime.84f01d381deb037de0cc128001eee6b2bba10bb1ab76888c0f53d318b1b42d23:main.py:72 managed-send-diagnostic
+_ test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send[memory_missing-group] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-93/test_queued_managed_workers_re5')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x00000251FF358C90>
+path = 'group', transition = 'memory_missing'
+
+    @pytest.mark.parametrize("path", ["personal", "group"])
+    @pytest.mark.parametrize("transition", ["off", "vector_invalid", "memory_missing"])
+    def test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send(
+        tmp_path,
+        monkeypatch,
+        path,
+        transition,
+    ):
+        import main as main_module
+    
+        pending = []
+    
+        class DeferredThread:
+            def __init__(self, target, **kwargs):
+                self.target = target
+    
+            def start(self):
+                pending.append(self.target)
+    
+        class RecordingSender:
+            def __init__(self):
+                self.calls = []
+    
+            def send(self, window, text):
+                self.calls.append((window, text))
+                return True, "sent"
+    
+        window = type("Window", (), {"title": "customer"})()
+        settings = settings_module.AppSettings()
+        settings.managed_mode = "full"
+        settings.auto_reply_delay_seconds = 0
+        memory = StyleMemory(path=tmp_path / "memory.json")
+        memory.vector_ready = True
+        app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
+        app.settings = settings
+        app.memory = memory
+        app.startup_blocking_error = ""
+        app.sender = RecordingSender()
+        app.queue = type("Queue", (), {"items": [], "put": lambda self, item: self.items.append(item)})()
+        app.current_window = window
+        app.current_context = "[�Է�] ������ΰ���"
+        app.engine = type("Engine", (), {"last_error": "", "last_source": "knowledge"})()
+        app.detector = type("Detector", (), {})()
+        app._managed_preflight_context = lambda current_window: app.current_context
+        app.last_auto_reply_signature = ""
+        app.pending_auto_reply_signature = ""
+        app.handled_auto_reply_signatures = set()
+        app.managed_send_inflight = False
+        app.managed_waiting_for_own_echo = False
+        app.managed_last_handled_turn_messages = []
+        app.managed_last_handled_turn_key = ""
+        app.managed_last_handled_partner = ""
+        monkeypatch.setattr(main_module.threading, "Thread", DeferredThread)
+        monkeypatch.setattr(main_module, "_managed_live_send_window", lambda detector, expected: expected)
+    
+        if path == "personal":
+            app._maybe_managed_send(app.current_context, ["�뵽���񴰿ڰ���"])
+        else:
+            app._send_group_reply(window, "Ⱥ�Ļظ�", "Ⱥ������")
+        assert len(pending) == 1
+    
+        if transition == "off":
+            settings.managed_mode = "off"
+        elif transition == "vector_invalid":
+            memory.vector_ready = False
+            memory.last_vector_error = "vector invalid after queue"
+        else:
+            app.memory = None
+        pending.pop()()
+    
+>       assert app.sender.calls == []
+E       AssertionError: assert [(<test_persi...550>, 'Ⱥ�Ļظ�')] == []
+E         
+E         Left contains one more item: (<test_persistence.Window object at 0x00000251FF358550>, 'Ⱥ�Ļظ�')
+E         Use -v to get more diff
+
+tests\test_persistence.py:618: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_persistence.py::test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send[off-personal]
+FAILED tests/test_persistence.py::test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send[off-group]
+FAILED tests/test_persistence.py::test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send[vector_invalid-personal]
+FAILED tests/test_persistence.py::test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send[vector_invalid-group]
+FAILED tests/test_persistence.py::test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send[memory_missing-personal]
+FAILED tests/test_persistence.py::test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send[memory_missing-group]
+6 failed in 1.50s

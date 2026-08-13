@@ -1,0 +1,17 @@
+﻿{
+    "algorithm":  "sha256",
+    "scope_note":  "Fix Round 2 updates runtime_logging.py, main.py, and tests/test_persistence.py; the complete Phase 1 production/test audit scope remains 11 files.",
+    "files":  {
+                  "app_paths.py":  "f8f5ff09720facc8b5384d302ae1f6a9083042a573cea5ecbde2060d1a530440",
+                  "atomic_json.py":  "7aa66d59f228bcfe404c471a3f700aa06b53889068a944b686059c8b70874e1b",
+                  "secure_store.py":  "5dd70dcd1d5c5b33f4622687cc9862102a8cf5bba25c12b8f4d3fcd848d49bba",
+                  "runtime_logging.py":  "d3c2f6cb9c459b9dd672924cd36727ffd85c786cb2911c7aa45ce80e7c1b5cbb",
+                  "settings.py":  "0c83c8efb7f5a2a4f5cdb68f09b96a95cb437bdf88834b0ef33d2258a378e541",
+                  "memory.py":  "3eb04ad35be57b66a961013889cc20586e480f7dbc3fe99848b712dd7b7a4c6b",
+                  "float_ui.py":  "fdbc5362b06f2d4ecdda11d6790fd9b2109ca947c9740dc438538b3f2a68e5bb",
+                  "main.py":  "0ffddeb09a056d982b17c931a257ec5315c5487cd301273e6fd49717457184ea",
+                  "tests/test_persistence.py":  "e3df1e32be627df6d9346e27b39b2631264c910b6259bee1097f069394a800d0",
+                  "tests/test_core.py":  "1d92460f414c875ef103042daefdbd20798ed82ff12f81d82703c4ebdd92f5f3",
+                  "tests/conftest.py":  "5c1c67648a5c77c3d6a7dbf34dd3770a436c6f3ca6f4e4720aaf1864ebf3d2a8"
+              }
+}

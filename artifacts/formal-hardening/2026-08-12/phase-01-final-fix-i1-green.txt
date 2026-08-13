@@ -1,0 +1,19 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- D:\Vibe C\客服\wechat--main\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\Vibe C\客服\wechat--main
+collecting ... collected 31 items / 20 deselected / 11 selected
+
+tests/test_phase1_final_fix.py::test_custom_json_templates_reject_semantic_literal_credentials[unicode-key] PASSED [  9%]
+tests/test_phase1_final_fix.py::test_custom_json_templates_reject_semantic_literal_credentials[uppercase-key] PASSED [ 18%]
+tests/test_phase1_final_fix.py::test_custom_json_templates_reject_semantic_literal_credentials[camel-key] PASSED [ 27%]
+tests/test_phase1_final_fix.py::test_custom_json_templates_reject_semantic_literal_credentials[separator-key] PASSED [ 36%]
+tests/test_phase1_final_fix.py::test_custom_json_templates_reject_semantic_literal_credentials[nested-dict-list] PASSED [ 45%]
+tests/test_phase1_final_fix.py::test_custom_json_templates_reject_semantic_literal_credentials[nested-list-dict] PASSED [ 54%]
+tests/test_phase1_final_fix.py::test_custom_json_templates_reject_semantic_literal_credentials[escaped-literal-value] PASSED [ 63%]
+tests/test_phase1_final_fix.py::test_custom_json_templates_reject_semantic_literal_credentials[literal-before-placeholder] PASSED [ 72%]
+tests/test_phase1_final_fix.py::test_custom_json_templates_reject_semantic_literal_credentials[literal-after-placeholder] PASSED [ 81%]
+tests/test_phase1_final_fix.py::test_custom_json_templates_allow_only_approved_api_key_placeholder_forms PASSED [ 90%]
+tests/test_phase1_final_fix.py::test_unicode_escaped_sensitive_key_never_reaches_primary_or_five_backups PASSED [100%]
+
+====================== 11 passed, 20 deselected in 0.95s ======================

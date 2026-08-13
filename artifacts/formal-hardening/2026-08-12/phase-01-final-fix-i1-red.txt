@@ -1,0 +1,82 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- D:\Vibe C\客服\wechat--main\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\Vibe C\客服\wechat--main
+collecting ... collected 31 items / 20 deselected / 11 selected
+
+tests/test_phase1_final_fix.py::test_custom_json_templates_reject_semantic_literal_credentials[unicode-key] FAILED [  9%]
+tests/test_phase1_final_fix.py::test_custom_json_templates_reject_semantic_literal_credentials[uppercase-key] PASSED [ 18%]
+tests/test_phase1_final_fix.py::test_custom_json_templates_reject_semantic_literal_credentials[camel-key] PASSED [ 27%]
+tests/test_phase1_final_fix.py::test_custom_json_templates_reject_semantic_literal_credentials[separator-key] PASSED [ 36%]
+tests/test_phase1_final_fix.py::test_custom_json_templates_reject_semantic_literal_credentials[nested-dict-list] PASSED [ 45%]
+tests/test_phase1_final_fix.py::test_custom_json_templates_reject_semantic_literal_credentials[nested-list-dict] PASSED [ 54%]
+tests/test_phase1_final_fix.py::test_custom_json_templates_reject_semantic_literal_credentials[escaped-literal-value] PASSED [ 63%]
+tests/test_phase1_final_fix.py::test_custom_json_templates_reject_semantic_literal_credentials[literal-before-placeholder] PASSED [ 72%]
+tests/test_phase1_final_fix.py::test_custom_json_templates_reject_semantic_literal_credentials[literal-after-placeholder] PASSED [ 81%]
+tests/test_phase1_final_fix.py::test_custom_json_templates_allow_only_approved_api_key_placeholder_forms PASSED [ 90%]
+tests/test_phase1_final_fix.py::test_unicode_escaped_sensitive_key_never_reaches_primary_or_five_backups FAILED [100%]
+
+================================== FAILURES ===================================
+_ test_custom_json_templates_reject_semantic_literal_credentials[unicode-key] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-123/test_custom_json_templates_rej0')
+field = 'custom_headers', template = '{"X-\\u0041uth":"literal-unicode-secret"}'
+
+    @pytest.mark.parametrize(
+        ("field", "template"),
+        [
+            ("custom_headers", '{"X-\\u0041uth":"literal-unicode-secret"}'),
+            ("custom_headers", '{"AUTHORIZATION":"literal-uppercase-secret"}'),
+            ("custom_headers", '{"proxyAuthorization":"literal-camel-secret"}'),
+            ("custom_body", '{"access-token":"literal-separated-secret"}'),
+            ("custom_body", '{"outer":[{"clientSecret":"literal-nested-secret"}]}'),
+            ("custom_body", '{"outer":{"items":[{"credential":"literal-list-secret"}]}}'),
+            ("custom_headers", '{"Authorization":"Bearer lit\\u0065ral-escaped-secret"}'),
+            ("custom_body", '{"password":"prefix-{api_key}"}'),
+            ("custom_body", '{"token":"{api_key}-suffix"}'),
+        ],
+        ids=[
+            "unicode-key",
+            "uppercase-key",
+            "camel-key",
+            "separator-key",
+            "nested-dict-list",
+            "nested-list-dict",
+            "escaped-literal-value",
+            "literal-before-placeholder",
+            "literal-after-placeholder",
+        ],
+    )
+    def test_custom_json_templates_reject_semantic_literal_credentials(
+        tmp_path: Path, field: str, template: str
+    ) -> None:
+        settings = AppSettings(
+            config_path=tmp_path / "settings.json",
+            credential_store=_MemoryCredentialStore(),
+        )
+        setattr(settings, field, template)
+    
+>       with pytest.raises(SettingsValidationError):
+E       Failed: DID NOT RAISE SettingsValidationError
+
+tests\test_phase1_final_fix.py:264: Failed
+__ test_unicode_escaped_sensitive_key_never_reaches_primary_or_five_backups ___
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-123/test_unicode_escaped_sensitive0')
+
+    def test_unicode_escaped_sensitive_key_never_reaches_primary_or_five_backups(tmp_path: Path) -> None:
+        path = tmp_path / "settings.json"
+        settings = AppSettings(config_path=path, credential_store=_MemoryCredentialStore())
+        for index in range(7):
+            settings.model = f"safe-model-{index}"
+            settings.save()
+    
+        settings.custom_headers = '{"X-\\u0041uth":"literal-secret-must-not-persist"}'
+>       with pytest.raises(SettingsValidationError):
+E       Failed: DID NOT RAISE SettingsValidationError
+
+tests\test_phase1_final_fix.py:296: Failed
+=========================== short test summary info ===========================
+FAILED tests/test_phase1_final_fix.py::test_custom_json_templates_reject_semantic_literal_credentials[unicode-key]
+FAILED tests/test_phase1_final_fix.py::test_unicode_escaped_sensitive_key_never_reaches_primary_or_five_backups
+================= 2 failed, 9 passed, 20 deselected in 1.29s ==================

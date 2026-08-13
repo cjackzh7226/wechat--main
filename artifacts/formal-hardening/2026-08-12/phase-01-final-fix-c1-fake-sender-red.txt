@@ -1,0 +1,55 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- D:\Vibe C\客服\wechat--main\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\Vibe C\客服\wechat--main
+collecting ... collected 20 items / 18 deselected / 2 selected
+
+tests/test_phase1_final_fix.py::test_personal_fake_sender_receives_only_exact_no_answer_for_knowledge_miss FAILED [ 50%]
+tests/test_phase1_final_fix.py::test_group_fake_sender_receives_only_exact_no_answer_for_knowledge_miss FAILED [100%]
+
+================================== FAILURES ===================================
+_ test_personal_fake_sender_receives_only_exact_no_answer_for_knowledge_miss __
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-117/test_personal_fake_sender_rece0')
+
+    def test_personal_fake_sender_receives_only_exact_no_answer_for_knowledge_miss(tmp_path: Path) -> None:
+        engine = _empty_engine(tmp_path)
+        context = "[对方] 这个怎么办？"
+    
+>       assert _send_personal_reply(engine, context, engine.generate(context, "客户")) == [EXACT_NO_ANSWER]
+E       AssertionError: assert ['暂时未查到对应答案。'] == ['暂未查到对应答案']
+E         
+E         At index 0 diff: '暂时未查到对应答案。' != '暂未查到对应答案'
+E         
+E         Full diff:
+E           [
+E         -     '暂未查到对应答案',
+E         +     '暂时未查到对应答案。',
+E         ?       +       +
+E           ]
+
+tests\test_phase1_final_fix.py:148: AssertionError
+___ test_group_fake_sender_receives_only_exact_no_answer_for_knowledge_miss ___
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-117/test_group_fake_sender_receive0')
+
+    def test_group_fake_sender_receives_only_exact_no_answer_for_knowledge_miss(tmp_path: Path) -> None:
+        engine = _empty_engine(tmp_path)
+        question = "谢谢"
+    
+>       assert _send_group_reply(engine, question, engine.generate(question, "群聊")) == [EXACT_NO_ANSWER]
+E       AssertionError: assert ['不客气，拿到就行'] == ['暂未查到对应答案']
+E         
+E         At index 0 diff: '不客气，拿到就行' != '暂未查到对应答案'
+E         
+E         Full diff:
+E           [
+E         -     '暂未查到对应答案',
+E         +     '不客气，拿到就行',
+E           ]
+
+tests\test_phase1_final_fix.py:155: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_phase1_final_fix.py::test_personal_fake_sender_receives_only_exact_no_answer_for_knowledge_miss
+FAILED tests/test_phase1_final_fix.py::test_group_fake_sender_receives_only_exact_no_answer_for_knowledge_miss
+====================== 2 failed, 18 deselected in 1.14s =======================

@@ -1,0 +1,517 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- D:\Vibe C\客服\wechat--main\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\Vibe C\客服\wechat--main
+collecting ... collected 55 items / 31 deselected / 24 selected
+
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[1-write] FAILED [  4%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[1-fsync] FAILED [  8%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[1-replace] FAILED [ 12%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[2-write] FAILED [ 16%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[2-fsync] FAILED [ 20%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[2-replace] FAILED [ 25%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[3-write] FAILED [ 29%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[3-fsync] FAILED [ 33%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[3-replace] FAILED [ 37%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[4-write] FAILED [ 41%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[4-fsync] FAILED [ 45%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[4-replace] FAILED [ 50%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[5-write] FAILED [ 54%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[5-fsync] FAILED [ 58%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[5-replace] FAILED [ 62%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[1] FAILED [ 66%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[2] FAILED [ 70%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[3] FAILED [ 75%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[4] FAILED [ 79%]
+tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[5] FAILED [ 83%]
+tests/test_phase1_final_fix.py::test_atomic_json_final_primary_replace_fault_restores_every_old_candidate_byte_for_byte FAILED [ 87%]
+tests/test_phase1_final_fix.py::test_load_json_automatically_recovers_transaction_left_by_process_crash FAILED [ 91%]
+tests/test_phase1_final_fix.py::test_secure_store_uses_same_transaction_and_restores_all_old_candidates FAILED [ 95%]
+tests/test_phase1_final_fix.py::test_backup_count_is_strictly_fixed_to_five FAILED [100%]
+
+================================== FAILURES ===================================
+_ test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[1-write] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_atomic_json_backup_fault_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9EFAB4E50>
+operation = 'write', slot = 1
+
+    @pytest.mark.parametrize("operation", ["write", "fsync", "replace"])
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, operation, f"backup:{slot}", OSError(f"fault {operation} {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:345: Failed
+_ test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[1-fsync] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_atomic_json_backup_fault_1')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9F0B74710>
+operation = 'fsync', slot = 1
+
+    @pytest.mark.parametrize("operation", ["write", "fsync", "replace"])
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, operation, f"backup:{slot}", OSError(f"fault {operation} {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:345: Failed
+_ test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[1-replace] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_atomic_json_backup_fault_2')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9CE8820D0>
+operation = 'replace', slot = 1
+
+    @pytest.mark.parametrize("operation", ["write", "fsync", "replace"])
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, operation, f"backup:{slot}", OSError(f"fault {operation} {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:345: Failed
+_ test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[2-write] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_atomic_json_backup_fault_3')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9EFAB22D0>
+operation = 'write', slot = 2
+
+    @pytest.mark.parametrize("operation", ["write", "fsync", "replace"])
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, operation, f"backup:{slot}", OSError(f"fault {operation} {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:345: Failed
+_ test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[2-fsync] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_atomic_json_backup_fault_4')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9EFAB5A10>
+operation = 'fsync', slot = 2
+
+    @pytest.mark.parametrize("operation", ["write", "fsync", "replace"])
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, operation, f"backup:{slot}", OSError(f"fault {operation} {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:345: Failed
+_ test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[2-replace] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_atomic_json_backup_fault_5')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9F0B81290>
+operation = 'replace', slot = 2
+
+    @pytest.mark.parametrize("operation", ["write", "fsync", "replace"])
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, operation, f"backup:{slot}", OSError(f"fault {operation} {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:345: Failed
+_ test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[3-write] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_atomic_json_backup_fault_6')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9F0B85210>
+operation = 'write', slot = 3
+
+    @pytest.mark.parametrize("operation", ["write", "fsync", "replace"])
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, operation, f"backup:{slot}", OSError(f"fault {operation} {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:345: Failed
+_ test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[3-fsync] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_atomic_json_backup_fault_7')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9F0B7F350>
+operation = 'fsync', slot = 3
+
+    @pytest.mark.parametrize("operation", ["write", "fsync", "replace"])
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, operation, f"backup:{slot}", OSError(f"fault {operation} {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:345: Failed
+_ test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[3-replace] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_atomic_json_backup_fault_8')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9F0B711D0>
+operation = 'replace', slot = 3
+
+    @pytest.mark.parametrize("operation", ["write", "fsync", "replace"])
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, operation, f"backup:{slot}", OSError(f"fault {operation} {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:345: Failed
+_ test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[4-write] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_atomic_json_backup_fault_9')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9F0B81B50>
+operation = 'write', slot = 4
+
+    @pytest.mark.parametrize("operation", ["write", "fsync", "replace"])
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, operation, f"backup:{slot}", OSError(f"fault {operation} {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:345: Failed
+_ test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[4-fsync] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_atomic_json_backup_fault_10')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9F0B77890>
+operation = 'fsync', slot = 4
+
+    @pytest.mark.parametrize("operation", ["write", "fsync", "replace"])
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, operation, f"backup:{slot}", OSError(f"fault {operation} {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:345: Failed
+_ test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[4-replace] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_atomic_json_backup_fault_11')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9F0B7C090>
+operation = 'replace', slot = 4
+
+    @pytest.mark.parametrize("operation", ["write", "fsync", "replace"])
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, operation, f"backup:{slot}", OSError(f"fault {operation} {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:345: Failed
+_ test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[5-write] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_atomic_json_backup_fault_12')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9F0B99B10>
+operation = 'write', slot = 5
+
+    @pytest.mark.parametrize("operation", ["write", "fsync", "replace"])
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, operation, f"backup:{slot}", OSError(f"fault {operation} {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:345: Failed
+_ test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[5-fsync] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_atomic_json_backup_fault_13')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9F0B823D0>
+operation = 'fsync', slot = 5
+
+    @pytest.mark.parametrize("operation", ["write", "fsync", "replace"])
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, operation, f"backup:{slot}", OSError(f"fault {operation} {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:345: Failed
+_ test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[5-replace] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_atomic_json_backup_fault_14')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9F0B75690>
+operation = 'replace', slot = 5
+
+    @pytest.mark.parametrize("operation", ["write", "fsync", "replace"])
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, operation, f"backup:{slot}", OSError(f"fault {operation} {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:345: Failed
+_ test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[1] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_atomic_json_backup_delete0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9F0B84E10>
+slot = 1
+
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path, valid_count=slot - 1)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, "delete", f"backup:{slot}", OSError(f"fault delete {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:360: Failed
+_ test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[2] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_atomic_json_backup_delete1')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9EFAB57D0>
+slot = 2
+
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path, valid_count=slot - 1)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, "delete", f"backup:{slot}", OSError(f"fault delete {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:360: Failed
+_ test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[3] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_atomic_json_backup_delete2')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9F0BBA210>
+slot = 3
+
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path, valid_count=slot - 1)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, "delete", f"backup:{slot}", OSError(f"fault delete {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:360: Failed
+_ test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[4] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_atomic_json_backup_delete3')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9CE9AEED0>
+slot = 4
+
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path, valid_count=slot - 1)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, "delete", f"backup:{slot}", OSError(f"fault delete {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:360: Failed
+_ test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[5] _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_atomic_json_backup_delete4')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9F0B8F6D0>
+slot = 5
+
+    @pytest.mark.parametrize("slot", range(1, 6))
+    def test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slot: int
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path, valid_count=slot - 1)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, "delete", f"backup:{slot}", OSError(f"fault delete {slot}"))
+    
+>       with pytest.raises(OSError, match="fault"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:360: Failed
+_ test_atomic_json_final_primary_replace_fault_restores_every_old_candidate_byte_for_byte _
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_atomic_json_final_primary0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9EFAB2F50>
+
+    def test_atomic_json_final_primary_replace_fault_restores_every_old_candidate_byte_for_byte(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, "replace", "primary", OSError("fault primary replace"))
+    
+>       with pytest.raises(OSError, match="fault primary replace"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:374: Failed
+___ test_load_json_automatically_recovers_transaction_left_by_process_crash ___
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_load_json_automatically_r0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9CE9AFE10>
+
+    def test_load_json_automatically_recovers_transaction_left_by_process_crash(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "settings.json"
+        _seed_json_candidates(path)
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, "replace", "primary", _SimulatedCrash("process terminated"))
+    
+>       with pytest.raises(_SimulatedCrash):
+E       Failed: DID NOT RAISE _SimulatedCrash
+
+tests\test_phase1_final_fix.py:392: Failed
+___ test_secure_store_uses_same_transaction_and_restores_all_old_candidates ___
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_secure_store_uses_same_tr0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001D9F0B9D310>
+
+    def test_secure_store_uses_same_transaction_and_restores_all_old_candidates(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "credentials.dat"
+        store = secure_store.CredentialStore(path=path, protect=_protect_for_test, unprotect=_unprotect_for_test)
+        for index in range(6):
+            store.save({"provider": f"old-secret-{index}"})
+        before = _candidate_bytes(path)
+        _fail_transaction_step(monkeypatch, "replace", "backup:3", OSError("credential backup fault"))
+    
+>       with pytest.raises(OSError, match="credential backup fault"):
+E       Failed: DID NOT RAISE OSError
+
+tests\test_phase1_final_fix.py:423: Failed
+_________________ test_backup_count_is_strictly_fixed_to_five _________________
+
+tmp_path = WindowsPath('C:/Users/14913/AppData/Local/Temp/pytest-of-14913/pytest-126/test_backup_count_is_strictly_0')
+
+    def test_backup_count_is_strictly_fixed_to_five(tmp_path: Path) -> None:
+        path = tmp_path / "settings.json"
+    
+>       with pytest.raises(ValueError, match="exactly 5"):
+E       Failed: DID NOT RAISE ValueError
+
+tests\test_phase1_final_fix.py:437: Failed
+=========================== short test summary info ===========================
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[1-write]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[1-fsync]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[1-replace]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[2-write]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[2-fsync]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[2-replace]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[3-write]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[3-fsync]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[3-replace]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[4-write]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[4-fsync]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[4-replace]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[5-write]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[5-fsync]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_fault_restores_every_old_candidate_byte_for_byte[5-replace]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[1]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[2]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[3]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[4]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_backup_delete_fault_restores_every_old_candidate_byte_for_byte[5]
+FAILED tests/test_phase1_final_fix.py::test_atomic_json_final_primary_replace_fault_restores_every_old_candidate_byte_for_byte
+FAILED tests/test_phase1_final_fix.py::test_load_json_automatically_recovers_transaction_left_by_process_crash
+FAILED tests/test_phase1_final_fix.py::test_secure_store_uses_same_transaction_and_restores_all_old_candidates
+FAILED tests/test_phase1_final_fix.py::test_backup_count_is_strictly_fixed_to_five
+====================== 24 failed, 31 deselected in 2.17s ======================
