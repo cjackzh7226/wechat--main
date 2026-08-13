@@ -12,7 +12,13 @@ import pytest
 import app_paths
 from chat_identity import ChatIdentity, ChatObservation
 from managed_reply import ReplyDecision
-from managed_runtime import ManagedReplyCoordinator, RuntimeAdapters, SendAttempt
+from managed_runtime import (
+    ManagedPhase,
+    ManagedReplyCoordinator,
+    RuntimeAdapters,
+    RuntimeOutcome,
+    SendAttempt,
+)
 from release_manifest import (
     run_package_check,
     run_runtime_check,
@@ -312,7 +318,7 @@ def test_spec_and_dependency_locks_are_release_exact() -> None:
     assert "copy_metadata" in spec
     assert "requests" in spec
     assert "pywin32" in spec
-    assert __version__ == "2026.08.14.2"
+    assert __version__ == "2026.08.14.5"
     for distribution, expected in RUNTIME_DEPENDENCIES.items():
         assert f"{distribution}=={expected}" in runtime_lock
     assert "pytest==9.1.1" in dev_lock
@@ -325,3 +331,158 @@ def test_release_assets_place_calibration_at_package_root(tmp_path: Path) -> Non
     assert (tmp_path / "wecom_5_calibration.json").read_bytes() == (
         PROJECT_ROOT / "wecom_5_calibration.json"
     ).read_bytes()
+
+
+def test_desktop_shortcut_script_requires_exact_versioned_executable() -> None:
+    script = (PROJECT_ROOT / "tools" / "create_desktop_shortcut.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Resolve-Path -LiteralPath" in script
+    assert "0x804A, 0x5C0F, 0x667A" in script
+    assert "$exe.Name -ne $expectedExeName" in script
+    assert "_\\d{4}\\.\\d{2}\\.\\d{2}\\.\\d+$" in script
+    assert "$saved.TargetPath -ne $resolvedExe" in script
+
+
+def test_acceptance_event_is_explicit_machine_evidence_without_chat_text(
+    tmp_path: Path,
+) -> None:
+    import main
+
+    decision = ReplyDecision(
+        kind="answer",
+        text="PRIVATE ANSWER TEXT",
+        record_id="b" * 64,
+        answer_hash="a" * 64,
+        score=91,
+        org_scope="social",
+    )
+    outcome = RuntimeOutcome(
+        phase=ManagedPhase.RECORDED,
+        sent=True,
+        reason="verified",
+        turn_key="PRIVATE TURN KEY",
+        decision=decision,
+        phase_trace=("waiting", "recorded"),
+        attempt_count=1,
+        verification="verified",
+    )
+    report = tmp_path / "acceptance.jsonl"
+
+    main._append_acceptance_event(report, "controlled", outcome)
+
+    line = json.loads(report.read_text(encoding="utf-8"))
+    assert set(line) == {
+        "timestamp",
+        "mode",
+        "phase",
+        "reason",
+        "sent",
+        "verification",
+        "decision_kind",
+        "record_id",
+        "answer_hash",
+        "score",
+        "org_scope",
+        "attempt_count",
+    }
+    assert line["record_id"] == "b" * 64
+    assert line["answer_hash"] == "a" * 64
+    raw = report.read_text(encoding="utf-8")
+    assert "PRIVATE ANSWER TEXT" not in raw
+    assert "PRIVATE TURN KEY" not in raw
+
+
+def test_runtime_check_cli_uses_explicit_data_root_without_starting_ui(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main
+    import self_check
+
+    captured: dict[str, object] = {}
+
+    def fake_run_self_check(report_path, *, runtime_data_dir, require_wecom):
+        captured.update(
+            report_path=report_path,
+            runtime_data_dir=runtime_data_dir,
+            require_wecom=require_wecom,
+        )
+        return SimpleNamespace(ok=True)
+
+    def forbidden_app_factory():
+        raise AssertionError("runtime check must not construct the UI application")
+
+    report = tmp_path / "runtime report.json"
+    monkeypatch.setattr(self_check, "run_self_check", fake_run_self_check)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "main.py",
+            "--runtime-check",
+            "--data-dir",
+            str(tmp_path),
+            "--report",
+            str(report),
+            "--no-wecom",
+        ],
+    )
+
+    main._run_main(forbidden_app_factory)
+
+    assert captured == {
+        "report_path": report,
+        "runtime_data_dir": tmp_path,
+        "require_wecom": False,
+    }
+
+
+def test_unknown_cli_option_fails_closed_without_starting_ui(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main
+
+    monkeypatch.setattr(sys, "argv", ["main.py", "--unknown-diagnostic-gate"])
+
+    with pytest.raises(SystemExit) as error:
+        main._run_main(
+            lambda: (_ for _ in ()).throw(
+                AssertionError("unknown CLI options must not construct the UI")
+            )
+        )
+
+    assert error.value.code == 2
+
+
+def test_diagnostic_cli_runs_before_single_instance_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main
+    import self_check
+
+    calls: list[Path] = []
+
+    def fake_run_self_check(report_path, *, runtime_data_dir, require_wecom):
+        calls.append(Path(runtime_data_dir))
+        return SimpleNamespace(ok=True)
+
+    monkeypatch.setattr(self_check, "run_self_check", fake_run_self_check)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["main.py", "--runtime-check", "--data-dir", str(tmp_path)],
+    )
+
+    main.main(
+        instance_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("diagnostic commands must bypass the singleton gate")
+        ),
+        app_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("diagnostic commands must not construct the UI")
+        ),
+    )
+
+    assert calls == [tmp_path]

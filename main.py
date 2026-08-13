@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -8,6 +9,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from json import JSONDecodeError
 from pathlib import Path
@@ -72,6 +74,54 @@ try:
     import pyautogui
 except Exception:  # pragma: no cover
     pyautogui = None
+
+
+_ACCEPTANCE_REPORT_LOCK = threading.Lock()
+_ACCEPTANCE_MODES = frozenset({"observe", "controlled", "full"})
+_ACCEPTANCE_DECISION_KINDS = frozenset({"answer", "no_answer", "technical_failure", ""})
+
+
+def _append_acceptance_event(
+    path: Path | str,
+    mode: str,
+    outcome: RuntimeOutcome,
+) -> None:
+    """Append explicit release evidence without chat identity or message text."""
+    if not isinstance(outcome, RuntimeOutcome):
+        raise TypeError("outcome must be RuntimeOutcome")
+    if mode not in _ACCEPTANCE_MODES:
+        raise ValueError("acceptance mode is invalid")
+    decision = outcome.decision
+    decision_kind = decision.kind if isinstance(decision, ReplyDecision) else ""
+    if decision_kind not in _ACCEPTANCE_DECISION_KINDS:
+        decision_kind = ""
+    record_id = decision.record_id if isinstance(decision, ReplyDecision) else ""
+    answer_hash = decision.answer_hash if isinstance(decision, ReplyDecision) else ""
+    record_id = record_id if re.fullmatch(r"[0-9a-f]{64}", record_id) else ""
+    answer_hash = answer_hash if re.fullmatch(r"[0-9a-f]{64}", answer_hash) else ""
+    reason = outcome.reason if re.fullmatch(r"[a-z0-9_]{1,80}", outcome.reason) else "invalid_reason"
+    report = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "mode": mode,
+        "phase": outcome.phase.value,
+        "reason": reason,
+        "sent": outcome.sent,
+        "verification": outcome.verification or "",
+        "decision_kind": decision_kind,
+        "record_id": record_id,
+        "answer_hash": answer_hash,
+        "score": decision.score if isinstance(decision, ReplyDecision) else 0,
+        "org_scope": decision.org_scope if isinstance(decision, ReplyDecision) else "unknown",
+        "attempt_count": outcome.attempt_count,
+    }
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(report, ensure_ascii=False, separators=(",", ":")) + "\n"
+    with _ACCEPTANCE_REPORT_LOCK:
+        with target.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
 
 
 def _setup_diag_log() -> logging.Logger:
@@ -1778,6 +1828,20 @@ class WeChatStyleReplyAssistant:
 
         def completed(outcome: RuntimeOutcome) -> None:
             decision = outcome.decision
+            acceptance_path = getattr(self, "acceptance_report_path", None)
+            if acceptance_path is not None:
+                try:
+                    _append_acceptance_event(
+                        acceptance_path,
+                        getattr(self.settings, "managed_mode", "off"),
+                        outcome,
+                    )
+                except (OSError, TypeError, ValueError):
+                    self.settings.managed_mode = "off"
+                    self.queue.put((
+                        "bypass_alert",
+                        "验收证据无法安全写入，已关闭托管发送。",
+                    ))
             self._managed_pending_count = max(
                 0, int(getattr(self, "_managed_pending_count", 1)) - 1
             )
@@ -1888,30 +1952,53 @@ def main(
     app_factory=WeChatStyleReplyAssistant,
     duplicate_notifier=_show_duplicate_instance_message,
 ) -> None:
+    args = _parse_main_args()
+    if _diagnostic_requested(args):
+        _run_main(app_factory, args=args)
+        return
     instance = instance_factory()
     if not instance.acquire():
         duplicate_notifier()
         return
     try:
-        _run_main(app_factory)
+        _run_main(app_factory, args=args)
     finally:
         instance.release()
 
 
-def _run_main(app_factory=WeChatStyleReplyAssistant) -> None:
+def _parse_main_args(argv: list[str] | None = None):
     import argparse
 
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--self-check", action="store_true")
+    parser.add_argument("--runtime-check", action="store_true")
     parser.add_argument("--package-check", action="store_true")
     parser.add_argument("--api-check", action="store_true")
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--data-dir", type=Path)
+    parser.add_argument("--no-wecom", action="store_true")
+    parser.add_argument("--acceptance-report", type=Path)
+    parser.add_argument("--debug-session", action="store_true")
     parser.add_argument(
         "--managed-mode",
         choices=("off", "observe", "controlled", "full"),
     )
-    args, _unknown = parser.parse_known_args(sys.argv[1:])
-    if "--debug-session" in sys.argv:
+    return parser.parse_args(sys.argv[1:] if argv is None else argv)
+
+
+def _diagnostic_requested(args) -> bool:
+    return bool(
+        args.package_check
+        or args.self_check
+        or args.runtime_check
+        or args.api_check
+    )
+
+
+def _run_main(app_factory=WeChatStyleReplyAssistant, *, args=None) -> None:
+    if args is None:
+        args = _parse_main_args()
+    if args.debug_session:
         enable_session_debug()
     if args.package_check:
         from self_check import run_package_self_check
@@ -1920,10 +2007,14 @@ def _run_main(app_factory=WeChatStyleReplyAssistant) -> None:
         if not report.ok:
             raise SystemExit(2)
         return
-    if args.self_check:
+    if args.self_check or args.runtime_check:
         from self_check import run_self_check
 
-        report = run_self_check(args.report)
+        report = run_self_check(
+            args.report,
+            runtime_data_dir=args.data_dir,
+            require_wecom=not args.no_wecom,
+        )
         if not report.ok:
             raise SystemExit(2)
         return
@@ -1935,6 +2026,11 @@ def _run_main(app_factory=WeChatStyleReplyAssistant) -> None:
             raise SystemExit(2)
         return
     app = app_factory()
+    app.acceptance_report_path = (
+        args.acceptance_report.resolve()
+        if args.acceptance_report is not None
+        else None
+    )
     if args.managed_mode is not None:
         app.settings.managed_mode = args.managed_mode
         app.settings.auto_recognize = args.managed_mode != "off"

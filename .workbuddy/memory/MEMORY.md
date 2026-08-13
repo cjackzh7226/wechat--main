@@ -1,5 +1,17 @@
 # 聊小智项目长期记忆
 
+## 2026-08-14 当前权威状态（覆盖下方历史条目）
+
+- 自动发送只允许已批准知识记录答案原文或精确 `暂未查到对应答案`；大模型仅候选排序/一致性判断，不得生成或改写正文。
+- 当前知识合同阈值为最低分 30、领先差 8；社团/民非/both/unknown 分区，同分区不同答案 conflict 隔离。下方 20 分、自由生成/规则兜底描述均为历史，禁止复用。
+- 源码和 frozen EXE 统一读取 `%APPDATA%\WeChatStyleReplyAssistant`，测试/staging 仅通过 `WECHAT_ASSISTANT_DATA_DIR` 覆盖；EXE 不再读包内 `user_data`。
+- 正式包采用不可覆盖的版本化 windowed onedir；当前候选为 `2026.08.14.5`。不再覆盖旧 v4 目录；失败包保留，修复版递增版本号。
+- Phase 2 PASS：真实来源 449 -> 435，14 条完全重复，19 组/40 条冲突。正式 AppData 仍待 Phase 4 最终 apply。
+- Phase 3 PASS：个人/群聊共用唯一串行 worker；自动发送前精确前台身份和新 OCR 轮次复核；verified 气泡才记成功；uncertain 不重发；启动 baseline 和持久 ledger 防重复。
+- Phase 4 进行中：`.5` EXE package-check 和显式 runtime-check PASS，2118 个清单文件 mismatch 0、私密文件 0；隔离 staging migration/runtime-check PASS；真实企业微信观察/受控发送、正式迁移、快捷方式和最终 push 尚待完成。
+- Git 当前启用。用户要求所有任务做完后统一 push；中间只做本地提交。
+- 当前零上下文交接以 `docs/项目工作提示词_给新会话.md`、`.workbuddy/memory/2026-08-14.md` 和 `docs/正式上线验收清单_20260814.md` 为准。
+
 ## 项目约定（用户明确要求，必须遵守）
 
 - **打包纪律（2026-08-04 用户要求）**：以后修改代码后**不要每次都打包一份新 EXE**。需要打包时，直接在当前开发测试版目录（`dist\聊小智_开发测试_20260803_v4\聊小智\`）上**覆盖更新**，不新建 v5/v6 等版本目录；日常小改动用源码（`启动.bat` / `.venv`）验证即可。

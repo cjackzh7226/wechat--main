@@ -1,11 +1,11 @@
 {
-  "version": "2026.08.14.2",
-  "package_dir": "D:\\Vibe C\\客服\\wechat--main-phase3\\dist\\聊小智_2026.08.14.2\\聊小智",
+  "version": "2026.08.14.5",
+  "package_dir": "D:\\Vibe C\\客服\\wechat--main-phase3\\dist\\聊小智_2026.08.14.5\\聊小智",
   "manifest_file_count": 2118,
   "manifest_mismatches": [],
   "private_files": [],
-  "exe_size": 13755405,
-  "exe_sha256": "65cbff25c36a2408fbd6830fcb18bcf0e59bc3e3bdaec12b82d64f945b3e094c",
-  "release_manifest_sha256": "ce1fceb03cffaa67a5148c92b736ef495dd8520e9acf77a4888d87d707202b5e",
-  "sha256s_sha256": "02ca909e72d44b9a4ed69d65308a690866f4717cc281765e744570ce5df2f55d"
+  "exe_size": 13758311,
+  "exe_sha256": "9bcf94559747c65daac1502c154d4aa7cf91c28a44b98572e8fa7f3f4bb88843",
+  "release_manifest_sha256": "30e8ab70041bc516628d7f9a3ab763826af6cbe0bd1fc7f17e858e9be11f2858",
+  "sha256s_sha256": "48e735f79bf7df42157fa4a3cba1df3fae4c19f087af27b51e0891b4591230a1"
 }
