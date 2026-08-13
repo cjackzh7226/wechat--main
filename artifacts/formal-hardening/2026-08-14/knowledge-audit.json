@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "source_path": "D:\\Vibe C\\客服\\wechat--main-phase3\\dist\\聊小智_开发测试_20260803_v4\\聊小智\\user_data\\memory.json",
+  "source_sha256": "99021624250ca59fa72f47491448d22adbd0db0f25cd84e15085191b4c1ca11b",
+  "source_count": 449,
+  "archive_count": 449,
+  "output_count": 435,
+  "scope_counts": {
+    "unknown": 248,
+    "social": 82,
+    "mfei": 68,
+    "both": 51
+  },
+  "status_counts": {
+    "active": 171,
+    "conflict": 38,
+    "pending": 226,
+    "inactive": 0
+  },
+  "exact_duplicate_count": 14,
+  "conflict_group_count": 19,
+  "conflict_record_count": 40,
+  "cross_scope_differing_answer_count": 19,
+  "missing_fields": {},
+  "hash_integrity_errors": [],
+  "recall": {
+    "known_match": {
+      "question": "如果账号密码忘记怎么办？",
+      "candidate_count": 1,
+      "record_id": "b31eb1f3934d80a5465b794c5725fb70fb12a6921b302f82ba18db2693c23e9b",
+      "answer": "进入福建省网上办事大厅用户登录页面，找到“忘记密码”按操作找回。",
+      "expected_answer_match": true
+    },
+    "no_match": {
+      "question": "这是一个知识库中不存在的测试问题XYZ20260812",
+      "candidate_count": 0
+    }
+  },
+  "ok": true
+}

@@ -1899,19 +1899,46 @@ def main(
 
 
 def _run_main(app_factory=WeChatStyleReplyAssistant) -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--self-check", action="store_true")
+    parser.add_argument("--package-check", action="store_true")
+    parser.add_argument("--api-check", action="store_true")
+    parser.add_argument("--report", type=Path)
+    parser.add_argument(
+        "--managed-mode",
+        choices=("off", "observe", "controlled", "full"),
+    )
+    args, _unknown = parser.parse_known_args(sys.argv[1:])
     if "--debug-session" in sys.argv:
         enable_session_debug()
-    if "--self-check" in sys.argv:
+    if args.package_check:
+        from self_check import run_package_self_check
+
+        report = run_package_self_check(args.report)
+        if not report.ok:
+            raise SystemExit(2)
+        return
+    if args.self_check:
         from self_check import run_self_check
 
-        run_self_check()
+        report = run_self_check(args.report)
+        if not report.ok:
+            raise SystemExit(2)
         return
-    if "--api-check" in sys.argv:
+    if args.api_check:
         from self_check import run_api_check
 
-        run_api_check()
+        report = run_api_check(args.report)
+        if not report.ok:
+            raise SystemExit(2)
         return
-    app_factory().start()
+    app = app_factory()
+    if args.managed_mode is not None:
+        app.settings.managed_mode = args.managed_mode
+        app.settings.auto_recognize = args.managed_mode != "off"
+    app.start()
 
 
 def _current_unreplied_turn(context: str) -> list[str]:

@@ -4,10 +4,47 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sys
+import tempfile
 
 import pytest
 
 import app_paths
+
+
+_SESSION_ROOT = Path(tempfile.mkdtemp(prefix="liaoxiaozhi-tests-"))
+_SESSION_DATA_ROOT = _SESSION_ROOT / "appdata"
+_SESSION_TEMP_ROOT = _SESSION_ROOT / "temp"
+_SESSION_PYCACHE_ROOT = _SESSION_ROOT / "pycache"
+_ORIGINAL_ENV = {
+    name: os.environ.get(name)
+    for name in (app_paths.TEST_OVERRIDE, "TEMP", "TMP", "PYTHONPYCACHEPREFIX")
+}
+_ORIGINAL_PYCACHE_PREFIX = sys.pycache_prefix
+
+
+def pytest_configure(config):
+    """Install data/temp/cache isolation before pytest imports test modules."""
+    del config
+    for root in (_SESSION_DATA_ROOT, _SESSION_TEMP_ROOT, _SESSION_PYCACHE_ROOT):
+        root.mkdir(parents=True, exist_ok=True)
+    os.environ[app_paths.TEST_OVERRIDE] = str(_SESSION_DATA_ROOT)
+    os.environ["TEMP"] = str(_SESSION_TEMP_ROOT)
+    os.environ["TMP"] = str(_SESSION_TEMP_ROOT)
+    os.environ["PYTHONPYCACHEPREFIX"] = str(_SESSION_PYCACHE_ROOT)
+    tempfile.tempdir = str(_SESSION_TEMP_ROOT)
+    sys.pycache_prefix = str(_SESSION_PYCACHE_ROOT)
+
+
+def pytest_unconfigure(config):
+    del config
+    for name, value in _ORIGINAL_ENV.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+    tempfile.tempdir = None
+    sys.pycache_prefix = _ORIGINAL_PYCACHE_PREFIX
 
 
 def snapshot_data_directory(root: Path) -> dict[str, object]:
@@ -25,6 +62,14 @@ def snapshot_data_directory(root: Path) -> dict[str, object]:
                 }
             )
     return {"root": str(root), "exists": root.exists(), "files": files}
+
+
+def production_file_hashes(root: Path) -> dict[str, str]:
+    snapshot = snapshot_data_directory(root)
+    return {
+        str(item["relative_path"]): str(item["sha256"])
+        for item in snapshot["files"]
+    }
 
 
 def _write_manifest(path: Path, manifest: dict[str, object]) -> None:
@@ -62,3 +107,8 @@ def isolate_each_test_data_root(tmp_path, monkeypatch):
     isolated_root = tmp_path / "isolated-app-data"
     monkeypatch.setenv(app_paths.TEST_OVERRIDE, str(isolated_root))
     return isolated_root
+
+
+@pytest.fixture
+def isolated_data_root() -> Path:
+    return _SESSION_DATA_ROOT

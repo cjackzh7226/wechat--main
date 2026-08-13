@@ -43,6 +43,7 @@ class MigrationResult:
     exact_duplicate_count: int
     output_count: int
     archive_records: tuple[dict[str, object], ...]
+    audited_records: tuple[KnowledgeRecord, ...]
     output_document: dict[str, object]
     applied: bool = False
     target_count_before: int | None = None
@@ -392,6 +393,7 @@ def build_migration(
         exact_duplicate_count=audit.exact_duplicate_count,
         output_count=len(audit.records),
         archive_records=tuple(archive),
+        audited_records=audit.records,
         output_document=output_document,
     )
 

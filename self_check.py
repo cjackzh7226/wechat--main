@@ -1,171 +1,105 @@
+"""Structured package, runtime and candidate-judge checks."""
+
 from __future__ import annotations
 
+import json
 import os
-import platform
-import sys
-import traceback
-from datetime import datetime
 from pathlib import Path
+import sys
+
+from app_paths import data_dir
+from release_manifest import CheckReport, run_package_check, run_runtime_check
 
 
-def run_self_check() -> Path:
-    report_path = _report_path()
-    lines: list[str] = []
-    lines.append("聊小智便携版自检报告")
-    lines.append(f"时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append(f"系统：{platform.platform()}")
-    lines.append(f"Python/打包运行时：{sys.version.split()[0]}")
-    lines.append(f"程序目录：{_app_dir()}")
-    _check_import(lines, "xlrd", "xls 表格训练导入")
-    lines.append("")
-
-    _check_import(lines, "requests", "API 请求库")
-    _check_import(lines, "pyautogui", "截图和键鼠自动化")
-    _check_import(lines, "pyperclip", "剪贴板发送")
-    _check_import(lines, "win32gui", "微信窗口检测")
-    _check_import(lines, "PIL", "图片处理")
-    _check_import(lines, "cv2", "OpenCV 图像处理")
-    _check_import(lines, "onnxruntime", "ONNX OCR 推理运行库")
-    _check_import(lines, "rapidocr_onnxruntime", "RapidOCR 本地中文 OCR")
-    lines.append("")
-
-    _check_rapidocr_assets(lines)
-    _check_rapidocr_init(lines)
-    _check_screenshot(lines)
-    _check_config_paths(lines)
-    _check_wechat_window(lines)
-
-    report_path.write_text("\n".join(lines), encoding="utf-8-sig")
-    return report_path
-
-
-def run_api_check() -> Path:
-    report_path = _app_dir() / "接口检测报告.txt"
-    lines: list[str] = []
-    lines.append("聊小智 API 接口检测报告")
-    lines.append(f"时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    try:
-        from memory import StyleMemory
-        from reply_engine import ReplyEngine
-        from settings import AppSettings
-
-        settings = AppSettings().load()
-        lines.append(f"文本生成接口：{settings.api_provider}")
-        lines.append(f"Base URL：{settings.base_url}")
-        lines.append(f"模型：{settings.model}")
-        lines.append(f"API Key 状态：{'已填写' if settings.api_key.strip() else '未填写'}")
-        engine = ReplyEngine(settings, StyleMemory().load())
-        replies = engine.generate("[对方] 这事还挺有意思的\n[对方] 你觉得呢", "接口检测")
-        lines.append(f"生成来源：{engine.last_source}")
-        lines.append(f"接口错误：{engine.last_error or '无'}")
-        lines.append("候选回复：")
-        for index, reply in enumerate(replies, 1):
-            lines.append(f"{index}. {reply}")
-    except Exception:
-        lines.append("检测异常：")
-        lines.append(traceback.format_exc())
-    report_path.write_text("\n".join(lines), encoding="utf-8-sig")
-    return report_path
-
-
-def _report_path() -> Path:
-    return _app_dir() / "自检报告.txt"
-
-
-def _app_dir() -> Path:
+def app_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
 
-def _check_import(lines: list[str], module_name: str, label: str) -> None:
+def run_package_self_check(report_path: Path | str | None = None) -> CheckReport:
+    report = run_package_check(app_dir())
+    target = (
+        Path(report_path)
+        if report_path is not None
+        else data_dir() / "diagnostics" / "package-check.json"
+    )
+    report.write(target)
+    return report
+
+
+def run_self_check(
+    report_path: Path | str | None = None,
+    *,
+    runtime_data_dir: Path | str | None = None,
+    require_wecom: bool = True,
+) -> CheckReport:
+    root = Path(runtime_data_dir) if runtime_data_dir is not None else data_dir()
+    report = run_runtime_check(root, require_wecom=require_wecom)
+    target = (
+        Path(report_path)
+        if report_path is not None
+        else data_dir() / "diagnostics" / "runtime-check.json"
+    )
+    report.write(target)
+    return report
+
+
+def run_api_check(report_path: Path | str | None = None) -> CheckReport:
+    errors: list[str] = []
+    details: dict[str, object] = {}
     try:
-        module = __import__(module_name)
-        version = getattr(module, "__version__", "")
-        suffix = f" {version}" if version else ""
-        lines.append(f"[通过] {label}：{module_name}{suffix}")
-    except Exception as exc:
-        lines.append(f"[失败] {label}：无法导入 {module_name}，{exc}")
-
-
-def _check_rapidocr_assets(lines: list[str]) -> None:
-    try:
-        import rapidocr_onnxruntime
-
-        root = Path(rapidocr_onnxruntime.__file__).resolve().parent
-        models = sorted((root / "models").glob("*.onnx"))
-        if len(models) >= 3:
-            lines.append("[通过] OCR 模型文件：已找到")
-            for model in models:
-                lines.append(f"       - {model.name} ({model.stat().st_size} bytes)")
-        else:
-            lines.append(f"[失败] OCR 模型文件：只找到 {len(models)} 个 .onnx，请重新打包")
-    except Exception as exc:
-        lines.append(f"[失败] OCR 模型文件检查异常：{exc}")
-
-
-def _check_rapidocr_init(lines: list[str]) -> None:
-    try:
-        from rapidocr_onnxruntime import RapidOCR
-
-        RapidOCR()
-        lines.append("[通过] OCR 引擎初始化：RapidOCR 可以启动")
-    except Exception:
-        lines.append("[失败] OCR 引擎初始化：RapidOCR 启动失败")
-        lines.append(traceback.format_exc())
-
-
-def _check_screenshot(lines: list[str]) -> None:
-    try:
-        import pyautogui
-
-        image = pyautogui.screenshot(region=(0, 0, 40, 40))
-        lines.append(f"[通过] 屏幕截图权限：成功截取 {image.width}x{image.height}")
-    except Exception:
-        lines.append("[失败] 屏幕截图权限：无法截图，可能被安全软件/远程桌面/系统权限限制")
-        lines.append(traceback.format_exc())
-
-
-def _check_config_paths(lines: list[str]) -> None:
-    try:
-        from memory import default_memory_path
+        from candidate_judge import CandidateJudge
+        from memory import StyleMemory
         from settings import AppSettings
+        from tools.knowledge_audit import KNOWN_QUESTION
 
         settings = AppSettings().load()
-        config_path = settings.config_path
-        memory_path = default_memory_path()
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        memory_path.parent.mkdir(parents=True, exist_ok=True)
-        test_file = config_path.parent / ".write_test"
-        test_file.write_text("ok", encoding="utf-8")
-        test_file.unlink(missing_ok=True)
-        key_state = "已填写" if settings.api_key else "未填写"
-        lines.append(f"[通过] 设置目录可写：{config_path.parent}")
-        lines.append(f"[信息] 文本生成接口：{settings.api_provider}")
-        lines.append(f"[信息] Base URL：{settings.base_url or '未填写'}")
-        lines.append(f"[信息] 模型：{settings.model or '未填写'}")
-        lines.append(f"[信息] API Key 状态：{key_state}")
-        lines.append(f"[信息] 记忆文件位置：{memory_path}")
-    except Exception:
-        lines.append("[失败] 设置/记忆目录：无法写入")
-        lines.append(traceback.format_exc())
-
-
-def _check_wechat_window(lines: list[str]) -> None:
-    try:
-        from wechat_window import WeChatWindowDetector
-
-        detector = WeChatWindowDetector()
-        window = detector.foreground_chat() or detector.any_chat_window()
-        if window:
-            lines.append(f"[通过] 微信窗口检测：{window.title}，{window.rect.width}x{window.rect.height}")
+        memory = StyleMemory().load()
+        candidates = memory.knowledge_repository().candidates(KNOWN_QUESTION, KNOWN_QUESTION)
+        if not candidates:
+            errors.append("known_candidate_missing")
         else:
-            lines.append("[提示] 微信窗口检测：没有找到微信聊天窗口。请先打开 PC 微信并点进一个聊天。")
-    except Exception:
-        lines.append("[失败] 微信窗口检测异常")
-        lines.append(traceback.format_exc())
+            judgement = CandidateJudge(settings).judge(KNOWN_QUESTION, candidates)
+            details["candidate_count"] = len(candidates)
+            details["strict_judgement_received"] = judgement is not None
+            if judgement is None or not judgement.consistent:
+                errors.append("candidate_judge_failed")
+    except Exception as error:
+        errors.append(f"api_check:{type(error).__name__}")
+    report = CheckReport(kind="api", ok=not errors, errors=tuple(errors), details=details)
+    target = (
+        Path(report_path)
+        if report_path is not None
+        else data_dir() / "diagnostics" / "api-check.json"
+    )
+    report.write(target)
+    return report
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="聊小智结构化自检")
+    parser.add_argument("--package", action="store_true")
+    parser.add_argument("--api", action="store_true")
+    parser.add_argument("--report", type=Path)
+    parser.add_argument("--data-dir", type=Path)
+    parser.add_argument("--no-wecom", action="store_true")
+    args = parser.parse_args(argv)
+    if args.package:
+        report = run_package_self_check(args.report)
+    elif args.api:
+        report = run_api_check(args.report)
+    else:
+        report = run_self_check(
+            args.report,
+            runtime_data_dir=args.data_dir,
+            require_wecom=not args.no_wecom,
+        )
+    print(json.dumps(report.to_dict(), ensure_ascii=False))
+    return 0 if report.ok else 2
 
 
 if __name__ == "__main__":
-    path = run_self_check()
-    os.startfile(path)
+    raise SystemExit(main())

@@ -46,6 +46,11 @@ _DEFAULT_CALIBRATION: dict = {
 }
 
 
+def _flattened_pixels(image) -> list[object]:
+    getter = getattr(image, "get_flattened_data", None)
+    return list(getter()) if callable(getter) else list(image.getdata())
+
+
 def load_calibration(path: str | Path | None = None) -> dict:
     """加载标定 JSON；失败时回退内置默认值。"""
     if path is None:
@@ -334,7 +339,7 @@ class ConversationTypeDetector:
         if Image is None or avatar is None:
             return False
         small = avatar.resize((8, 8))
-        pixels = list(small.getdata())
+        pixels = _flattened_pixels(small)
         colorful = sum(1 for r, g, b in pixels if max(r, g, b) - min(r, g, b) > 25)
         return colorful >= 4
 
@@ -419,7 +424,7 @@ class ConversationTypeDetector:
         if Image is None:
             return (0, 0, 0)
         small = block.resize((8, 8))
-        pixels = list(small.getdata())
+        pixels = _flattened_pixels(small)
         r = sorted(p[0] for p in pixels)[len(pixels) // 2]
         g = sorted(p[1] for p in pixels)[len(pixels) // 2]
         b = sorted(p[2] for p in pixels)[len(pixels) // 2]
