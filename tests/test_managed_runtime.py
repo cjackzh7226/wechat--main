@@ -846,6 +846,105 @@ def test_startup_baselines_only_the_detected_chat_type(tmp_path: Path) -> None:
     assert app.send_ledger.status(personal.turn_key) is None
 
 
+def test_startup_baseline_retries_one_transient_unreadable_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main
+
+    window = SimpleNamespace(hwnd=100, title="WeCom", platform=SimpleNamespace(key="wecom"))
+    observation = _personal_observation()
+    captures = iter((None, observation))
+    sleeps: list[float] = []
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.detector = SimpleNamespace(foreground_chat=lambda: window)
+    app.send_ledger = SendLedger(tmp_path / "startup-retry-ledger.json").load()
+    app._capture_runtime_observation = lambda _window, chat_type=None: next(captures)
+    app.stable_identity_tracker = SimpleNamespace(observe=lambda *_args, **_kwargs: False)
+    app.current_window = None
+    app.current_context = ""
+    app.startup_blocking_error = ""
+    app.settings = SimpleNamespace(managed_mode="observe", auto_recognize=True)
+    monkeypatch.setattr(main.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    assert app._establish_startup_baseline() is True
+    assert sleeps == [0.25]
+    assert app.send_ledger.status(observation.turn_key) == "baseline"
+    assert app.startup_blocking_error == ""
+
+
+def test_top_title_capture_uses_the_detector_calibration() -> None:
+    import main
+
+    crop_boxes: list[tuple[int, int, int, int]] = []
+
+    class _Image:
+        size = (1000, 700)
+
+        def crop(self, box):
+            crop_boxes.append(box)
+            return object()
+
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.chat_type_detector = ConversationTypeDetector(
+        {
+            "top_title_area": {
+                "x_left": 0.30,
+                "x_right": 0.80,
+                "y_top": 0.01,
+                "y_bottom": 0.09,
+            }
+        }
+    )
+    app.ocr = SimpleNamespace(
+        read_visible_text=lambda _image, limit: "- @微信" if limit == 3 else ""
+    )
+
+    assert app._read_top_title(_Image()) == "- @微信"
+    assert crop_boxes == [(300, 7, 800, 63)]
+
+
+def test_runtime_source_uses_the_same_platform_chat_area_as_main_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import capture_ocr
+    import main
+
+    platform_area = object()
+    settings_area = object()
+    captured_areas = []
+    full_image = object()
+    cropped_image = object()
+    window = SimpleNamespace(
+        platform=SimpleNamespace(key="wecom", chat_area=platform_area)
+    )
+    monkeypatch.setattr(capture_ocr, "_capture_window_bitmap", lambda _window: full_image)
+
+    def crop_with_origin(image, platform_key, fallback_area):
+        assert image is full_image
+        assert platform_key == "wecom"
+        captured_areas.append(fallback_area)
+        return cropped_image, (0, 0)
+
+    monkeypatch.setattr(
+        capture_ocr,
+        "_crop_detected_chat_area_with_origin",
+        crop_with_origin,
+    )
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.settings = SimpleNamespace(chat_area=settings_area)
+    app._read_top_title = lambda _image: "- @微信"
+    app.chat_type_detector = SimpleNamespace(detect=lambda _title, _image: "personal")
+    app.ocr = SimpleNamespace(read_image=lambda image: "[对方] 问题" if image is cropped_image else "")
+
+    assert app._capture_runtime_source(window) == (
+        "- @微信",
+        "personal",
+        "[对方] 问题",
+    )
+    assert captured_areas == [platform_area]
+
+
 def test_mainloop_return_always_stops_the_non_daemon_runtime_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1169,6 +1268,55 @@ def test_main_defers_knowledge_decision_until_the_serial_runtime_worker() -> Non
     assert decide_calls == [(observation.context, list(observation.customer_turn))]
 
 
+def test_same_turn_cannot_be_queued_twice_while_first_runtime_job_is_pending() -> None:
+    import main
+    runtime = importlib.import_module("managed_runtime")
+
+    observation = _personal_observation()
+    submissions = []
+
+    class DeferredWorker:
+        def submit(self, submitted, _adapters, callback=None):
+            submissions.append((submitted, callback))
+            return True
+
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.settings = SimpleNamespace(managed_mode="observe", managed_allowed_chats=[])
+    app.engine = SimpleNamespace(
+        decide_managed=lambda *_args: ReplyDecision.no_answer("no_match"),
+        managed_decision_still_valid=lambda _value: True,
+    )
+    app.sender = SimpleNamespace(send=lambda *_args, **_kwargs: SendAttempt(True, "keypress"))
+    app.managed_worker = DeferredWorker()
+    app.managed_send_inflight = False
+    app._managed_pending_count = 0
+    app._managed_pending_turns = set()
+    app._managed_pending_lock = threading.Lock()
+    app.queue = Queue()
+    app._capture_fresh_runtime_observation = lambda expected, _window: expected
+    app._verify_runtime_send = lambda *_args: "verified"
+    app._managed_reply_readiness_allows_send = lambda: True
+
+    assert app._queue_runtime_observation(observation, object()) is True
+    assert app._queue_runtime_observation(observation, object()) is False
+    assert len(submissions) == 1
+
+    first_callback = submissions[0][1]
+    first_callback(
+        runtime.RuntimeOutcome(
+            phase=runtime.ManagedPhase.BLOCKED,
+            sent=False,
+            reason="fresh_observation_failed",
+            turn_key=observation.turn_key,
+            decision=None,
+            phase_trace=("waiting", "blocked"),
+        )
+    )
+
+    assert app._queue_runtime_observation(observation, object()) is True
+    assert len(submissions) == 2
+
+
 def test_observe_mode_evaluates_each_unchanged_turn_only_once_per_session() -> None:
     import main
     runtime = importlib.import_module("managed_runtime")
@@ -1213,6 +1361,56 @@ def test_observe_mode_evaluates_each_unchanged_turn_only_once_per_session() -> N
     app._managed_reply_readiness_allows_send = lambda: True
     app._capture_runtime_observation = lambda *_args, **_kwargs: observation
     app._reply_source_label = lambda: "知识库"
+
+    app._maybe_managed_send(observation.context, [])
+    app._maybe_managed_send(observation.context, [])
+
+    assert submissions == [observation]
+    assert app.observed_runtime_turns == {observation.turn_key}
+
+
+def test_observe_mode_does_not_requeue_a_startup_baseline_turn() -> None:
+    import main
+    runtime = importlib.import_module("managed_runtime")
+
+    observation = _personal_observation()
+    submissions = []
+
+    class BaselineWorker:
+        def submit(self, submitted, _adapters, callback=None):
+            submissions.append(submitted)
+            if callback is not None:
+                callback(
+                    runtime.RuntimeOutcome(
+                        phase=runtime.ManagedPhase.BLOCKED,
+                        sent=False,
+                        reason="turn_already_handled",
+                        turn_key=submitted.turn_key,
+                        decision=None,
+                        phase_trace=("waiting", "blocked"),
+                    )
+                )
+            return True
+
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.settings = SimpleNamespace(
+        managed_mode="observe",
+        managed_allowed_chats=[],
+        api_key="",
+    )
+    app.current_window = SimpleNamespace(hwnd=100, title="WeCom")
+    app.queue = Queue()
+    app.engine = SimpleNamespace(
+        decide_managed=lambda *_args: pytest.fail("a baseline turn must not be decided"),
+        managed_decision_still_valid=lambda _value: True,
+    )
+    app.managed_worker = BaselineWorker()
+    app.managed_send_inflight = False
+    app._managed_pending_count = 0
+    app.observed_runtime_turns = set()
+    app.stable_identity_tracker = SimpleNamespace(observe=lambda *_args, **_kwargs: True)
+    app._managed_reply_readiness_allows_send = lambda: True
+    app._capture_runtime_observation = lambda *_args, **_kwargs: observation
 
     app._maybe_managed_send(observation.context, [])
     app._maybe_managed_send(observation.context, [])

@@ -486,3 +486,132 @@ def test_diagnostic_cli_runs_before_single_instance_gate(
     )
 
     assert calls == [tmp_path]
+
+
+def test_acceptance_lifecycle_status_is_allowlisted_deduplicated_and_text_free(
+    tmp_path: Path,
+) -> None:
+    import main
+
+    report = tmp_path / "acceptance.jsonl"
+    app = SimpleNamespace(
+        acceptance_report_path=report,
+        settings=SimpleNamespace(managed_mode="observe"),
+    )
+
+    assert main._record_acceptance_status_once(app, "runtime_ready") is True
+    assert main._record_acceptance_status_once(app, "runtime_ready") is False
+    with pytest.raises(ValueError):
+        main._record_acceptance_status_once(app, "PRIVATE CHAT TEXT")
+
+    lines = report.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    event = json.loads(lines[0])
+    assert event["reason"] == "runtime_ready"
+    assert event["mode"] == "observe"
+    assert event["decision_kind"] == ""
+    assert event["record_id"] == ""
+    assert event["answer_hash"] == ""
+    assert "PRIVATE CHAT TEXT" not in lines[0]
+
+
+def test_managed_cli_synchronizes_ui_and_records_configuration_before_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main
+
+    class Var:
+        def __init__(self, value):
+            self.value = value
+
+        def set(self, value):
+            self.value = value
+
+        def get(self):
+            return self.value
+
+    class FakeApp:
+        def __init__(self):
+            self.settings = SimpleNamespace(managed_mode="off", auto_recognize=False)
+            self.ui = SimpleNamespace(managed_var=Var("off"), auto_var=Var(False))
+            self.started = False
+
+        def start(self):
+            self.started = True
+
+    app = FakeApp()
+    report = tmp_path / "acceptance.jsonl"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "main.py",
+            "--managed-mode",
+            "observe",
+            "--acceptance-report",
+            str(report),
+        ],
+    )
+
+    main._run_main(lambda: app)
+
+    assert app.started is True
+    assert app.settings.managed_mode == "observe"
+    assert app.settings.auto_recognize is True
+    assert app.ui.managed_var.get() == "observe"
+    assert app.ui.auto_var.get() is True
+    event = json.loads(report.read_text(encoding="utf-8"))
+    assert event["reason"] == "runtime_configured"
+
+
+def test_successful_managed_start_records_runtime_ready_before_monitoring(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main
+
+    events: list[str] = []
+
+    class Worker:
+        def start(self):
+            events.append("worker_started")
+
+        def shutdown(self, *, timeout):
+            assert timeout == 10.0
+            events.append("worker_stopped")
+
+    class Root:
+        def after(self, _delay, _callback):
+            events.append("ui_scheduled")
+
+    class UI:
+        root = Root()
+
+        def set_status(self, _text):
+            pass
+
+        def mainloop(self):
+            events.append("mainloop")
+
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.startup_blocking_error = ""
+    app.settings = SimpleNamespace(
+        managed_mode="observe",
+        api_key="",
+        wecom_account_name="configured",
+    )
+    app.acceptance_report_path = tmp_path / "acceptance.jsonl"
+    app.managed_worker = Worker()
+    app.ui = UI()
+    app.running = True
+    app._establish_startup_baseline = lambda: True
+    app._monitor_loop = lambda: None
+    app._ui_loop = lambda: None
+    monkeypatch.setattr(main.threading, "Thread", lambda **_kwargs: SimpleNamespace(start=lambda: events.append("monitor_started")))
+
+    app.start()
+
+    lines = (tmp_path / "acceptance.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["reason"] for line in lines] == ["runtime_ready"]
+    assert events.index("worker_started") < events.index("monitor_started")

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "version": "2026.08.14.5",
+  "temporary_probe": true,
+  "ok": true,
+  "target": "D:\\Vibe C\\客服\\wechat--main-phase3\\dist\\聊小智_2026.08.14.5\\聊小智\\聊小智.exe",
+  "working_directory": "D:\\Vibe C\\客服\\wechat--main-phase3\\dist\\聊小智_2026.08.14.5\\聊小智",
+  "target_matches": true,
+  "shortcut_sha256": "c97d7543279327a20e44aaf8688e60f0eb166d43003fcc5c2918b6a965614d46"
+}

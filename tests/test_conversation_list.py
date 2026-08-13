@@ -167,6 +167,16 @@ class TypeDetectorTests(unittest.TestCase):
         self.assertEqual(self.detector.detect("张三", img), "personal")
 
     @unittest.skipIf(Image is None, "PIL 不可用")
+    def test_explicit_external_group_subtitle_overrides_misleading_title_crop(self):
+        img = make_full_window(avatar=make_single_avatar())
+        title = (
+            "阳光、琳、阿琳\n"
+            "由企业微信用户创建的外部群，含4位外部联系人·群主："
+        )
+
+        self.assertEqual(self.detector.detect(title, img), "group")
+
+    @unittest.skipIf(Image is None, "PIL 不可用")
     def test_photo_avatar_not_group(self):
         # 合影陷阱：整体色彩丰富但连续渐变 → 不能判成群聊
         img = make_full_window(avatar=make_photo_avatar())

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Literal
@@ -288,6 +289,7 @@ class ConversationTypeDetector:
 
     def __init__(self, calibration: dict | None = None) -> None:
         cal = calibration or load_calibration()
+        self.cal = cal
         self.system_whitelist = [str(item) for item in cal.get("system_whitelist", [])]
         self.system_keywords = [str(item) for item in cal.get("system_keywords", [])]
         avatar = cal.get("avatar_area", {})
@@ -310,6 +312,8 @@ class ConversationTypeDetector:
         """
         if self._is_system(top_title_text):
             return "system"
+        if self._is_explicit_group_title(top_title_text):
+            return "group"
         if list_avatar_type == "group":
             return "group"
         if list_avatar_type == "personal":
@@ -351,6 +355,14 @@ class ConversationTypeDetector:
             if text == str(name).strip().casefold():
                 return True
         return False
+
+    @staticmethod
+    def _is_explicit_group_title(top_title_text: str) -> bool:
+        text = re.sub(r"\s+", "", str(top_title_text or "")).casefold()
+        return (
+            "\u7531\u4f01\u4e1a\u5fae\u4fe1\u7528\u6237\u521b\u5efa\u7684\u5916\u90e8\u7fa4" in text
+            or ("\u4f4d\u5916\u90e8\u8054\u7cfb\u4eba" in text and "\u7fa4\u4e3b" in text)
+        )
 
     def _crop_avatar(self, full_window_image):
         if Image is None or full_window_image is None:

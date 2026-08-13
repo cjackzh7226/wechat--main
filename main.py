@@ -46,6 +46,7 @@ from sender import WeChatSender
 from chat_identity import ChatIdentity, ChatObservation, StableIdentityTracker, normalize_chat_title
 from capture_ocr import verify_own_bubble
 from managed_runtime import (
+    ManagedPhase,
     ManagedReplyCoordinator,
     ManagedRuntimeWorker,
     RuntimeAdapters,
@@ -79,6 +80,7 @@ except Exception:  # pragma: no cover
 _ACCEPTANCE_REPORT_LOCK = threading.Lock()
 _ACCEPTANCE_MODES = frozenset({"observe", "controlled", "full"})
 _ACCEPTANCE_DECISION_KINDS = frozenset({"answer", "no_answer", "technical_failure", ""})
+_ACCEPTANCE_LIFECYCLE_REASONS = frozenset({"runtime_configured", "runtime_ready"})
 
 
 def _append_acceptance_event(
@@ -122,6 +124,31 @@ def _append_acceptance_event(
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
+
+
+def _record_acceptance_status_once(app: object, reason: str) -> bool:
+    """Record one allowlisted lifecycle boundary without chat-derived data."""
+    if reason not in _ACCEPTANCE_LIFECYCLE_REASONS:
+        raise ValueError("acceptance lifecycle reason is invalid")
+    target = getattr(app, "acceptance_report_path", None)
+    if target is None:
+        return False
+    seen = set(getattr(app, "_acceptance_statuses", set()))
+    if reason in seen:
+        return False
+    mode = getattr(getattr(app, "settings", None), "managed_mode", "off")
+    outcome = RuntimeOutcome(
+        phase=ManagedPhase.WAITING,
+        sent=False,
+        reason=reason,
+        turn_key="",
+        decision=None,
+        phase_trace=(ManagedPhase.WAITING.value,),
+    )
+    _append_acceptance_event(target, mode, outcome)
+    seen.add(reason)
+    setattr(app, "_acceptance_statuses", seen)
+    return True
 
 
 def _setup_diag_log() -> logging.Logger:
@@ -320,6 +347,8 @@ class WeChatStyleReplyAssistant:
         self.managed_worker = ManagedRuntimeWorker(self.managed_coordinator)
         self.stable_identity_tracker = StableIdentityTracker(required_seconds=1.2)
         self._managed_pending_count = 0
+        self._managed_pending_turns: set[str] = set()
+        self._managed_pending_lock = threading.Lock()
         self.observed_runtime_turns: set[str] = set()
         self.queue: Queue[tuple[str, object]] = Queue()
         self.current_window: WeChatWindow | None = None
@@ -397,6 +426,7 @@ class WeChatStyleReplyAssistant:
             self.ui.mainloop()
             self.running = False
             return
+        _record_acceptance_status_once(self, "runtime_ready")
         self.managed_worker.start()
         try:
             self.ui.set_status(MSG["waiting"] if self.settings.api_key else MSG["no_key"])
@@ -1418,7 +1448,18 @@ class WeChatStyleReplyAssistant:
             window = self.detector.foreground_chat()
             if window is None:
                 return True
-            observation = self._capture_runtime_observation(window)
+            observation = None
+            for attempt in range(3):
+                if attempt:
+                    current_window = self.detector.foreground_chat()
+                    if not _same_strict_send_window(window, current_window):
+                        return self._block_for_unreadable_startup_baseline()
+                    window = current_window
+                observation = self._capture_runtime_observation(window)
+                if observation is not None:
+                    break
+                if attempt < 2:
+                    time.sleep(0.25)
             if observation is None:
                 return self._block_for_unreadable_startup_baseline()
             self.current_window = window
@@ -1565,11 +1606,16 @@ class WeChatStyleReplyAssistant:
         if chat_type not in {"personal", "group"}:
             return title, chat_type, ""
         platform_key = str(getattr(getattr(window, "platform", None), "key", "") or "wecom")
+        platform_area = getattr(
+            getattr(window, "platform", None),
+            "chat_area",
+            self.settings.chat_area,
+        )
         try:
             crop, _origin = _crop_detected_chat_area_with_origin(
                 full,
                 platform_key,
-                self.settings.chat_area,
+                platform_area,
             )
             context = self.ocr.read_image(crop)
         except Exception:
@@ -1823,8 +1869,18 @@ class WeChatStyleReplyAssistant:
             allowlist=frozenset(self.settings.managed_allowed_chats),
         )
 
-        self._managed_pending_count = int(getattr(self, "_managed_pending_count", 0)) + 1
-        self.managed_send_inflight = True
+        pending_lock = getattr(self, "_managed_pending_lock", None)
+        if pending_lock is None:
+            pending_lock = threading.Lock()
+            self._managed_pending_lock = pending_lock
+        with pending_lock:
+            pending_turns = set(getattr(self, "_managed_pending_turns", set()))
+            if observation.turn_key in pending_turns:
+                return False
+            pending_turns.add(observation.turn_key)
+            self._managed_pending_turns = pending_turns
+            self._managed_pending_count = int(getattr(self, "_managed_pending_count", 0)) + 1
+            self.managed_send_inflight = True
 
         def completed(outcome: RuntimeOutcome) -> None:
             decision = outcome.decision
@@ -1842,12 +1898,22 @@ class WeChatStyleReplyAssistant:
                         "bypass_alert",
                         "验收证据无法安全写入，已关闭托管发送。",
                     ))
-            self._managed_pending_count = max(
-                0, int(getattr(self, "_managed_pending_count", 1)) - 1
-            )
-            self.managed_send_inflight = self._managed_pending_count > 0
+            with pending_lock:
+                self._managed_pending_turns = set(
+                    getattr(self, "_managed_pending_turns", set())
+                )
+                self._managed_pending_turns.discard(observation.turn_key)
+                self._managed_pending_count = max(
+                    0, int(getattr(self, "_managed_pending_count", 1)) - 1
+                )
+                self.managed_send_inflight = self._managed_pending_count > 0
             if outcome.reason == "turn_already_handled":
                 _diag("ledger_turn_already_handled")
+                if getattr(self.settings, "managed_mode", "off") == "observe":
+                    self.observed_runtime_turns = set(
+                        getattr(self, "observed_runtime_turns", set())
+                    )
+                    self.observed_runtime_turns.add(outcome.turn_key)
             elif outcome.reason in {"technical_failure", "decision_exception"}:
                 _diag("api_failure", error_category="decision")
             elif outcome.reason in {
@@ -1893,8 +1959,13 @@ class WeChatStyleReplyAssistant:
 
         accepted = self.managed_worker.submit(observation, adapters, completed)
         if not accepted:
-            self._managed_pending_count = max(0, self._managed_pending_count - 1)
-            self.managed_send_inflight = self._managed_pending_count > 0
+            with pending_lock:
+                self._managed_pending_turns = set(
+                    getattr(self, "_managed_pending_turns", set())
+                )
+                self._managed_pending_turns.discard(observation.turn_key)
+                self._managed_pending_count = max(0, self._managed_pending_count - 1)
+                self.managed_send_inflight = self._managed_pending_count > 0
         return accepted
 
     def _progress(self, text: str) -> None:
@@ -2034,6 +2105,15 @@ def _run_main(app_factory=WeChatStyleReplyAssistant, *, args=None) -> None:
     if args.managed_mode is not None:
         app.settings.managed_mode = args.managed_mode
         app.settings.auto_recognize = args.managed_mode != "off"
+        ui = getattr(app, "ui", None)
+        managed_var = getattr(ui, "managed_var", None)
+        auto_var = getattr(ui, "auto_var", None)
+        if managed_var is not None:
+            managed_var.set(args.managed_mode)
+        if auto_var is not None:
+            auto_var.set(args.managed_mode != "off")
+    if app.acceptance_report_path is not None:
+        _record_acceptance_status_once(app, "runtime_configured")
     app.start()
 
 

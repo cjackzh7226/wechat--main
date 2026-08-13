@@ -259,7 +259,14 @@ class ChatOCR:
             text = item["text"].strip()
             if _is_noise_text(text):
                 continue
-            if merged and abs(item["y"] - merged[-1]["y"]) < 18:
+            if (
+                merged
+                and abs(item["y"] - merged[-1]["y"]) < 18
+                and not _separate_group_sender_from_message(
+                    str(merged[-1].get("text", "")),
+                    text,
+                )
+            ):
                 if item["x"] < merged[-1]["x"]:
                     merged[-1]["text"] = f"{text} {merged[-1]['text']}"
                 else:
@@ -277,9 +284,9 @@ class ChatOCR:
         for item in merged:
             if image is not None and _is_embedded_visual_text(item, image):
                 continue
-            role = _infer_chat_role(item, image_width, image)
             text = re.sub(r"\s+", " ", item["text"]).strip()
             if text and not _is_noise_text(text):
+                role = "发送者" if _is_group_sender_header(text) else _infer_chat_role(item, image_width, image)
                 lines.append(ChatLine(role=role, text=text, y=item["y"]))
         return _merge_wrapped_chat_lines(lines)
 
@@ -329,6 +336,8 @@ def _looks_like_wrapped_ocr_continuation(previous: dict, current: dict, image_wi
         return False
     previous_text = str(previous.get("text", "")).strip()
     current_text = str(current.get("text", "")).strip()
+    if _separate_group_sender_from_message(previous_text, current_text):
+        return False
     if len(previous_text) < 18 and len(current_text) < 8:
         return False
     width = max(1.0, float(image_width or 1))
@@ -412,6 +421,9 @@ def _detected_chat_area_box(image, platform_key: str, fallback_area) -> tuple[in
         left = int(width * fallback_area.x_left)
     top = int(height * fallback_area.y_top)
     right = int(width * fallback_area.x_right)
+    detected_right = _detect_chat_right_boundary(image, left, right, platform_key)
+    if detected_right is not None:
+        right = detected_right
     bottom = _detect_chat_bottom_boundary(image, left, right, platform_key)
     fallback_bottom = int(height * fallback_area.y_bottom)
     if bottom is None:
@@ -425,6 +437,42 @@ def _detected_chat_area_box(image, platform_key: str, fallback_area) -> tuple[in
     right = max(left + 1, min(right, width))
     bottom = max(top + 1, min(bottom, height))
     return left, top, right, bottom
+
+
+def _detect_chat_right_boundary(
+    image,
+    left: int,
+    fallback_right: int,
+    platform_key: str,
+) -> int | None:
+    """Detect the durable divider before an expanded WeCom member sidebar."""
+    if platform_key != "wecom":
+        return None
+    width, height = image.size
+    scan_left = max(int(width * 0.60), int(left) + int(width * 0.30))
+    scan_right = min(int(fallback_right), int(width * 0.97))
+    if scan_right - scan_left < 2:
+        return None
+    hits: list[int] = []
+    for x in range(scan_left, scan_right):
+        total = 0
+        divider = 0
+        for y in range(int(height * 0.12), int(height * 0.96), 4):
+            r, g, b = image.getpixel((x, y))[:3]
+            total += 1
+            if (
+                210 <= r <= 242
+                and 210 <= g <= 242
+                and 210 <= b <= 242
+                and max(r, g, b) - min(r, g, b) <= 8
+            ):
+                divider += 1
+        if total and divider / total >= 0.82:
+            hits.append(x)
+    for index in range(1, len(hits)):
+        if hits[index] == hits[index - 1] + 1:
+            return hits[index - 1]
+    return None
 
 
 def _detect_chat_left_boundary(image, platform_key: str) -> int | None:
@@ -546,8 +594,19 @@ def _infer_role_from_avatar_proximity(item: dict, image) -> str:
         text_left = float(item.get("left", item.get("x", 0)))
         text_right = float(item.get("right", item.get("x", text_left)))
         y = float(item.get("y", 0))
-        left_candidate = _best_avatar_candidate(image, 0, int(max(1, text_left - 10)), y)
-        right_candidate = _best_avatar_candidate(image, int(min(width - 1, text_right + 10)), width, y)
+        search_distance = max(96.0, min(160.0, width * 0.18))
+        left_candidate = _best_avatar_candidate(
+            image,
+            int(max(0, text_left - search_distance)),
+            int(max(1, text_left - 10)),
+            y,
+        )
+        right_candidate = _best_avatar_candidate(
+            image,
+            int(min(width - 1, text_right + 10)),
+            int(min(width, text_right + search_distance)),
+            y,
+        )
         if not left_candidate and not right_candidate:
             return ""
         if right_candidate and not left_candidate:
@@ -858,9 +917,35 @@ def _merge_wrapped_chat_lines(lines: list[ChatLine]) -> list[ChatLine]:
 def _looks_like_wrapped_continuation(previous: ChatLine, current: ChatLine) -> bool:
     if previous.role != current.role:
         return False
+    if _separate_group_sender_from_message(previous.text, current.text):
+        return False
     gap = current.y - previous.y
     if gap <= 0 or gap > 34:
         return False
     if previous.text.endswith(("，", "、", "；", "：", ",")):
         return True
     return len(previous.text) >= 18 or len(current.text) >= 18
+
+
+def _separate_group_sender_from_message(previous: str, current: str) -> bool:
+    return _is_group_sender_header(previous) and bool(str(current or "").strip())
+
+
+def _is_group_sender_header(text: str) -> bool:
+    compact = re.sub(r"\s+", "", unicodedata.normalize("NFKC", text or ""))
+    if not compact or len(compact) > 64:
+        return False
+    markers = (
+        "@-@\u5fae\u4fe1",
+        "@-@wecom",
+        "@\u4f01\u4e1a\u5fae\u4fe1",
+        "@\u5fae\u4fe1",
+        "@wecom",
+        "(\u5fae\u4fe1)",
+        "(\u4f01\u4e1a\u5fae\u4fe1)",
+        "(wechat)",
+        "(wecom)",
+        "\u00b7\u5fae\u4fe1",
+        "\u00b7\u4f01\u4e1a\u5fae\u4fe1",
+    )
+    return compact.casefold().endswith(markers)

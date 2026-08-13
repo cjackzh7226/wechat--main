@@ -2681,6 +2681,107 @@ class OCRCleaningTests(unittest.TestCase):
         self.assertIsNotNone(bottom)
         self.assertGreaterEqual(bottom or 0, 520)
 
+    def test_wecom_group_member_sidebar_is_excluded_from_chat_crop(self):
+        from PIL import Image, ImageDraw
+        import capture_ocr as capture_module
+
+        image = Image.new("RGB", (1000, 650), "white")
+        draw = ImageDraw.Draw(image)
+        draw.line((825, 78, 825, 624), fill=(225, 225, 225), width=2)
+        fallback = types.SimpleNamespace(
+            x_left=0.29,
+            x_right=0.99,
+            y_top=0.10,
+            y_bottom=0.72,
+        )
+        with patch.object(capture_module, "_detect_chat_left_boundary", return_value=285), patch.object(
+            capture_module,
+            "_detect_chat_bottom_boundary",
+            return_value=468,
+        ):
+            box = capture_module._detected_chat_area_box(image, "wecom", fallback)
+
+        self.assertEqual(box, (285, 65, 825, 468))
+
+    def test_distant_group_member_avatar_cannot_mark_left_sender_as_own(self):
+        from PIL import Image, ImageDraw
+
+        image = Image.new("RGB", (700, 300), "white")
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle((18, 76, 128, 112), radius=8, fill=(235, 235, 235))
+        draw.ellipse((610, 72, 654, 116), fill=(76, 130, 190))
+        draw.rectangle((618, 80, 646, 108), fill=(205, 160, 95))
+        items = [
+            {
+                "text": "\u963f\u7433@\u5fae\u4fe1",
+                "x": 64,
+                "left": 29,
+                "right": 98,
+                "y": 94,
+            }
+        ]
+
+        lines = ChatOCR._to_chat_lines(items, 700, image)
+
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0].role, "\u53d1\u9001\u8005")
+
+    def test_group_sender_header_stays_separate_from_leading_mention_message(self):
+        items = [
+            {
+                "text": "\u963f\u7433@\u5fae\u4fe1",
+                "x": 64,
+                "left": 29,
+                "right": 98,
+                "y": 100,
+            },
+            {
+                "text": "@\u7a0b\u6b63\u6052 \u5e74\u68c0\u6750\u6599\u88ab\u9000\u56de\u5728\u54ea\u67e5\u770b\u95ee\u9898\uff1f",
+                "x": 180,
+                "left": 45,
+                "right": 315,
+                "y": 130,
+            },
+        ]
+
+        lines = ChatOCR._to_chat_lines(items, 540)
+
+        self.assertEqual(
+            [(line.role, line.text) for line in lines],
+            [
+                ("\u53d1\u9001\u8005", "\u963f\u7433@\u5fae\u4fe1"),
+                ("\u5bf9\u65b9", "@\u7a0b\u6b63\u6052 \u5e74\u68c0\u6750\u6599\u88ab\u9000\u56de\u5728\u54ea\u67e5\u770b\u95ee\u9898\uff1f"),
+            ],
+        )
+
+    def test_group_sender_header_stays_separate_from_plain_message(self):
+        items = [
+            {
+                "text": "\u963f\u7433@\u5fae\u4fe1",
+                "x": 64,
+                "left": 29,
+                "right": 98,
+                "y": 100,
+            },
+            {
+                "text": "\u5982\u679c\u8d26\u53f7\u5bc6\u7801\u5fd8\u8bb0\u600e\u4e48\u529e\uff1f",
+                "x": 120,
+                "left": 41,
+                "right": 199,
+                "y": 130,
+            },
+        ]
+
+        lines = ChatOCR._to_chat_lines(items, 540)
+
+        self.assertEqual(
+            [(line.role, line.text) for line in lines],
+            [
+                ("\u53d1\u9001\u8005", "\u963f\u7433@\u5fae\u4fe1"),
+                ("\u5bf9\u65b9", "\u5982\u679c\u8d26\u53f7\u5bc6\u7801\u5fd8\u8bb0\u600e\u4e48\u529e\uff1f"),
+            ],
+        )
+
     def test_visible_image_text_can_be_read_without_being_chat_context(self):
         ocr = ChatOCR(AppSettings())
         ocr._recognize = lambda image: [

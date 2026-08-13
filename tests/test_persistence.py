@@ -126,6 +126,24 @@ def test_runtime_event_redacts_private_values_and_keeps_audit_fields(tmp_path):
     datetime.fromisoformat(parsed["timestamp"])
 
 
+@pytest.mark.parametrize("category", ("fresh_capture", "turn_changed"))
+def test_runtime_preflight_reason_keeps_only_the_fixed_safe_category(category):
+    from runtime_logging import redact_event
+
+    assert redact_event(
+        {
+            "event": "managed-send-diagnostic",
+            "state": "preflight_rejected",
+            "error_category": category,
+            "message": "private chat content",
+        }
+    ) == {
+        "error_category": category,
+        "event": "managed-send-diagnostic",
+        "state": "preflight_rejected",
+    }
+
+
 def test_runtime_event_drops_nested_private_and_credential_key_variants(tmp_path):
     from runtime_logging import build_runtime_logger
 

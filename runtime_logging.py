@@ -63,7 +63,20 @@ _ALLOWED_AUDIT_VALUES = {
             "send_result",
         }
     ),
-    "error_category": frozenset({"vector", "settings", "credentials", "memory", "io", "api", "preflight", "send"}),
+    "error_category": frozenset(
+        {
+            "vector",
+            "settings",
+            "credentials",
+            "memory",
+            "io",
+            "api",
+            "preflight",
+            "fresh_capture",
+            "turn_changed",
+            "send",
+        }
+    ),
     "org_scope": frozenset({"local", "municipal", "provincial", "national"}),
 }
 _SESSION_DEBUG = False

@@ -56,7 +56,14 @@ def _exact_mention_end(message: str, account_name: str) -> int | None:
     if index < len(text) and not (
         text[index].isspace() or text[index] in "：:，,、。.!！?？"
     ):
-        return None
+        tail = text[index:]
+        if len(tail.strip()) < 2:
+            return None
+        if re.match(
+            r"^[A-Za-z\u3400-\u9fff]{1,3}(?:\s|[:\uff1a,\uff0c\u3001\u3002.!\uff01\uff1f?])",
+            tail,
+        ):
+            return None
     return index
 
 
@@ -67,6 +74,19 @@ def _strip_platform_marker(text: str) -> str:
         cleaned = re.sub(re.escape(marker), " ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
+
+
+def _line_text(line: str) -> str:
+    return line.split("]", 1)[1].strip() if "]" in line else line.strip()
+
+
+def _is_sender_header_line(line: str) -> bool:
+    return line.startswith("[发送者]")
+
+
+def _has_platform_marker(text: str) -> bool:
+    folded = (text or "").casefold()
+    return any(marker.casefold() in folded for marker in _PLATFORM_MARKERS)
 
 
 def _latest_other_message(context: str) -> str:
@@ -106,13 +126,17 @@ class GroupChatHandler:
         name = _clean_name(account_name)
         lines = (context or "").splitlines()
         for line in reversed(lines):
-            text = line.split("]", 1)[1].strip() if "]" in line else line.strip()
+            text = _line_text(line)
             if not text:
                 continue
-            if text.startswith("@"):
+            if _is_sender_header_line(line):
+                sender = _strip_platform_marker(text)
+            elif text.startswith("@") or not _has_platform_marker(text):
                 # 内容行（@ 开头）无发送者名字，向上找名字行
                 continue
-            sender = _strip_platform_marker(text)
+            else:
+                # 兼容旧版 OCR：发送者头曾被错误标成 [对方]/[我]。
+                sender = _strip_platform_marker(text)
             if not sender:
                 continue
             if name and sender == name:
@@ -150,6 +174,26 @@ class GroupChatHandler:
         1. 单行合并：`阳光@微信 @程正恒 问题` → 取 @ 前的头部
         2. 上下双行：`阳光@微信`（上）+ `@程正恒 问题`（下）→ 内容行 @ 在行首时取上一行
         """
+        all_lines = (context or "").splitlines()
+        latest_other_index = next(
+            (
+                index
+                for index in range(len(all_lines) - 1, -1, -1)
+                if all_lines[index].startswith("[对方]") or all_lines[index].startswith("[瀵规柟]")
+            ),
+            -1,
+        )
+        if latest_other_index >= 0:
+            for index in range(latest_other_index - 1, -1, -1):
+                line = all_lines[index]
+                if _is_sender_header_line(line):
+                    header = _line_text(line)
+                    if _has_platform_marker(header):
+                        return _strip_platform_marker(header)
+                    return ""
+                if line.startswith(("[对方]", "[瀵规柟]", "[我]", "[鎴]")):
+                    break
+
         lines = [
             line for line in (context or "").splitlines()
             if line.startswith("[对方]") or line.startswith("[瀵规柟]")
@@ -165,7 +209,7 @@ class GroupChatHandler:
             if len(lines) >= 2:
                 upper = lines[-2].split("]", 1)[1].strip() if "]" in lines[-2] else lines[-2].strip()
                 head = upper
-        if not any(marker.casefold() in head.casefold() for marker in _PLATFORM_MARKERS):
+        if not _has_platform_marker(head):
             return ""
         return _strip_platform_marker(head)
 
