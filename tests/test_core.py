@@ -2085,17 +2085,29 @@ class ReplyParsingTests(unittest.TestCase):
         self.assertIn("大模型确认一致", engine.last_source)
         decision = _typed_test_decision(replies[0])
         engine.managed_decision_still_valid = lambda candidate: candidate == decision
+        observation = main_module.ChatObservation(
+            main_module.ChatIdentity(100, "测试窗口", "personal"),
+            context,
+            ("年度工作报告在哪里找",),
+            captured_at=1.0,
+            foreground=True,
+        )
+        queued = []
+        app.stable_identity_tracker = types.SimpleNamespace(
+            observe=lambda *_args, **_kwargs: True
+        )
+        app._managed_reply_readiness_allows_send = lambda: True
+        app._capture_runtime_observation = lambda *_args, **_kwargs: observation
+        app._queue_runtime_observation = (
+            lambda submitted, _window: queued.append(submitted)
+            or True
+        )
 
-        with patch("main.threading.Thread") as thread_cls:
-            app._maybe_managed_send(
-                context,
-                replies,
-                managed_decision=decision,
-            )
+        app._maybe_managed_send(context, replies, managed_decision=decision)
 
-        self.assertTrue(app.pending_auto_reply_signature)
+        self.assertEqual(queued, [observation])
         status_texts = [str(item) for item in app.queue.items]
-        self.assertTrue(any("历史报告请到公示页面查询。" in text for text in status_texts), status_texts)
+        self.assertTrue(any("串行知识库匹配" in text for text in status_texts), status_texts)
 
     def test_enterprise_low_score_returns_no_answer_without_api_in_model_memory(self):
         # model_memory 模式：低分（<20）企业范围问法直接回未命中文案，不再让模型生成
@@ -3416,7 +3428,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(app.last_auto_reply_signature, "")
         self.assertFalse(app.managed_send_inflight)
 
-    def test_managed_send_preflight_uses_current_foreground_chat_without_hwnd_lock(self):
+    def test_managed_send_preflight_rejects_same_title_with_different_hwnd(self):
         import queue
         import time
         import main
@@ -3480,9 +3492,9 @@ class SettingsTests(unittest.TestCase):
         while app.managed_send_inflight and time.time() < deadline:
             time.sleep(0.01)
 
-        self.assertEqual(app.sender.calls, [(19, "放书房就行")])
+        self.assertEqual(app.sender.calls, [])
 
-    def test_managed_send_falls_back_to_discovered_same_chat_when_foreground_unavailable(self):
+    def test_managed_send_never_falls_back_to_discovered_background_chat(self):
         import queue
         import time
         import main
@@ -3544,9 +3556,9 @@ class SettingsTests(unittest.TestCase):
         while app.managed_send_inflight and time.time() < deadline:
             time.sleep(0.01)
 
-        self.assertEqual(app.sender.calls, [(29, "对，金正恩名字里就有四个金")])
+        self.assertEqual(app.sender.calls, [])
 
-    def test_managed_send_uses_current_context_when_preflight_ocr_is_temporarily_empty(self):
+    def test_managed_send_rejects_temporarily_empty_fresh_ocr(self):
         import queue
         import time
         import main
@@ -3605,107 +3617,7 @@ class SettingsTests(unittest.TestCase):
         while app.managed_send_inflight and time.time() < deadline:
             time.sleep(0.01)
 
-        self.assertEqual(app.sender.calls, [(9, "放客厅干净的位置就行")])
-
-    def test_managed_preflight_uses_cached_context_when_latest_ocr_misses_other_turn(self):
-        import main
-
-        window = ChatWindow(
-            hwnd=9,
-            title="wechat contact",
-            rect=WindowRect(10, 20, 970, 660),
-            platform=ChatPlatform.for_key("wechat"),
-        )
-        generated_context = "\n".join(
-            [
-                "[对方] first customer question about batch sending",
-                "[我] own answer, split send and watch limit",
-                "[对方] what if it becomes violation later",
-            ]
-        )
-        temporary_latest_context = "\n".join(
-            [
-                "[对方] first customer question about batch sending",
-                "[我] own answer, split send and watch limit",
-            ]
-        )
-
-        effective = main._managed_preflight_context_or_cached(
-            window,
-            window,
-            generated_context,
-            temporary_latest_context,
-            generated_context,
-        )
-        allowed, reason = main._managed_send_preflight_allows(window, window, generated_context, effective)
-
-        self.assertEqual(effective, generated_context)
-        self.assertTrue(allowed, reason)
-
-    def test_managed_preflight_does_not_use_cache_after_manual_own_reply(self):
-        import main
-
-        window = ChatWindow(
-            hwnd=9,
-            title="wechat contact",
-            rect=WindowRect(10, 20, 970, 660),
-            platform=ChatPlatform.for_key("wechat"),
-        )
-        generated_context = "[对方] what if it becomes violation later"
-        latest_context = "\n".join(
-            [
-                "[对方] what if it becomes violation later",
-                "[我] I already answered manually",
-            ]
-        )
-
-        effective = main._managed_preflight_context_or_cached(
-            window,
-            window,
-            generated_context,
-            latest_context,
-            generated_context,
-        )
-        allowed, _reason = main._managed_send_preflight_allows(window, window, generated_context, effective)
-
-        self.assertEqual(effective, latest_context)
-        self.assertFalse(allowed)
-
-    def test_managed_preflight_context_includes_visible_image_understanding(self):
-        import main
-
-        app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
-        app.ocr = types.SimpleNamespace(
-            capture=lambda _window, allow_screen_fallback=False: object(),
-            read_image=lambda _image: "[对方] [图片]",
-        )
-        app.visible_analyzer = types.SimpleNamespace(
-            analyze=lambda _context, _image: VisibleContent(
-                message_type="image",
-                summary="一张花色衣服照片",
-                confidence="high",
-                source="zhipu_vision",
-            )
-        )
-        window = ChatWindow(
-            hwnd=9,
-            title="微信 contact",
-            rect=WindowRect(10, 20, 970, 660),
-            platform=ChatPlatform.for_key("wechat"),
-        )
-
-        latest_context = app._managed_preflight_context(window)
-        generated_context = "\n".join(
-            [
-                "[对方] [图片]",
-                "[可见内容理解] 类型：image；置信度：high；来源：zhipu_vision；一张花色衣服照片",
-            ]
-        )
-
-        allowed, reason = main._managed_send_preflight_allows(window, window, generated_context, latest_context)
-
-        self.assertIn("一张花色衣服照片", latest_context)
-        self.assertTrue(allowed, reason)
+        self.assertEqual(app.sender.calls, [])
 
     def test_text_provider_settings_roundtrip_supports_custom_http(self):
         with tempfile.TemporaryDirectory() as tmp:

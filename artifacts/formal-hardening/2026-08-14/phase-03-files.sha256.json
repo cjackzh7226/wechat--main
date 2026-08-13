@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "phase": "03",
+  "git_branch": "codex/phase-3-serialized-safe-send",
+  "files": [
+    {
+      "relative_path": ".superpowers/sdd/2026-08-12-03-serialized-safe-send-runtime/phase-03-review.md",
+      "size": 3892,
+      "sha256": "dd5b3dc8e76bfeb44dc5b327f5d7171971024103e84e6556dac6ba497bf276f2"
+    },
+    {
+      "relative_path": ".workbuddy/memory/2026-08-14.md",
+      "size": 3176,
+      "sha256": "b929ba80e603cd171fa9452057e0fe538ffe0ad3f3e5f6ec32612733d94f5516"
+    },
+    {
+      "relative_path": "artifacts/formal-hardening/2026-08-14/phase-03-formal-appdata-comparison.json",
+      "size": 298,
+      "sha256": "f2c5ed3b2fe81f1054200977468e1426072a80ec7603c073ec7cfef7e9296b1b"
+    },
+    {
+      "relative_path": "artifacts/formal-hardening/2026-08-14/phase-03-formal-appdata-current.json",
+      "size": 6639,
+      "sha256": "e57b7e24a2413d68aec0368f46275bcda545c47ebbd7bdb522d26a09dd3de140"
+    },
+    {
+      "relative_path": "artifacts/formal-hardening/2026-08-14/phase-03-tests.xml",
+      "size": 116330,
+      "sha256": "562f5fc835a8b1bf9f207c229d41b5bef654100fa5a3aa28272fdcc718ab26f4"
+    },
+    {
+      "relative_path": "capture_ocr.py",
+      "size": 32995,
+      "sha256": "c6cb17a2c623689882bf917ae6896f69d5a807badf33a71eae361f93f3806123"
+    },
+    {
+      "relative_path": "chat_identity.py",
+      "size": 6011,
+      "sha256": "8c92fa732369be4181fcabd016614362b596bf7e248287cc15fc6f4ad5063096"
+    },
+    {
+      "relative_path": "conversation_list.py",
+      "size": 18139,
+      "sha256": "34fe2ca851572801a046b52ee829dca6c21fe0da604acd27c3e657de8ed0ffcd"
+    },
+    {
+      "relative_path": "group_chat_handler.py",
+      "size": 8182,
+      "sha256": "de91aa858d66d81d8ab2db754822e0ed7c67e326bfba637f4bba9ca28ae45f09"
+    },
+    {
+      "relative_path": "main.py",
+      "size": 109287,
+      "sha256": "503ee6a346940e0000ea9179e2c3dc613a39cfb5575f79c59388216f2fe31ef7"
+    },
+    {
+      "relative_path": "managed_runtime.py",
+      "size": 17194,
+      "sha256": "2e49cfda761435d24af9f67caaf0d61a9c1f60759ae4af01e930429741086833"
+    },
+    {
+      "relative_path": "send_ledger.py",
+      "size": 11303,
+      "sha256": "a6d55a8e21b51473befcfaab001a47098184ac12d9fc3dd9a03a5673245068c7"
+    },
+    {
+      "relative_path": "sender.py",
+      "size": 5081,
+      "sha256": "b1d558a545b6ecfc069a0a9fb76ac47ecd5a658016439575a75330c25731a903"
+    },
+    {
+      "relative_path": "tests/test_conversation_list.py",
+      "size": 11954,
+      "sha256": "e4ec5b99ac504240e4f16c3323302ae73d53cd4667f5fb39e261b0002e09dd47"
+    },
+    {
+      "relative_path": "tests/test_core.py",
+      "size": 236606,
+      "sha256": "24ec965aaa695628ff9956c3baaea96575e158fb6ddf1b214a99d933805689dd"
+    },
+    {
+      "relative_path": "tests/test_group_chat.py",
+      "size": 6783,
+      "sha256": "00a097b047070718b014c4b06ebd263120655db4add6084c7b47d6b9bad62306"
+    },
+    {
+      "relative_path": "tests/test_managed_runtime.py",
+      "size": 43860,
+      "sha256": "ef00288501c4fe5fb759954534dc35e3bd19b2bd6bff5af419d053e4495fb451"
+    },
+    {
+      "relative_path": "tests/test_persistence.py",
+      "size": 71252,
+      "sha256": "daf1259daf14758ea04bee5db99972b588d55ec1a2347c33eb4859dbaa68a7f2"
+    },
+    {
+      "relative_path": "tests/test_phase1_final_fix.py",
+      "size": 54571,
+      "sha256": "86547c9f9972ce92c61d7b941fba786ea495e81e63a266b069c34cbf6b8da37d"
+    }
+  ]
+}

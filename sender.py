@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import time
 
+from managed_runtime import SendAttempt
+
 
 try:
     import pyautogui
@@ -22,31 +24,45 @@ except Exception:  # pragma: no cover
 
 
 class WeChatSender:
-    def send(self, target: object, text: str) -> tuple[bool, str]:
-        text = text.strip()
-        if not text:
-            return False, "发送内容为空。"
+    def send(
+        self,
+        target: object,
+        text: str,
+        *,
+        allow_activate: bool = False,
+    ) -> SendAttempt:
+        if type(text) is not str or not text.strip():
+            return SendAttempt(False, "发送内容为空。")
         if pyautogui is None:
-            return False, "缺少 pyautogui，无法自动发送。"
+            return SendAttempt(False, "缺少 pyautogui，无法自动发送。")
         if pyperclip is None:
-            return False, "缺少 pyperclip，无法写入剪贴板。"
+            return SendAttempt(False, "缺少 pyperclip，无法写入剪贴板。")
+        if type(allow_activate) is not bool:
+            return SendAttempt(False, "allow_activate 参数无效。")
         previous_clipboard = _read_clipboard()
         copied_for_send = False
         try:
-            self._activate(target)
-            time.sleep(0.15)
+            if allow_activate:
+                self._activate(target)
+                time.sleep(0.15)
             if not self._is_target_foreground(target):
-                return False, "目标聊天窗口没有成功切到前台，已取消发送，避免发到其他应用。"
+                return SendAttempt(False, "目标聊天窗口不在前台，已取消发送。", retry_safe=True)
             self._click_input(target)
+            if not self._is_target_foreground(target):
+                return SendAttempt(False, "点击输入框后前台窗口已变化，已取消发送。", retry_safe=True)
             pyperclip.copy(text)
             copied_for_send = True
             time.sleep(0.08)
+            if not self._is_target_foreground(target):
+                return SendAttempt(False, "粘贴前前台窗口已变化，已取消发送。", retry_safe=True)
             pyautogui.hotkey("ctrl", "v")
             time.sleep(0.12)
+            if not self._is_target_foreground(target):
+                return SendAttempt(False, "focus_lost_after_paste")
             pyautogui.press("enter")
-            return True, "已发送"
+            return SendAttempt(True, "已按下发送键，等待气泡验证")
         except Exception as exc:
-            return False, f"发送失败：{exc}"
+            return SendAttempt(False, f"发送失败：{type(exc).__name__}")
         finally:
             if copied_for_send and previous_clipboard is not None:
                 try:
@@ -73,18 +89,8 @@ class WeChatSender:
         注意：不能点击消息区域（会误触“转发”等弹窗），只激活窗口后按 End 键。"""
         if pyautogui is None:
             return
-        hwnd = _target_hwnd(target)
-        if win32gui is not None and hwnd and win32gui.IsIconic(hwnd):
-            try:
-                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-            except Exception:
-                pass
-        try:
-            if win32gui is not None and hwnd:
-                win32gui.SetForegroundWindow(hwnd)
-        except Exception:
-            pass
-        time.sleep(0.1)
+        if not WeChatSender._is_target_foreground(target):
+            return
         try:
             # 仅按 End 键滚动到底部，不点击任何位置，避免误触消息气泡弹出转发/菜单
             pyautogui.press("end")
@@ -115,7 +121,7 @@ class WeChatSender:
     def _is_target_foreground(target: object) -> bool:
         hwnd = _target_hwnd(target)
         if win32gui is None or not hwnd:
-            return True
+            return False
         try:
             return int(win32gui.GetForegroundWindow() or 0) == hwnd
         except Exception:

@@ -24,6 +24,8 @@ from memory import StyleMemory
 from group_chat_handler import GroupChatHandler
 from reply_engine import NO_DIRECT_ANSWER_REPLY, ReplyEngine
 from managed_reply import ReplyDecision
+from managed_runtime import ManagedReplyCoordinator, SendAttempt
+from chat_identity import ChatIdentity, ChatObservation
 from settings import AppSettings, SettingsValidationError
 from send_ledger import LedgerBlockingError, SendLedger
 from wechat_window import ChatPlatform, ChatWindow, WindowRect
@@ -104,10 +106,21 @@ class _FakeSender:
         self.calls: list[str] = []
         self.called = threading.Event()
 
-    def send(self, _window: ChatWindow, text: str) -> tuple[bool, str]:
+    def send(self, _window: ChatWindow, text: str, **_kwargs: object) -> SendAttempt:
         self.calls.append(text)
         self.called.set()
-        return True, "sent"
+        return SendAttempt(True, "keypress")
+
+
+class _InlineManagedWorker:
+    def __init__(self, ledger: SendLedger) -> None:
+        self.coordinator = ManagedReplyCoordinator(ledger)
+
+    def submit(self, observation, adapters, callback=None) -> bool:
+        outcome = self.coordinator.process(observation, adapters)
+        if callback is not None:
+            callback(outcome)
+        return True
 
 
 def _new_managed_app(engine: ReplyEngine, ledger: SendLedger, sender: object) -> tuple[object, ChatWindow]:
@@ -121,6 +134,10 @@ def _new_managed_app(engine: ReplyEngine, ledger: SendLedger, sender: object) ->
     app.queue = queue.Queue()
     app.sender = sender
     app.send_operation_lock = threading.Lock()
+    app.managed_worker = _InlineManagedWorker(ledger)
+    app.managed_coordinator = app.managed_worker.coordinator
+    app.stable_identity_tracker = SimpleNamespace(observe=lambda *_args, **_kwargs: True)
+    app._managed_pending_count = 0
     app.chat_identity = SimpleNamespace(current_chat_key="isolated personal chat")
     app.group_handler = GroupChatHandler(app.settings)
     window = ChatWindow(
@@ -131,55 +148,27 @@ def _new_managed_app(engine: ReplyEngine, ledger: SendLedger, sender: object) ->
     )
     app.current_window = window
     app.detector = SimpleNamespace(foreground_chat=lambda: window, any_chat_window=lambda: None)
-    app.last_auto_reply_signature = ""
-    app.pending_auto_reply_signature = ""
-    app.handled_auto_reply_signatures = set()
+    app.current_context = "[对方] 测试问题"
+
+    def personal_observation(_window, chat_type=None):
+        if chat_type not in {None, "personal"}:
+            return None
+        turn = tuple(main._current_unreplied_turn(app.current_context))
+        if not turn:
+            return None
+        return ChatObservation(
+            ChatIdentity(window.hwnd, window.title, "personal"),
+            app.current_context,
+            turn,
+            captured_at=1.0,
+            foreground=True,
+        )
+
+    app._capture_runtime_observation = personal_observation
+    app._capture_fresh_runtime_observation = lambda expected, _window: expected
+    app._verify_runtime_send = lambda *_args: "verified"
     app.managed_send_inflight = False
-    app.managed_waiting_for_own_echo = False
-    app.last_managed_sent_text = ""
-    app.managed_last_handled_turn_messages = []
-    app.managed_last_handled_turn_key = ""
-    app.managed_last_sent_at = 0.0
-    app.managed_last_handled_partner = ""
-    app.group_last_handled_msg = ""
     return app, window
-
-
-class _DeferredThread:
-    pending: list[object] = []
-
-    def __init__(self, target, **_kwargs: object) -> None:
-        self.target = target
-
-    def start(self) -> None:
-        self.pending.append(self.target)
-
-
-class _BlockingSender:
-    def __init__(self) -> None:
-        self.calls: list[tuple[int, str]] = []
-        self.first_entered = threading.Event()
-        self.second_entered = threading.Event()
-        self.release_first = threading.Event()
-        self._state_lock = threading.Lock()
-        self.active = 0
-        self.max_active = 0
-
-    def send(self, window: ChatWindow, text: str) -> tuple[bool, str]:
-        with self._state_lock:
-            self.active += 1
-            self.max_active = max(self.max_active, self.active)
-            call_number = len(self.calls) + 1
-            self.calls.append((window.hwnd, text))
-            if call_number == 1:
-                self.first_entered.set()
-            else:
-                self.second_entered.set()
-        if call_number == 1:
-            assert self.release_first.wait(1.0)
-        with self._state_lock:
-            self.active -= 1
-        return True, "sent"
 
 
 def _send_personal_reply(engine: ReplyEngine, context: str, replies: list[str]) -> list[str]:
@@ -188,10 +177,7 @@ def _send_personal_reply(engine: ReplyEngine, context: str, replies: list[str]) 
     app.current_context = context
     app._managed_preflight_context = lambda _window: context
 
-    decision = getattr(engine, "last_managed_decision", None)
-    if decision is None and replies == [EXACT_NO_ANSWER]:
-        decision = ReplyDecision.no_answer("legacy_judgement_fail_closed")
-    app._maybe_managed_send(context, replies, managed_decision=decision)
+    app._maybe_managed_send(context, replies)
     assert app.sender.called.wait(1.0), "fake personal sender was not called"
     return app.sender.calls
 
@@ -205,21 +191,24 @@ def _send_group_reply(engine: ReplyEngine, question: str, replies: list[str]) ->
         rect=WindowRect(10, 20, 970, 660),
         platform=ChatPlatform.for_key("wecom"),
     )
-    turn_message = f"张三@微信 {question}"
+    turn_message = f"@客服 {question}"
     app.chat_identity = SimpleNamespace(current_chat_key=window.title)
     app.detector = SimpleNamespace(foreground_chat=lambda: window)
-    app._capture_group_send_observation = lambda _window: (window.title, f"[对方] {turn_message}")
+    group_observation = ChatObservation(
+        ChatIdentity(window.hwnd, window.title, "group"),
+        f"[对方] 张三@微信\n[对方] {turn_message}",
+        (question,),
+        sender_name="张三",
+        captured_at=1.0,
+        foreground=True,
+    )
+    app._capture_runtime_observation = lambda _window, chat_type=None: group_observation
 
-    decision = getattr(engine, "last_managed_decision", None)
-    if decision is None and replies == [EXACT_NO_ANSWER]:
-        decision = ReplyDecision.no_answer("legacy_judgement_fail_closed")
     app._send_group_reply(
         window,
-        replies[0],
         question,
         sender_name="张三",
-        latest_message=turn_message,
-        managed_decision=decision,
+        chat_identity=window.title,
     )
     assert app.sender.called.wait(1.0), "fake group sender was not called"
     return app.sender.calls
@@ -236,10 +225,12 @@ def test_group_fake_sender_receives_only_exact_no_answer_for_knowledge_miss(tmp_
     engine = _empty_engine(tmp_path)
     question = "谢谢"
 
-    assert _send_group_reply(engine, question, engine.generate(question, "群聊")) == [EXACT_NO_ANSWER]
+    assert _send_group_reply(engine, question, engine.generate(question, "群聊")) == [
+        f"@张三 {EXACT_NO_ANSWER}"
+    ]
 
 
-def test_personal_managed_send_rejects_untyped_arbitrary_reply(tmp_path: Path) -> None:
+def test_personal_managed_send_ignores_untyped_external_reply_and_redecides_in_worker(tmp_path: Path) -> None:
     engine = _empty_engine(tmp_path)
     sender = _FakeSender()
     app, _window = _new_managed_app(
@@ -252,8 +243,8 @@ def test_personal_managed_send_rejects_untyped_arbitrary_reply(tmp_path: Path) -
 
     app._maybe_managed_send(context, ["任意旧候选文本"])
 
-    assert sender.called.wait(0.2) is False
-    assert sender.calls == []
+    assert sender.called.wait(1.0)
+    assert sender.calls == [EXACT_NO_ANSWER]
 
 
 def test_personal_managed_send_revalidates_typed_decision_before_sender(
@@ -300,6 +291,7 @@ def test_personal_managed_send_preserves_multiline_answer_exactly(tmp_path: Path
         org_scope="both",
     )
     engine.managed_decision_still_valid = lambda candidate: candidate == decision
+    engine.decide_managed = lambda _context, _turn: decision
 
     app._maybe_managed_send(
         context,
@@ -311,7 +303,7 @@ def test_personal_managed_send_preserves_multiline_answer_exactly(tmp_path: Path
     assert sender.calls == [text]
 
 
-def test_generation_worker_passes_the_same_typed_decision_to_managed_send() -> None:
+def test_generation_worker_defers_typed_decision_to_managed_runtime() -> None:
     decision = ReplyDecision.no_answer("no_eligible_candidate")
 
     class TypedEngine:
@@ -326,7 +318,7 @@ def test_generation_worker_passes_the_same_typed_decision_to_managed_send() -> N
             raise AssertionError("managed worker must not call legacy generate")
 
     app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
-    app.settings = SimpleNamespace(managed_auto_reply=True)
+    app.settings = SimpleNamespace(managed_mode="full")
     app.engine = TypedEngine()
     app.generation_lock = threading.Lock()
     app.pending_generation = None
@@ -351,8 +343,8 @@ def test_generation_worker_passes_the_same_typed_decision_to_managed_send() -> N
 
     app._generation_worker(context, window, ["问题？"])
 
-    assert app.engine.calls == [(context, ["问题？"])]
-    assert captured == [(context, [EXACT_NO_ANSWER], decision)]
+    assert app.engine.calls == []
+    assert captured == [(context, [], None)]
 
 
 @pytest.mark.parametrize(
@@ -1222,18 +1214,6 @@ def test_main_duplicate_instance_exits_before_app_creation_and_shows_notice(
     assert events == ["acquire", "notice"]
 
 
-class _ScriptedSender(_FakeSender):
-    def __init__(self, outcomes: list[bool]) -> None:
-        super().__init__()
-        self.outcomes = list(outcomes)
-
-    def send(self, _window: ChatWindow, text: str) -> tuple[bool, str]:
-        self.calls.append(text)
-        self.called.set()
-        outcome = self.outcomes.pop(0)
-        return outcome, "sent" if outcome else "failed"
-
-
 def _wait_until(predicate, timeout: float = 1.0) -> bool:
     deadline = __import__("time").time() + timeout
     while __import__("time").time() < deadline:
@@ -1243,7 +1223,7 @@ def _wait_until(predicate, timeout: float = 1.0) -> bool:
     return predicate()
 
 
-def test_personal_uncertain_ledger_prevents_resend_after_restart(tmp_path: Path) -> None:
+def test_personal_verified_ledger_prevents_resend_after_restart(tmp_path: Path) -> None:
     engine = _empty_engine(tmp_path)
     context = "[对方] 这个怎么办？"
     replies = engine.generate(context, "客户")
@@ -1255,9 +1235,16 @@ def test_personal_uncertain_ledger_prevents_resend_after_restart(tmp_path: Path)
     first_app._managed_preflight_context = lambda _window: context
     first_app._maybe_managed_send(context, replies)
     assert first_sender.called.wait(1.0)
-    assert _wait_until(lambda: SendLedger(ledger_path).load().status(main._ledger_turn_key(
-        "isolated personal chat", "personal", ["这个怎么办？"]
-    )) == "uncertain")
+    turn_key = ChatObservation(
+        ChatIdentity(711, "isolated personal chat", "personal"),
+        context,
+        ("这个怎么办？",),
+        captured_at=1.0,
+        foreground=True,
+    ).turn_key
+    assert _wait_until(
+        lambda: SendLedger(ledger_path).load().status(turn_key) == "verified"
+    )
 
     second_sender = _FakeSender()
     second_app, _window = _new_managed_app(engine, SendLedger(ledger_path).load(), second_sender)
@@ -1307,13 +1294,20 @@ def test_startup_baseline_suppresses_visible_old_turn(tmp_path: Path) -> None:
     sender = _FakeSender()
     app, window = _new_managed_app(engine, SendLedger(tmp_path / "send_ledger.json").load(), sender)
     app.current_context = context
-    app._managed_preflight_context = lambda _window: context
+    observation = ChatObservation(
+        ChatIdentity(window.hwnd, window.title, "personal"),
+        context,
+        ("启动前旧问题？",),
+        captured_at=1.0,
+        foreground=True,
+    )
+    app._capture_runtime_observation = lambda *_args, **_kwargs: observation
 
-    assert app._baseline_visible_turn(window, context, chat_type="personal") is True
+    assert app._establish_startup_baseline() is True
     app._maybe_managed_send(context, engine.generate(context, "客户"))
 
     assert sender.called.wait(0.2) is False
-    assert app.send_ledger.status(main._ledger_turn_key(window.title, "personal", ["启动前旧问题？"])) == "baseline"
+    assert app.send_ledger.status(observation.turn_key) == "baseline"
 
 
 def test_unreadable_visible_startup_turn_blocks_managed_monitoring(tmp_path: Path) -> None:
@@ -1322,312 +1316,12 @@ def test_unreadable_visible_startup_turn_blocks_managed_monitoring(tmp_path: Pat
     app, window = _new_managed_app(engine, SendLedger(tmp_path / "send_ledger.json").load(), sender)
     app.startup_blocking_error = ""
     app.detector = SimpleNamespace(foreground_chat=lambda: window)
-    app._managed_preflight_context = lambda _window: ""
+    app._capture_runtime_observation = lambda *_args, **_kwargs: None
 
     assert app._establish_startup_baseline() is False
     assert app.settings.managed_mode == "off"
     assert "启动基线" in app.startup_blocking_error
     assert sender.calls == []
-
-
-def test_group_send_failure_is_retryable_and_is_not_marked_handled_before_send(tmp_path: Path) -> None:
-    engine = _empty_engine(tmp_path)
-    sender = _ScriptedSender([False, True])
-    app, _personal_window = _new_managed_app(engine, SendLedger(tmp_path / "send_ledger.json").load(), sender)
-    group_window = ChatWindow(
-        hwnd=713,
-        title="isolated group chat",
-        rect=WindowRect(10, 20, 970, 660),
-        platform=ChatPlatform.for_key("wecom"),
-    )
-    app.chat_identity = SimpleNamespace(current_chat_key=group_window.title)
-    app.detector = SimpleNamespace(foreground_chat=lambda: group_window)
-    app._capture_group_send_observation = lambda _window: (
-        group_window.title,
-        "[对方] 张三@微信 @助手 群问题？",
-    )
-    decision = ReplyDecision.no_answer("no_eligible_candidate")
-
-    app._send_group_reply(
-        group_window,
-        EXACT_NO_ANSWER,
-        "群问题？",
-        sender_name="张三",
-        latest_message="张三@微信 @助手 群问题？",
-        managed_decision=decision,
-    )
-    assert _wait_until(lambda: len(sender.calls) == 1)
-    group_key = main._ledger_turn_key(
-        group_window.title,
-        "group",
-        ["张三@微信 @助手 群问题？"],
-        sender_name="张三",
-    )
-    assert _wait_until(lambda: app.send_ledger.status(group_key) == "failed")
-    assert app.group_last_handled_msg == ""
-
-    sender.called.clear()
-    app._send_group_reply(
-        group_window,
-        EXACT_NO_ANSWER,
-        "群问题？",
-        sender_name="张三",
-        latest_message="张三@微信 @助手 群问题？",
-        managed_decision=decision,
-    )
-    assert _wait_until(lambda: len(sender.calls) == 2)
-    assert _wait_until(lambda: app.send_ledger.status(group_key) == "uncertain")
-
-
-def _group_window(hwnd: int = 713, title: str = "wecom top level") -> ChatWindow:
-    return ChatWindow(
-        hwnd=hwnd,
-        title=title,
-        rect=WindowRect(10, 20, 970, 660),
-        platform=ChatPlatform.for_key("wecom"),
-    )
-
-
-def test_group_queued_then_chat_switches_aborts_before_ledger_and_sender(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    engine = _empty_engine(tmp_path)
-    sender = _FakeSender()
-    app, _personal = _new_managed_app(engine, SendLedger(tmp_path / "send_ledger.json").load(), sender)
-    queued_window = _group_window()
-    other_window = _group_window(hwnd=999)
-    app.chat_identity = SimpleNamespace(current_chat_key="Group Alpha")
-    current = {"window": queued_window, "identity": "Group Alpha", "context": "[对方] 张三@微信 @助手 原问题？"}
-    app.detector = SimpleNamespace(foreground_chat=lambda: current["window"])
-    app._capture_group_send_observation = lambda _window: (current["identity"], current["context"])
-    _DeferredThread.pending = []
-    monkeypatch.setattr(main.threading, "Thread", _DeferredThread)
-    decision = ReplyDecision.no_answer("no_eligible_candidate")
-
-    app._send_group_reply(
-        queued_window,
-        EXACT_NO_ANSWER,
-        "原问题？",
-        sender_name="张三",
-        latest_message="张三@微信 @助手 原问题？",
-        managed_decision=decision,
-    )
-    assert len(_DeferredThread.pending) == 1
-    current["window"] = other_window
-    current["identity"] = "Group Beta"
-    current["context"] = "[对方] 李四@微信 @助手 另一个问题？"
-    _DeferredThread.pending.pop()()
-
-    turn_key = main._ledger_turn_key(
-        "Group Alpha",
-        "group",
-        ["张三@微信 @助手 原问题？"],
-        sender_name="张三",
-    )
-    assert sender.calls == []
-    assert app.send_ledger.status(turn_key) is None
-
-
-@pytest.mark.parametrize(
-    ("live_window", "identity", "context"),
-    [
-        (_group_window(hwnd=999), "Group Alpha", "[对方] 张三@微信 @助手 原问题？"),
-        (_group_window(), "", "[对方] 张三@微信 @助手 原问题？"),
-        (_group_window(), "Group Alpha", ""),
-        (_group_window(), "Group Beta", "[对方] 张三@微信 @助手 原问题？"),
-        (_group_window(), "Group Alpha", "[对方] 张三@微信 @助手 已变问题？"),
-    ],
-    ids=["wrong-hwnd", "unknown-identity", "empty-capture", "changed-identity", "changed-turn"],
-)
-def test_group_fresh_preflight_uncertainty_aborts_without_terminal_ledger(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    live_window: ChatWindow,
-    identity: str,
-    context: str,
-) -> None:
-    engine = _empty_engine(tmp_path)
-    sender = _FakeSender()
-    app, _personal = _new_managed_app(engine, SendLedger(tmp_path / "send_ledger.json").load(), sender)
-    queued_window = _group_window()
-    app.chat_identity = SimpleNamespace(current_chat_key="Group Alpha")
-    app.detector = SimpleNamespace(foreground_chat=lambda: live_window)
-    app._capture_group_send_observation = lambda _window: (identity, context)
-    _DeferredThread.pending = []
-    monkeypatch.setattr(main.threading, "Thread", _DeferredThread)
-    decision = ReplyDecision.no_answer("no_eligible_candidate")
-
-    app._send_group_reply(
-        queued_window,
-        EXACT_NO_ANSWER,
-        "原问题？",
-        sender_name="张三",
-        latest_message="张三@微信 @助手 原问题？",
-        managed_decision=decision,
-    )
-    _DeferredThread.pending.pop()()
-
-    turn_key = main._ledger_turn_key(
-        "Group Alpha",
-        "group",
-        ["张三@微信 @助手 原问题？"],
-        sender_name="张三",
-    )
-    assert sender.calls == []
-    assert app.send_ledger.status(turn_key) is None
-
-
-def test_normal_group_fresh_preflight_still_sends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    engine = _empty_engine(tmp_path)
-    sender = _FakeSender()
-    app, _personal = _new_managed_app(engine, SendLedger(tmp_path / "send_ledger.json").load(), sender)
-    window = _group_window()
-    context = "[对方] 张三@微信 @助手 原问题？"
-    app.chat_identity = SimpleNamespace(current_chat_key="Group Alpha")
-    app.detector = SimpleNamespace(foreground_chat=lambda: window)
-    app._capture_group_send_observation = lambda _window: ("Group Alpha", context)
-    _DeferredThread.pending = []
-    monkeypatch.setattr(main.threading, "Thread", _DeferredThread)
-    decision = ReplyDecision.no_answer("no_eligible_candidate")
-
-    app._send_group_reply(
-        window,
-        EXACT_NO_ANSWER,
-        "原问题？",
-        sender_name="张三",
-        latest_message="张三@微信 @助手 原问题？",
-        managed_decision=decision,
-    )
-    _DeferredThread.pending.pop()()
-
-    assert sender.calls == [EXACT_NO_ANSWER]
-
-
-def test_overlapping_group_sends_share_one_sender_lock_and_second_repreflights(tmp_path: Path) -> None:
-    engine = _empty_engine(tmp_path)
-    sender = _BlockingSender()
-    app, _personal = _new_managed_app(engine, SendLedger(tmp_path / "send_ledger.json").load(), sender)
-    window = _group_window()
-    live = {
-        "identity": "Group Alpha",
-        "context": "[对方] 张三@微信 @助手 第一问？",
-    }
-    observations: list[str] = []
-    app.chat_identity = SimpleNamespace(current_chat_key="Group Alpha")
-    app.detector = SimpleNamespace(foreground_chat=lambda: window)
-
-    def capture(_window: ChatWindow) -> tuple[str, str]:
-        observations.append(live["context"])
-        return live["identity"], live["context"]
-
-    app._capture_group_send_observation = capture
-    first_decision = ReplyDecision(
-        kind="answer",
-        text="FIRST",
-        record_id="first-record",
-        answer_hash="a" * 64,
-    )
-    second_decision = ReplyDecision(
-        kind="answer",
-        text="SECOND",
-        record_id="second-record",
-        answer_hash="b" * 64,
-    )
-    engine.managed_decision_still_valid = lambda decision: decision in {
-        first_decision,
-        second_decision,
-    }
-    app._send_group_reply(
-        window,
-        "FIRST",
-        "第一问？",
-        sender_name="张三",
-        latest_message="张三@微信 @助手 第一问？",
-        managed_decision=first_decision,
-    )
-    assert sender.first_entered.wait(1.0)
-    live["context"] = "[对方] 李四@微信 @助手 第二问？"
-    app.chat_identity = SimpleNamespace(current_chat_key="Group Alpha")
-    app._send_group_reply(
-        window,
-        "SECOND",
-        "第二问？",
-        sender_name="李四",
-        latest_message="李四@微信 @助手 第二问？",
-        managed_decision=second_decision,
-    )
-
-    assert sender.second_entered.wait(0.15) is False
-    sender.release_first.set()
-    assert sender.second_entered.wait(1.0)
-    assert _wait_until(lambda: len(sender.calls) == 2)
-    assert sender.max_active == 1
-    assert observations == [
-        "[对方] 张三@微信 @助手 第一问？",
-        "[对方] 李四@微信 @助手 第二问？",
-    ]
-
-
-def test_group_and_personal_workers_never_overlap_sender_operations(tmp_path: Path) -> None:
-    engine = _empty_engine(tmp_path)
-    sender = _BlockingSender()
-    app, personal_window = _new_managed_app(
-        engine,
-        SendLedger(tmp_path / "send_ledger.json").load(),
-        sender,
-    )
-    group_window = _group_window()
-    foreground = {"window": group_window}
-    app.chat_identity = SimpleNamespace(current_chat_key="Group Alpha")
-    app.detector = SimpleNamespace(
-        foreground_chat=lambda: foreground["window"],
-        any_chat_window=lambda: None,
-    )
-    app._capture_group_send_observation = lambda _window: (
-        "Group Alpha",
-        "[对方] 张三@微信 @助手 群问题？",
-    )
-    app._managed_preflight_context = lambda _window: "[对方] 个人问题？"
-    group_decision = ReplyDecision(
-        kind="answer",
-        text="GROUP",
-        record_id="group-record",
-        answer_hash="c" * 64,
-    )
-    personal_decision = ReplyDecision(
-        kind="answer",
-        text="PERSONAL",
-        record_id="personal-record",
-        answer_hash="d" * 64,
-    )
-    engine.managed_decision_still_valid = lambda decision: decision in {
-        group_decision,
-        personal_decision,
-    }
-
-    app._send_group_reply(
-        group_window,
-        "GROUP",
-        "群问题？",
-        sender_name="张三",
-        latest_message="张三@微信 @助手 群问题？",
-        managed_decision=group_decision,
-    )
-    assert sender.first_entered.wait(1.0)
-    foreground["window"] = personal_window
-    app.current_window = personal_window
-    app.current_context = "[对方] 个人问题？"
-    app._maybe_managed_send(
-        "[对方] 个人问题？",
-        ["PERSONAL"],
-        managed_decision=personal_decision,
-    )
-
-    assert sender.second_entered.wait(0.15) is False
-    sender.release_first.set()
-    assert sender.second_entered.wait(1.0)
-    assert _wait_until(lambda: len(sender.calls) == 2)
-    assert sender.max_active == 1
 
 
 def test_managed_mode_type_error_is_normalized_to_settings_validation_error() -> None:

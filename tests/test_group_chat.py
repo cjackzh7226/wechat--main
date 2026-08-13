@@ -41,6 +41,14 @@ class GroupChatHandlerTests(unittest.TestCase):
         context = "[对方] @李四 你好"
         self.assertFalse(self.handler.detect_at_mention(context, ACCOUNT))
 
+    def test_mention_prefix_of_account_name_is_rejected(self):
+        context = "[对方] @程 你好"
+        self.assertFalse(self.handler.detect_at_mention(context, ACCOUNT))
+
+    def test_mention_longer_name_with_same_prefix_is_rejected(self):
+        context = "[对方] @程正恒丰 你好"
+        self.assertFalse(self.handler.detect_at_mention(context, ACCOUNT))
+
     def test_mention_empty_account(self):
         context = "[对方] @程正恒 你好"
         self.assertFalse(self.handler.detect_at_mention(context, ""))
@@ -79,6 +87,10 @@ class GroupChatHandlerTests(unittest.TestCase):
         context = "[对方] 张三(企业微信)\n[对方] @程正恒 问题"
         self.assertEqual(self.handler.extract_sender_name(context), "张三")
 
+    def test_sender_platform_marker_is_case_insensitive(self):
+        context = "[对方] Alice(wecom)\n[对方] @程正恒 问题"
+        self.assertEqual(self.handler.extract_sender_name(context), "Alice")
+
     def test_sender_dot_wechat(self):
         context = "[对方] 李四·微信\n[对方] @程正恒 问题"
         self.assertEqual(self.handler.extract_sender_name(context), "李四")
@@ -86,6 +98,10 @@ class GroupChatHandlerTests(unittest.TestCase):
     def test_sender_at_dash_at_wechat_full(self):
         context = "[对方] 阳光@-@微信\n[对方] @程正恒 问题"
         self.assertEqual(self.handler.extract_sender_name(context), "阳光")
+
+    def test_sender_requires_a_recognized_sender_header(self):
+        context = "[对方] 这是一条普通消息"
+        self.assertEqual(self.handler.extract_sender_name(context), "")
 
     # ---- build_reply ----
     def test_build_reply(self):

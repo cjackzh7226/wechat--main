@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "baseline": "artifacts\\formal-hardening\\2026-08-13\\phase-02-formal-appdata-before.json",
+  "baseline_count": 32,
+  "current_count": 32,
+  "exact_match": true,
+  "current_manifest_file_sha256": "e57b7e24a2413d68aec0368f46275bcda545c47ebbd7bdb522d26a09dd3de140"
+}

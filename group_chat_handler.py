@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 # 平台标记后缀变体（企业微信 5.0.9 实测 + 常见变体，OCR 容错）
 _PLATFORM_MARKERS = (
@@ -34,31 +35,36 @@ _MENTION_SEPARATORS = "：:，,、。 ."
 
 def _clean_name(text: str) -> str:
     """去掉所有空白，用于名字比较与提取。"""
-    return re.sub(r"[\s\u3000]+", "", text or "")
+    return re.sub(r"[\s\u3000]+", "", unicodedata.normalize("NFKC", text or ""))
 
 
-def _extract_mention_target(message: str) -> str:
-    """提取消息开头的 @ 后面的用户名部分（@ 后第一个词，去空格标点），无 @ 返回空。
-
-    容错：OCR 可能把名字识别成"程 正恒"（中间插空格），取 @ 后第一个空白/标点分隔的词，
-    判定时与用户名做前缀/相等比较。
-    """
-    text = (message or "").lstrip()
-    if not text.startswith("@"):
-        return ""
-    rest = text[1:].lstrip()
-    matched = re.match(r"^[^\s，,。：:、.！!？?]+", rest)
-    if matched:
-        return _clean_name(matched.group(0))
-    return ""
+def _exact_mention_end(message: str, account_name: str) -> int | None:
+    """Return the end offset of an exact leading @name, tolerating OCR spaces."""
+    text = unicodedata.normalize("NFKC", message or "").lstrip()
+    expected = _clean_name(account_name)
+    if not text.startswith("@") or not expected:
+        return None
+    index = 1
+    while index < len(text) and text[index].isspace():
+        index += 1
+    for expected_char in expected:
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text) or text[index].casefold() != expected_char.casefold():
+            return None
+        index += 1
+    if index < len(text) and not (
+        text[index].isspace() or text[index] in "：:，,、。.!！?？"
+    ):
+        return None
+    return index
 
 
 def _strip_platform_marker(text: str) -> str:
     """去掉发送者头部里的平台标记后缀（保留名字本身，包括 '-' 等符号）。"""
     cleaned = (text or "").strip()
     for marker in _PLATFORM_MARKERS:
-        if marker in cleaned:
-            cleaned = cleaned.replace(marker, " ")
+        cleaned = re.sub(re.escape(marker), " ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
 
@@ -125,23 +131,15 @@ class GroupChatHandler:
         message = _latest_other_message(context)
         if not message:
             return False
-        target = _extract_mention_target(message)
-        if not target:
-            return False
-        name = _clean_name(account_name)
-        return target == name or name.startswith(target) or target.startswith(name)
+        return _exact_mention_end(message, account_name) is not None
 
     def extract_question(self, message: str, account_name: str) -> str:
         """从 @ 我的消息里提取问题内容（去掉 @用户名 前缀及分隔标点）。"""
-        text = (message or "").lstrip()
-        if not text.startswith("@"):
+        text = unicodedata.normalize("NFKC", message or "").lstrip()
+        end = _exact_mention_end(text, account_name)
+        if end is None:
             return text.strip()
-        rest = text[1:].lstrip()
-        name = _clean_name(account_name)
-        if name:
-            compact = re.sub(r"[\s\u3000]+", "", rest)
-            if compact.startswith(name):
-                rest = compact[len(name):]
+        rest = text[end:]
         rest = rest.lstrip("：:，,、。 .")
         return rest.strip()
 
@@ -167,6 +165,8 @@ class GroupChatHandler:
             if len(lines) >= 2:
                 upper = lines[-2].split("]", 1)[1].strip() if "]" in lines[-2] else lines[-2].strip()
                 head = upper
+        if not any(marker.casefold() in head.casefold() for marker in _PLATFORM_MARKERS):
+            return ""
         return _strip_platform_marker(head)
 
     def build_reply(self, sender_name: str, reply_content: str) -> str:

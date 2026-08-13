@@ -146,12 +146,15 @@ class TypeDetectorTests(unittest.TestCase):
         self.assertEqual(self.detector.detect("邮件提醒"), "system")
         self.assertEqual(self.detector.detect("管理企业"), "system")
 
-    def test_system_prefix_match(self):
-        self.assertEqual(self.detector.detect("腾讯云客服@abc"), "system")
+    def test_system_whitelist_does_not_expand_to_unlisted_prefixes(self):
+        self.assertEqual(
+            self.detector.detect("腾讯云客服@abc", list_avatar_type="personal"),
+            "personal",
+        )
 
-    def test_system_keyword_fallback(self):
-        self.assertEqual(self.detector.detect("某某服务"), "system")
-        self.assertEqual(self.detector.detect("xx团队"), "system")
+    def test_broad_system_keywords_do_not_override_contact_avatar(self):
+        self.assertEqual(self.detector.detect("某某服务", list_avatar_type="personal"), "personal")
+        self.assertEqual(self.detector.detect("xx团队", list_avatar_type="personal"), "personal")
 
     @unittest.skipIf(Image is None, "PIL 不可用")
     def test_group_grid_avatar(self):

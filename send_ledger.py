@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
 import re
@@ -75,6 +75,12 @@ def validate_ledger_document(value: object) -> None:
             raise ValueError("ledger retry_count is invalid")
         if type(entry["updated_at"]) is not str or not entry["updated_at"]:
             raise ValueError("ledger updated_at is invalid")
+        try:
+            updated_at = datetime.fromisoformat(entry["updated_at"])
+        except ValueError as error:
+            raise ValueError("ledger updated_at is invalid") from error
+        if updated_at.tzinfo is None:
+            raise ValueError("ledger updated_at must include timezone")
         if type(entry["reason"]) is not str or len(entry["reason"]) > 80:
             raise ValueError("ledger reason is invalid")
 
@@ -138,7 +144,13 @@ class SendLedger:
         with self._lock:
             self._ensure_loaded()
             entry = self._entries.get(_sha256(turn_key))
-            return entry is None or entry["status"] == "failed"
+            return bool(
+                entry is None
+                or (
+                    entry["status"] == "failed"
+                    and int(entry["retry_count"]) < 1
+                )
+            )
 
     def prepare(
         self,
@@ -158,6 +170,12 @@ class SendLedger:
             turn_hash = _sha256(turn_key)
             previous = self._entries.get(turn_hash)
             if previous and previous["status"] in HANDLED_STATUSES:
+                return False
+            if (
+                previous
+                and previous["status"] == "failed"
+                and int(previous["retry_count"]) >= 1
+            ):
                 return False
             retry_count = int(previous["retry_count"]) + 1 if previous else 0
             entry: dict[str, object] = {
@@ -213,7 +231,7 @@ class SendLedger:
         self._transition(turn_key, {"keypress"}, "verified", "verified")
 
     def mark_uncertain(self, turn_key: str, reason: str) -> None:
-        self._transition(turn_key, {"keypress"}, "uncertain", reason)
+        self._transition(turn_key, {"prepared", "keypress"}, "uncertain", reason)
 
     def mark_failed(self, turn_key: str, reason: str) -> None:
         self._transition(turn_key, {"prepared", "keypress"}, "failed", reason)
@@ -222,3 +240,35 @@ class SendLedger:
         with self._lock:
             self._ensure_loaded()
             return any(entry["status"] in {"prepared", "keypress"} for entry in self._entries.values())
+
+    def prune_expired(self, *, now: datetime | None = None, max_age_days: int = 90) -> int:
+        """Remove old terminal entries only when no send transition is active."""
+        if type(max_age_days) is not int or max_age_days <= 0:
+            raise ValueError("max_age_days must be a positive integer")
+        current = now or datetime.now(timezone.utc)
+        if not isinstance(current, datetime) or current.tzinfo is None:
+            raise ValueError("now must be a timezone-aware datetime")
+        cutoff = current.astimezone(timezone.utc) - timedelta(days=max_age_days)
+        with self._lock:
+            self._ensure_loaded()
+            if any(
+                entry["status"] in {"prepared", "keypress"}
+                for entry in self._entries.values()
+            ):
+                return 0
+            expired = {
+                turn_hash
+                for turn_hash, entry in self._entries.items()
+                if datetime.fromisoformat(str(entry["updated_at"])).astimezone(timezone.utc)
+                < cutoff
+            }
+            if not expired:
+                return 0
+            updated = {
+                turn_hash: entry
+                for turn_hash, entry in self._entries.items()
+                if turn_hash not in expired
+            }
+            self._persist_entries(updated)
+            self._entries = updated
+            return len(expired)

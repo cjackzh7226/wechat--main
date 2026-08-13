@@ -339,14 +339,11 @@ class ConversationTypeDetector:
         return colorful >= 4
 
     def _is_system(self, top_title_text: str) -> bool:
-        text = (top_title_text or "").strip()
+        text = (top_title_text or "").strip().casefold()
         if not text:
             return False
         for name in self.system_whitelist:
-            if text == name or text.startswith(name) or name in text:
-                return True
-        for keyword in self.system_keywords:
-            if keyword in text:
+            if text == str(name).strip().casefold():
                 return True
         return False
 

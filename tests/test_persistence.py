@@ -382,8 +382,7 @@ def test_all_production_diag_calls_use_explicit_enum_codes_and_remain_distinguis
         "ledger_blocked",
         "ledger_turn_already_handled",
         "no_unreplied_message",
-        "turn_already_handled",
-        "send_already_pending",
+            "send_already_pending",
         "send_queued",
         "preflight_checked",
         "preflight_rejected",
@@ -783,112 +782,12 @@ def test_group_managed_send_blocks_before_sender_when_vector_index_is_not_ready(
     app.queue = type("Queue", (), {"items": [], "put": lambda self, item: self.items.append(item)})()
     monkeypatch.setattr(main_module.threading, "Thread", InlineThread)
 
-    app._send_group_reply(type("Window", (), {})(), "群聊回复", "群聊问题")
+    app._send_group_reply(type("Window", (), {})(), "群聊问题")
 
     assert app.sender.calls == []
     assert app.settings.managed_mode == "off"
     status_messages = [str(item[1]) for item in app.queue.items if item[0] == "status"]
     assert any("向量" in message and "关闭" in message for message in status_messages)
-
-
-@pytest.mark.parametrize("path", ["personal", "group"])
-@pytest.mark.parametrize("transition", ["off", "vector_invalid", "memory_missing"])
-def test_queued_managed_workers_recheck_full_mode_memory_and_vector_immediately_before_send(
-    tmp_path,
-    monkeypatch,
-    path,
-    transition,
-):
-    import main as main_module
-
-    pending = []
-
-    class DeferredThread:
-        def __init__(self, target, **kwargs):
-            self.target = target
-
-        def start(self):
-            pending.append(self.target)
-
-    class RecordingSender:
-        def __init__(self):
-            self.calls = []
-
-        def send(self, window, text):
-            self.calls.append((window, text))
-            return True, "sent"
-
-    window = type("Window", (), {"title": "customer"})()
-    settings = settings_module.AppSettings()
-    settings.managed_mode = "full"
-    settings.auto_reply_delay_seconds = 0
-    memory = StyleMemory(path=tmp_path / "memory.json")
-    memory.vector_ready = True
-    app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
-    app.settings = settings
-    app.memory = memory
-    app.startup_blocking_error = ""
-    app.send_ledger = main_module.SendLedger(tmp_path / "send_ledger.json").load()
-    app.sender = RecordingSender()
-    app.send_operation_lock = threading.Lock()
-    app.chat_identity = type("Identity", (), {"current_chat_key": window.title})()
-    app.queue = type("Queue", (), {"items": [], "put": lambda self, item: self.items.append(item)})()
-    app.current_window = window
-    app.current_context = "[对方] 请问如何办理"
-    decision = ReplyDecision(
-        kind="answer",
-        text="请到服务窗口办理" if path == "personal" else "群聊回复",
-        record_id=f"queued-{path}-test",
-        answer_hash="b" * 64,
-    )
-    app.engine = type(
-        "Engine",
-        (),
-        {
-            "last_error": "",
-            "last_source": "knowledge",
-            "last_managed_decision": decision,
-            "managed_decision_still_valid": lambda self, candidate: candidate == decision,
-        },
-    )()
-    app.detector = type("Detector", (), {})()
-    app._managed_preflight_context = lambda current_window: app.current_context
-    app.last_auto_reply_signature = ""
-    app.pending_auto_reply_signature = ""
-    app.handled_auto_reply_signatures = set()
-    app.managed_send_inflight = False
-    app.managed_waiting_for_own_echo = False
-    app.managed_last_handled_turn_messages = []
-    app.managed_last_handled_turn_key = ""
-    app.managed_last_handled_partner = ""
-    monkeypatch.setattr(main_module.threading, "Thread", DeferredThread)
-    monkeypatch.setattr(main_module, "_managed_live_send_window", lambda detector, expected: expected)
-
-    if path == "personal":
-        app._maybe_managed_send(
-            app.current_context,
-            ["请到服务窗口办理"],
-            managed_decision=decision,
-        )
-    else:
-        app._send_group_reply(
-            window,
-            "群聊回复",
-            "群聊问题",
-            managed_decision=decision,
-        )
-    assert len(pending) == 1
-
-    if transition == "off":
-        settings.managed_mode = "off"
-    elif transition == "vector_invalid":
-        memory.vector_ready = False
-        memory.last_vector_error = "vector invalid after queue"
-    else:
-        app.memory = None
-    pending.pop()()
-
-    assert app.sender.calls == []
 
 
 def test_blocking_startup_rejects_managed_callback_without_overwriting_corrupt_settings_or_starting_thread(

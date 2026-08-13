@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import re
+import unicodedata
 from dataclasses import dataclass
 
 from settings import AppSettings
@@ -39,6 +40,63 @@ class VoiceBubble:
     left: float
     right: float
     y: float
+
+
+_CONTEXT_ROLE_LINE = re.compile(r"^\s*\[(我|对方|鎴|瀵规柟)\]\s*(.*?)\s*$")
+
+
+def _verification_text(text: str) -> str:
+    """Conservative OCR comparison: NFKC plus whitespace removal only."""
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(text or "")))
+
+
+def _context_role_messages(context: str) -> list[tuple[str, str]]:
+    messages: list[tuple[str, str]] = []
+    for line in str(context or "").splitlines():
+        matched = _CONTEXT_ROLE_LINE.match(line)
+        if not matched:
+            continue
+        role = "own" if matched.group(1) in {"我", "鎴"} else "other"
+        text = matched.group(2).strip()
+        if text:
+            messages.append((role, text))
+    return messages
+
+
+def verify_own_bubble(before_context: str, after_context: str, expected_text: str) -> str:
+    """Classify post-send OCR without treating an Enter keypress as success.
+
+    ``verified`` requires a newly observed latest own-message whose normalized
+    text equals the exact knowledge reply.  An unchanged readable context is
+    explicitly ``not_sent``; all changed-but-unprovable states are
+    ``uncertain`` so callers never retry automatically.
+    """
+    if type(before_context) is not str or type(after_context) is not str:
+        raise TypeError("verification contexts must be strings")
+    if type(expected_text) is not str or not expected_text.strip():
+        raise ValueError("expected_text must not be empty")
+    if before_context.strip() == after_context.strip():
+        return "not_sent"
+
+    before = _context_role_messages(before_context)
+    after = _context_role_messages(after_context)
+    if not after:
+        return "uncertain"
+    expected = _verification_text(expected_text)
+    before_matching = sum(
+        1 for role, text in before if role == "own" and _verification_text(text) == expected
+    )
+    after_matching = sum(
+        1 for role, text in after if role == "own" and _verification_text(text) == expected
+    )
+    latest_role, latest_text = after[-1]
+    if (
+        latest_role == "own"
+        and _verification_text(latest_text) == expected
+        and after_matching > before_matching
+    ):
+        return "verified"
+    return "uncertain"
 
 
 class ChatOCR:
