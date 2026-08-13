@@ -6,7 +6,7 @@
   "errors": [],
   "private_files": [],
   "details": {
-    "version": "2026.08.14.1",
+    "version": "2026.08.14.2",
     "python": "3.11.9",
     "frozen": false,
     "dependency_versions": {

@@ -491,3 +491,56 @@ def test_real_449_source_reproduces_approved_scope_and_conflict_baseline():
     assert result.exact_duplicate_count == 14
     assert result.output_count == 435
     assert len(result.archive_records) == 449
+
+
+def test_staging_apply_allows_empty_isolated_target_without_formal_backup(
+    tmp_path, monkeypatch
+):
+    source = _write_memory(tmp_path / "source.json", [_legacy_example(1)])
+    staging_root = tmp_path / "staging-data"
+    target = staging_root / "memory.json"
+    monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(staging_root))
+
+    result = run_migration(
+        source=source,
+        target=target,
+        report_path=tmp_path / "staging-report.json",
+        expected_source_count=1,
+        expected_old_target_count=0,
+        apply=True,
+        staging=True,
+    )
+
+    assert result.applied is True
+    assert result.required_backup == ""
+    assert len(json.loads(target.read_text(encoding="utf-8"))["examples"]) == 1
+
+
+@pytest.mark.parametrize("outside_kind", ["outside-root", "wrong-name", "nonempty"])
+def test_staging_apply_cannot_bypass_formal_backup_gate(
+    tmp_path, monkeypatch, outside_kind
+):
+    source = _write_memory(tmp_path / "source.json", [_legacy_example(1)])
+    staging_root = tmp_path / "staging-data"
+    staging_root.mkdir()
+    monkeypatch.setenv("WECHAT_ASSISTANT_DATA_DIR", str(staging_root))
+    target = staging_root / "memory.json"
+    expected_old_count = 0
+    if outside_kind == "outside-root":
+        target = tmp_path / "outside" / "memory.json"
+    elif outside_kind == "wrong-name":
+        target = staging_root / "other.json"
+    else:
+        target = _write_memory(target, [_legacy_example(9)])
+        expected_old_count = 1
+
+    with pytest.raises(MigrationBlocked, match="staging"):
+        run_migration(
+            source=source,
+            target=target,
+            report_path=tmp_path / "staging-report.json",
+            expected_source_count=1,
+            expected_old_target_count=expected_old_count,
+            apply=True,
+            staging=True,
+        )

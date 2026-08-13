@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, copy_metadata
 
 
 ROOT = Path(SPECPATH)
@@ -37,6 +37,21 @@ for package in (
     datas += package_datas
     binaries += package_binaries
     hiddenimports += package_hidden
+
+for distribution in (
+    "requests",
+    "PyAutoGUI",
+    "pyperclip",
+    "pywin32",
+    "Pillow",
+    "rapidocr-onnxruntime",
+    "onnxruntime",
+    "xlrd",
+    "openpyxl",
+    "pypdf",
+    "opencv-python",
+):
+    datas += copy_metadata(distribution)
 
 a = Analysis(
     [str(ROOT / "main.py")],

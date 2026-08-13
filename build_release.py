@@ -7,6 +7,7 @@ from importlib import metadata
 import json
 from pathlib import Path
 import platform
+import shutil
 import subprocess
 import sys
 
@@ -110,6 +111,11 @@ def _write_release_notes(package_dir: Path) -> None:
     )
 
 
+def install_release_assets(package_dir: Path | str) -> None:
+    root = Path(package_dir)
+    shutil.copy2(ROOT / "wecom_5_calibration.json", root / "wecom_5_calibration.json")
+
+
 def _write_sha256s(package_dir: Path, manifest_path: Path) -> Path:
     document = json.loads(manifest_path.read_text(encoding="utf-8"))
     lines = [f"{item['sha256']}  {item['path']}" for item in document["files"]]
@@ -144,6 +150,7 @@ def build_release(version: str) -> Path:
     executable = package_dir / f"{APP_NAME}.exe"
     if not executable.is_file():
         raise RuntimeError("PyInstaller did not produce the expected executable")
+    install_release_assets(package_dir)
     _write_release_notes(package_dir)
     private_files = scan_private_files(package_dir)
     if private_files:

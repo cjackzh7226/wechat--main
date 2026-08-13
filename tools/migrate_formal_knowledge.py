@@ -471,6 +471,7 @@ def _apply_migration_locked(
     expected_old_target_count: int,
     resolved_backup: Path | None,
     required_backup_sha256: str,
+    staging: bool = False,
 ) -> MigrationResult:
     result = build_migration(source_path, expected_source_count=expected_source_count)
     try:
@@ -484,10 +485,13 @@ def _apply_migration_locked(
         raise MigrationBlocked(
             f"expected old target count {expected_old_target_count}, got {target_count}"
         )
-    backup_path, backup_sha = _verified_backup(
-        resolved_backup,
-        required_backup_sha256,
-    )
+    if staging:
+        backup_path, backup_sha = "", ""
+    else:
+        backup_path, backup_sha = _verified_backup(
+            resolved_backup,
+            required_backup_sha256,
+        )
     target_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         atomic_write_json(
@@ -522,6 +526,7 @@ def apply_migration(
     expected_old_target_count: int,
     required_backup: Path | str | None = None,
     required_backup_sha256: str = "",
+    staging: bool = False,
 ) -> MigrationResult:
     source_path = Path(source).resolve()
     target_path = Path(target).resolve()
@@ -530,6 +535,20 @@ def apply_migration(
     expected_old_target_count = _require_expected_count(
         "expected old target count", expected_old_target_count
     )
+    if type(staging) is not bool:
+        raise MigrationBlocked("staging must be a boolean")
+    if staging:
+        override = os.environ.get("WECHAT_ASSISTANT_DATA_DIR", "").strip()
+        staging_root = Path(override).resolve() if override else None
+        if (
+            staging_root is None
+            or target_path.parent != staging_root
+            or target_path.name.casefold() != "memory.json"
+            or expected_old_target_count != 0
+        ):
+            raise MigrationBlocked(
+                "staging apply requires an empty memory.json in the explicit isolated data root"
+            )
     resolved_backup = (
         Path(required_backup).resolve() if required_backup is not None else None
     )
@@ -556,6 +575,7 @@ def apply_migration(
             expected_old_target_count=expected_old_target_count,
             resolved_backup=resolved_backup,
             required_backup_sha256=required_backup_sha256,
+            staging=staging,
         )
     finally:
         instance.release()
@@ -603,6 +623,7 @@ def run_migration(
     apply: bool = False,
     required_backup: Path | str | None = None,
     required_backup_sha256: str = "",
+    staging: bool = False,
 ) -> MigrationResult:
     source_path = Path(source).resolve()
     target_path = Path(target).resolve()
@@ -629,7 +650,10 @@ def run_migration(
             expected_old_target_count=expected_old_target_count,
             required_backup=required_backup,
             required_backup_sha256=required_backup_sha256,
+            staging=staging,
         )
+    elif staging:
+        raise MigrationBlocked("staging is valid only with apply")
     else:
         instance = SingleInstance()
         try:
@@ -691,6 +715,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-old-target-count", type=int)
     parser.add_argument("--required-backup", type=Path)
     parser.add_argument("--required-backup-sha256", default="")
+    parser.add_argument("--staging", action="store_true")
     return parser
 
 
@@ -706,6 +731,7 @@ def main(argv: list[str] | None = None) -> int:
             apply=bool(args.apply),
             required_backup=args.required_backup,
             required_backup_sha256=args.required_backup_sha256,
+            staging=bool(args.staging),
         )
     except MigrationBlocked as error:
         print(f"MIGRATION_BLOCKED: {error}", file=sys.stderr)

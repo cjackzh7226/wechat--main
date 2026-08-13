@@ -21,7 +21,7 @@ from release_manifest import (
 )
 from send_ledger import SendLedger
 from tools.knowledge_audit import audit_memory
-from build_release import prepare_release_dir
+from build_release import install_release_assets, prepare_release_dir
 from version import RUNTIME_DEPENDENCIES, __version__
 
 
@@ -309,8 +309,19 @@ def test_spec_and_dependency_locks_are_release_exact() -> None:
 
     assert "wecom_5_calibration.json" in spec
     assert "user_data" not in spec
-    assert __version__ == "2026.08.14.1"
+    assert "copy_metadata" in spec
+    assert "requests" in spec
+    assert "pywin32" in spec
+    assert __version__ == "2026.08.14.2"
     for distribution, expected in RUNTIME_DEPENDENCIES.items():
         assert f"{distribution}=={expected}" in runtime_lock
     assert "pytest==9.1.1" in dev_lock
     assert "pyinstaller==6.21.0" in dev_lock
+
+
+def test_release_assets_place_calibration_at_package_root(tmp_path: Path) -> None:
+    install_release_assets(tmp_path)
+
+    assert (tmp_path / "wecom_5_calibration.json").read_bytes() == (
+        PROJECT_ROOT / "wecom_5_calibration.json"
+    ).read_bytes()
