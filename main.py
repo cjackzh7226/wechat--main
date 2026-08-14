@@ -202,7 +202,6 @@ MSG = {
     "no_key": "\u5df2\u542f\u52a8\u3002\u672a\u914d\u7f6e API Key \u65f6\u4f1a\u4f7f\u7528\u672c\u5730\u5907\u7528\u56de\u590d\u3002",
     "idle_partner": "等待聊天窗口",
     "idle_status": "请打开微信、企业微信或 QQ，并点进一个聊天",
-    "managed_inactive": "已保留识别结果；企业微信当前不在前台，托管发送已暂停",
     "current": "当前聊天：{title}",
     "manual_ready": "已定位聊天窗口。点“识别当前聊天”生成回复。",
     "manual_preview_ready": "已生成候选回复，仅预览，未发送",
@@ -241,6 +240,20 @@ MSG = {
     "no_send_window": "没有可发送的聊天窗口",
     "training_imported": "知识库导入完成：{files} 个文件，暂存并校验 {turns} 条记录，写入 {examples} 条知识记录。",
 }
+
+
+MANAGED_OUTCOME_MESSAGES = {
+    "user_active_elsewhere": "检测到你正在使用其他窗口，本轮暂不发送",
+    "target_window_unavailable": "企业微信窗口当前不可用，本轮未发送",
+    "activation_failed": "企业微信窗口当前无法安全激活，本轮未发送",
+    "chat_identity_changed": "会话或问题已变化，本轮未发送",
+    "customer_turn_changed": "会话或问题已变化，本轮未发送",
+    "fresh_observation_unavailable": "发送前无法重新识别当前会话，本轮未发送",
+}
+
+
+def _managed_outcome_message(reason: str) -> str:
+    return MANAGED_OUTCOME_MESSAGES.get(str(reason), "")
 
 
 @dataclass
@@ -1081,7 +1094,6 @@ class WeChatStyleReplyAssistant:
                             self.current_window.title,
                         )
                     ))
-                    self.ui.set_status(MSG["managed_inactive"])
                 else:
                     self.ui.set_partner(MSG["idle_partner"])
                     self.ui.set_status(MSG["idle_status"])
@@ -2002,6 +2014,9 @@ class WeChatStyleReplyAssistant:
                 "chat_identity_changed",
                 "customer_turn_changed",
                 "window_not_foreground",
+                "user_active_elsewhere",
+                "target_window_unavailable",
+                "activation_failed",
             }:
                 _diag("preflight_rejected", error_category="preflight")
             if outcome.sent or outcome.reason in {
@@ -2031,7 +2046,11 @@ class WeChatStyleReplyAssistant:
                 )
                 self.queue.put(("status", f"观察模式：预期决策 {label}，未实际发送。"))
             else:
-                self.queue.put(("status", f"托管发送已阻断：{outcome.reason}"))
+                message = _managed_outcome_message(outcome.reason)
+                self.queue.put((
+                    "status",
+                    message or f"托管发送已阻断：{outcome.reason}",
+                ))
             if isinstance(decision, ReplyDecision) and decision.kind in {"answer", "no_answer"}:
                 self.queue.put(("replies", [decision.text]))
                 self.queue.put(("reply_source", self._reply_source_label()))

@@ -1474,7 +1474,7 @@ def test_managed_group_route_publishes_recognized_context_to_ui() -> None:
     assert app.queue.get_nowait() == ("context", context)
 
 
-def test_managed_idle_keeps_recognized_chat_visible_and_marks_sending_paused() -> None:
+def test_managed_idle_keeps_recognized_preview_without_overwriting_status() -> None:
     import main
 
     class UI:
@@ -1496,13 +1496,34 @@ def test_managed_idle_keeps_recognized_chat_visible_and_marks_sending_paused() -
     app.queue = Queue()
     app.queue.put(("idle", None))
     app.ui = UI()
+    app.ui.status = "已生成候选回复，仅预览，未发送"
     app.running = False
 
     app._ui_loop()
 
     assert app.ui.partner == "当前聊天：企业微信：测试群"
-    assert "不在前台" in app.ui.status
-    assert "暂停" in app.ui.status
+    assert app.ui.status == "已生成候选回复，仅预览，未发送"
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    (
+        ("user_active_elsewhere", "检测到你正在使用其他窗口，本轮暂不发送"),
+        ("target_window_unavailable", "企业微信窗口当前不可用，本轮未发送"),
+        ("activation_failed", "企业微信窗口当前无法安全激活，本轮未发送"),
+        ("chat_identity_changed", "会话或问题已变化，本轮未发送"),
+        ("customer_turn_changed", "会话或问题已变化，本轮未发送"),
+        ("fresh_observation_unavailable", "发送前无法重新识别当前会话，本轮未发送"),
+        ("unmapped_reason", ""),
+    ),
+)
+def test_managed_outcome_message_maps_only_known_user_visible_blocks(
+    reason: str,
+    expected: str,
+) -> None:
+    import main
+
+    assert main._managed_outcome_message(reason) == expected
 
 
 def test_enabling_managed_mode_requires_baseline_before_starting_processing(
