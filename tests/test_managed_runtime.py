@@ -60,6 +60,7 @@ class _RuntimeScenario:
         send_performed: tuple[bool, ...] = (True,),
         send_reasons: tuple[str, ...] = ("keypress",),
         retry_safe: tuple[bool, ...] = (False,),
+        preparation: str = "ready",
         send_delay: float = 0.0,
         concurrency_probe: _SendConcurrencyProbe | None = None,
     ) -> None:
@@ -70,10 +71,14 @@ class _RuntimeScenario:
         self.send_performed = list(send_performed)
         self.send_reasons = list(send_reasons)
         self.retry_safe = list(retry_safe)
+        self.preparation = preparation
         self.send_delay = send_delay
         self.concurrency_probe = concurrency_probe or _SendConcurrencyProbe()
         self.send_calls = 0
+        self.prepare_calls = 0
+        self.fresh_calls = 0
         self.verify_calls = 0
+        self.call_order: list[str] = []
 
     def decide(self, question: str, context: str) -> ReplyDecision:
         assert question == self.observation.customer_turn[-1]
@@ -85,10 +90,18 @@ class _RuntimeScenario:
         return isinstance(decision, ReplyDecision) and decision.kind != "technical_failure"
 
     def fresh_observation(self, _expected):
+        self.fresh_calls += 1
+        self.call_order.append("fresh")
         return self.fresh
+
+    def prepare_send_window(self, _expected):
+        self.prepare_calls += 1
+        self.call_order.append("prepare")
+        return self.preparation
 
     def send(self, _identity, _text):
         module = importlib.import_module("managed_runtime")
+        self.call_order.append("send")
         with self.concurrency_probe.lock:
             self.concurrency_probe.active += 1
             self.concurrency_probe.maximum = max(
@@ -107,6 +120,7 @@ class _RuntimeScenario:
                 self.concurrency_probe.active -= 1
 
     def verify(self, _expected, _text):
+        self.call_order.append("verify")
         value = self.verifications[min(self.verify_calls, len(self.verifications) - 1)]
         self.verify_calls += 1
         return value
@@ -396,6 +410,75 @@ def test_observe_mode_runs_decision_and_fresh_preflight_without_sending(tmp_path
     assert outcome.decision is scenario.decision
     assert scenario.send_calls == 0
     assert scenario.verify_calls == 0
+    assert ledger.status(observation.turn_key) is None
+
+
+def test_observe_accepts_visible_background_capture_without_preparing_or_sending(
+    tmp_path: Path,
+) -> None:
+    ManagedReplyCoordinator, RuntimeAdapters = _runtime_api()
+    observation = replace(_personal_observation(), foreground=False)
+    scenario = _RuntimeScenario(observation, fresh=observation)
+    ledger = SendLedger(tmp_path / "observe-visible.json").load()
+
+    outcome = ManagedReplyCoordinator(ledger).process(
+        observation,
+        RuntimeAdapters.from_object(scenario, mode="observe"),
+    )
+
+    assert outcome.reason == "observe_only"
+    assert outcome.sent is False
+    assert scenario.prepare_calls == 0
+    assert scenario.fresh_calls == 1
+    assert scenario.send_calls == scenario.verify_calls == 0
+    assert ledger.status(observation.turn_key) is None
+
+
+def test_controlled_prepares_window_before_strict_fresh_capture_and_send(
+    tmp_path: Path,
+) -> None:
+    ManagedReplyCoordinator, RuntimeAdapters = _runtime_api()
+    observed = replace(_personal_observation(), foreground=False)
+    fresh = replace(observed, foreground=True)
+    scenario = _RuntimeScenario(observed, fresh=fresh, preparation="ready")
+    ledger = SendLedger(tmp_path / "controlled-prepare.json").load()
+
+    outcome = ManagedReplyCoordinator(ledger).process(
+        observed,
+        RuntimeAdapters.from_object(
+            scenario,
+            mode="controlled",
+            allowlist=frozenset({observed.identity.top_title}),
+        ),
+    )
+
+    assert outcome.sent is True
+    assert scenario.call_order[:3] == ["prepare", "fresh", "send"]
+    assert ledger.status(observed.turn_key) == "verified"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ("user_active_elsewhere", "target_window_unavailable", "activation_failed"),
+)
+def test_send_window_prepare_failure_has_no_fresh_send_or_ledger_terminal(
+    tmp_path: Path,
+    reason: str,
+) -> None:
+    ManagedReplyCoordinator, RuntimeAdapters = _runtime_api()
+    observation = replace(_personal_observation(), foreground=False)
+    scenario = _RuntimeScenario(observation, preparation=reason)
+    ledger = SendLedger(tmp_path / f"prepare-{reason}.json").load()
+
+    outcome = ManagedReplyCoordinator(ledger).process(
+        observation,
+        RuntimeAdapters.from_object(scenario, mode="full"),
+    )
+
+    assert outcome.reason == reason
+    assert outcome.sent is False
+    assert scenario.prepare_calls == 1
+    assert scenario.fresh_calls == scenario.send_calls == scenario.verify_calls == 0
     assert ledger.status(observation.turn_key) is None
 
 

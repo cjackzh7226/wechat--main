@@ -1953,6 +1953,7 @@ class WeChatStyleReplyAssistant:
         adapters = RuntimeAdapters(
             decide=decide,
             validate_for_send=validate_for_send,
+            prepare_send_window=lambda _expected: "target_window_unavailable",
             fresh_observation=fresh,
             send=send,
             verify=verify,

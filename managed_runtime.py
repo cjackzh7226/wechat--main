@@ -15,7 +15,19 @@ from send_ledger import LedgerBlockingError, SendLedger
 
 Verification: TypeAlias = Literal["verified", "not_sent", "uncertain"]
 ManagedMode: TypeAlias = Literal["off", "observe", "controlled", "full"]
+SendWindowPreparation: TypeAlias = Literal[
+    "ready",
+    "user_active_elsewhere",
+    "target_window_unavailable",
+    "activation_failed",
+]
 _MANAGED_MODES = {"off", "observe", "controlled", "full"}
+_SEND_WINDOW_PREPARATIONS = {
+    "ready",
+    "user_active_elsewhere",
+    "target_window_unavailable",
+    "activation_failed",
+}
 _VERIFICATIONS = {"verified", "not_sent", "uncertain"}
 
 
@@ -57,6 +69,7 @@ class SendAttempt:
 class RuntimeAdapters:
     decide: Callable[[str, str], ReplyDecision]
     validate_for_send: Callable[[ReplyDecision], bool]
+    prepare_send_window: Callable[[ChatObservation], SendWindowPreparation]
     fresh_observation: Callable[[ChatObservation], ChatObservation | None]
     send: Callable[[ChatIdentity, str], SendAttempt]
     verify: Callable[[ChatObservation, str], Verification]
@@ -64,7 +77,14 @@ class RuntimeAdapters:
     allowlist: FrozenSet[str] = frozenset()
 
     def __post_init__(self) -> None:
-        for name in ("decide", "validate_for_send", "fresh_observation", "send", "verify"):
+        for name in (
+            "decide",
+            "validate_for_send",
+            "prepare_send_window",
+            "fresh_observation",
+            "send",
+            "verify",
+        ):
             if not callable(getattr(self, name)):
                 raise TypeError(f"{name} adapter must be callable")
         if type(self.mode) is not str or self.mode not in _MANAGED_MODES:
@@ -85,6 +105,7 @@ class RuntimeAdapters:
         return cls(
             decide=getattr(value, "decide"),
             validate_for_send=getattr(value, "validate_for_send"),
+            prepare_send_window=getattr(value, "prepare_send_window"),
             fresh_observation=getattr(value, "fresh_observation"),
             send=getattr(value, "send"),
             verify=getattr(value, "verify"),
@@ -162,8 +183,6 @@ class ManagedReplyCoordinator:
                 verification=verification,
             )
 
-        if not observation.foreground:
-            return outcome(ManagedPhase.BLOCKED, "window_not_foreground")
         if adapters.mode == "off":
             return outcome(ManagedPhase.BLOCKED, "managed_mode_off")
         if (
@@ -194,11 +213,33 @@ class ManagedReplyCoordinator:
 
         for attempt_count in (1, 2):
             phases.append(ManagedPhase.PREFLIGHT)
+            if adapters.mode != "observe":
+                try:
+                    valid_before_focus = adapters.validate_for_send(decision)
+                except Exception:
+                    valid_before_focus = False
+                if valid_before_focus is not True:
+                    return outcome(
+                        ManagedPhase.BLOCKED,
+                        "decision_changed_before_send",
+                    )
+                try:
+                    preparation = adapters.prepare_send_window(observation)
+                except Exception:
+                    preparation = "activation_failed"
+                if preparation not in _SEND_WINDOW_PREPARATIONS:
+                    preparation = "activation_failed"
+                if preparation != "ready":
+                    return outcome(ManagedPhase.BLOCKED, preparation)
             try:
                 fresh = adapters.fresh_observation(observation)
             except Exception:
                 return outcome(ManagedPhase.BLOCKED, "fresh_observation_failed")
-            preflight_error = _preflight_error(observation, fresh)
+            preflight_error = _preflight_error(
+                observation,
+                fresh,
+                require_foreground=adapters.mode != "observe",
+            )
             if preflight_error:
                 return outcome(ManagedPhase.BLOCKED, preflight_error)
             if adapters.mode == "observe":
@@ -343,12 +384,14 @@ class ManagedReplyCoordinator:
 def _preflight_error(
     expected: ChatObservation,
     fresh: ChatObservation | None,
+    *,
+    require_foreground: bool,
 ) -> str:
     if fresh is None:
         return "fresh_observation_unavailable"
     if not isinstance(fresh, ChatObservation):
         return "invalid_fresh_observation"
-    if not fresh.foreground:
+    if require_foreground and not fresh.foreground:
         return "window_not_foreground"
     if fresh.identity != expected.identity:
         return "chat_identity_changed"
