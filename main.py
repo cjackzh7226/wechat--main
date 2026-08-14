@@ -202,6 +202,7 @@ MSG = {
     "no_key": "\u5df2\u542f\u52a8\u3002\u672a\u914d\u7f6e API Key \u65f6\u4f1a\u4f7f\u7528\u672c\u5730\u5907\u7528\u56de\u590d\u3002",
     "idle_partner": "等待聊天窗口",
     "idle_status": "请打开微信、企业微信或 QQ，并点进一个聊天",
+    "managed_inactive": "已保留识别结果；企业微信当前不在前台，托管发送已暂停",
     "current": "当前聊天：{title}",
     "manual_ready": "已定位聊天窗口。点“识别当前聊天”生成回复。",
     "recognizing": "\u6b63\u5728\u8bc6\u522b\u5f53\u524d\u804a\u5929...",
@@ -521,6 +522,9 @@ class WeChatStyleReplyAssistant:
             return False
         if chat_type == "group":
             if context.strip():
+                if context != getattr(self, "current_context", ""):
+                    self.current_context = context
+                    self.queue.put(("context", context))
                 self._handle_group_chat(wechat, context=context)
             return True
         if chat_type == "system":
@@ -1061,8 +1065,22 @@ class WeChatStyleReplyAssistant:
                 break
 
             if kind == "idle":
-                self.ui.set_partner(MSG["idle_partner"])
-                self.ui.set_status(MSG["idle_status"])
+                if (
+                    _managed_mode_enabled(self.settings)
+                    and self.current_window is not None
+                    and self.current_context.strip()
+                ):
+                    self.ui.set_partner(MSG["current"].format(
+                        title=getattr(
+                            self.current_window,
+                            "display_title",
+                            self.current_window.title,
+                        )
+                    ))
+                    self.ui.set_status(MSG["managed_inactive"])
+                else:
+                    self.ui.set_partner(MSG["idle_partner"])
+                    self.ui.set_status(MSG["idle_status"])
             elif kind == "window" and isinstance(data, WeChatWindow):
                 self.ui.set_partner(MSG["current"].format(title=getattr(data, "display_title", data.title)))
                 if not self.settings.auto_recognize:
@@ -1284,7 +1302,13 @@ class WeChatStyleReplyAssistant:
             self.ui.set_status(MSG["no_window"])
             return
         self.current_window = wechat
-        threading.Thread(target=lambda: self._process_window(wechat, force=True), daemon=True).start()
+
+        def recognize() -> None:
+            if _managed_mode_enabled(self.settings) and self._route_managed_window(wechat):
+                return
+            self._process_window(wechat, force=True)
+
+        threading.Thread(target=recognize, daemon=True).start()
 
     def _auto_changed(self, enabled: bool) -> None:
         if getattr(self, "startup_blocking_error", ""):
@@ -1525,8 +1549,6 @@ class WeChatStyleReplyAssistant:
         self.ui.set_status(f"回复来源已切换为：{names.get(self.settings.reply_source_mode, '大模型+话术库')}")
 
     def _target_wechat_window(self) -> WeChatWindow | None:
-        if _managed_mode_enabled(self.settings):
-            return self.detector.foreground_chat()
         return _choose_target_wechat_window(
             self.detector.foreground_chat(),
             self.detector.any_chat_window(),

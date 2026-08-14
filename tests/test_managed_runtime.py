@@ -1144,6 +1144,8 @@ def test_managed_window_routing_refreshes_chat_type_on_manual_group_switch() -> 
     handled = []
     app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
     app.current_chat_type = "personal"
+    app.current_context = ""
+    app.queue = Queue()
     app._capture_runtime_source = lambda _window: (
         "人工切换后的群聊",
         "group",
@@ -1197,6 +1199,102 @@ def test_start_with_managed_off_does_not_require_an_ocr_baseline(
     app.start()
 
     assert calls == ["monitor"]
+
+
+def test_managed_manual_recognize_can_target_visible_wecom_while_assistant_has_focus() -> None:
+    import main
+
+    visible = SimpleNamespace(hwnd=200, title="测试群")
+    stale = SimpleNamespace(hwnd=100, title="旧聊天")
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.settings = SimpleNamespace(managed_mode="observe")
+    app.detector = SimpleNamespace(
+        foreground_chat=lambda: None,
+        any_chat_window=lambda: visible,
+    )
+    app.current_window = stale
+
+    assert app._target_wechat_window() is visible
+
+
+def test_managed_manual_recognize_routes_group_instead_of_using_personal_processor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main
+
+    window = SimpleNamespace(hwnd=200, title="测试群")
+    routed = []
+
+    class InlineThread:
+        def __init__(self, *, target, daemon):
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            self.target()
+
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.settings = SimpleNamespace(managed_mode="observe")
+    app._target_wechat_window = lambda: window
+    app._route_managed_window = lambda selected: routed.append(selected) or True
+    app._process_window = lambda *_args, **_kwargs: pytest.fail(
+        "a managed group must not enter the personal processor"
+    )
+    monkeypatch.setattr(main.threading, "Thread", InlineThread)
+
+    app._recognize_current()
+
+    assert app.current_window is window
+    assert routed == [window]
+
+
+def test_managed_group_route_publishes_recognized_context_to_ui() -> None:
+    import main
+
+    window = SimpleNamespace(hwnd=200, title="测试群")
+    context = "[发送者] -@微信\n[对方] @程正恒 社会团体能设多少个分会？"
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.current_context = ""
+    app.current_chat_type = "personal"
+    app.queue = Queue()
+    app._capture_runtime_source = lambda selected: ("测试群", "group", context)
+    app._handle_group_chat = lambda *_args, **_kwargs: None
+
+    assert app._route_managed_window(window) is True
+
+    assert app.current_context == context
+    assert app.queue.get_nowait() == ("context", context)
+
+
+def test_managed_idle_keeps_recognized_chat_visible_and_marks_sending_paused() -> None:
+    import main
+
+    class UI:
+        def __init__(self):
+            self.partner = "当前聊天：企业微信：测试群"
+            self.status = "已识别当前聊天"
+
+        def set_partner(self, value):
+            self.partner = value
+
+        def set_status(self, value):
+            self.status = value
+
+    window = SimpleNamespace(hwnd=200, title="测试群", display_title="企业微信：测试群")
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.settings = SimpleNamespace(managed_mode="observe", auto_recognize=True)
+    app.current_window = window
+    app.current_context = "[对方] 已识别的问题"
+    app.queue = Queue()
+    app.queue.put(("idle", None))
+    app.ui = UI()
+    app.running = False
+
+    app._ui_loop()
+
+    assert app.ui.partner == "当前聊天：企业微信：测试群"
+    assert "不在前台" in app.ui.status
+    assert "暂停" in app.ui.status
 
 
 def test_enabling_managed_mode_requires_baseline_before_starting_processing(
