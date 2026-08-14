@@ -1217,13 +1217,15 @@ def test_managed_manual_recognize_can_target_visible_wecom_while_assistant_has_f
     assert app._target_wechat_window() is visible
 
 
-def test_managed_manual_recognize_routes_group_instead_of_using_personal_processor(
+@pytest.mark.parametrize("mode", ("off", "observe", "controlled", "full"))
+def test_manual_recognize_uses_preview_in_every_mode_without_background_routing(
+    mode: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import main
 
     window = SimpleNamespace(hwnd=200, title="测试群")
-    routed = []
+    previewed = []
 
     class InlineThread:
         def __init__(self, *, target, daemon):
@@ -1234,18 +1236,224 @@ def test_managed_manual_recognize_routes_group_instead_of_using_personal_process
             self.target()
 
     app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
-    app.settings = SimpleNamespace(managed_mode="observe")
+    app.settings = SimpleNamespace(managed_mode=mode)
     app._target_wechat_window = lambda: window
-    app._route_managed_window = lambda selected: routed.append(selected) or True
+    app._manual_managed_preview = lambda selected: previewed.append(selected)
+    app._route_managed_window = lambda *_args, **_kwargs: pytest.fail(
+        "manual recognition must not enter the managed background route"
+    )
     app._process_window = lambda *_args, **_kwargs: pytest.fail(
-        "a managed group must not enter the personal processor"
+        "manual recognition must not enter the legacy generation path"
     )
     monkeypatch.setattr(main.threading, "Thread", InlineThread)
 
     app._recognize_current()
 
     assert app.current_window is window
-    assert routed == [window]
+    assert previewed == [window]
+
+
+@pytest.mark.parametrize(
+    ("chat_type", "context", "expected_reply"),
+    (
+        (
+            "personal",
+            "[对方] 社会团体能设多少个分会？",
+            "批准答案",
+        ),
+        (
+            "group",
+            "[发送者] 张三@微信\n[对方] @程正恒 社会团体能设多少个分会？",
+            "@张三 批准答案",
+        ),
+    ),
+)
+def test_manual_knowledge_preview_publishes_candidate_without_runtime_side_effects(
+    chat_type: str,
+    context: str,
+    expected_reply: str,
+) -> None:
+    import main
+
+    window = SimpleNamespace(
+        hwnd=200,
+        title="企业微信",
+        display_title="企业微信：测试会话",
+        platform=SimpleNamespace(key="wecom"),
+    )
+    effects = {"worker": 0, "activate": 0, "send": 0, "ledger": 0}
+    decision_calls = []
+
+    def forbidden(name: str):
+        def call(*_args, **_kwargs):
+            effects[name] += 1
+            pytest.fail(f"manual preview attempted forbidden side effect: {name}")
+
+        return call
+
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.settings = SimpleNamespace(
+        managed_mode="full",
+        wecom_account_name="程正恒",
+    )
+    app.queue = Queue()
+    app.current_context = ""
+    app.current_chat_type = "personal"
+    app._capture_runtime_source = lambda selected: (
+        "测试会话",
+        chat_type,
+        context,
+    )
+    app.engine = SimpleNamespace(
+        decide_managed=lambda conversation, turn: decision_calls.append(
+            (conversation, list(turn))
+        )
+        or ReplyDecision(
+            kind="answer",
+            text="批准答案",
+            record_id="record-1",
+            answer_hash="answer-1",
+        ),
+        last_source="批准知识库",
+        last_error="",
+    )
+    app.group_handler = SimpleNamespace(
+        detect_at_mention=lambda _context, _account: True,
+        latest_other_message=lambda _context: "张三@微信\n@程正恒 社会团体能设多少个分会？",
+        extract_question=lambda _message, _account: "社会团体能设多少个分会？",
+        extract_sender_name=lambda _context: "张三",
+        build_reply=lambda sender, answer: f"@{sender} {answer}",
+    )
+    app.managed_worker = SimpleNamespace(submit=forbidden("worker"))
+    app.sender = SimpleNamespace(
+        activate_verified_target=forbidden("activate"),
+        send=forbidden("send"),
+    )
+    app.send_ledger = SimpleNamespace(prepare=forbidden("ledger"))
+
+    app._manual_managed_preview(window)
+
+    events = []
+    while not app.queue.empty():
+        events.append(app.queue.get_nowait())
+    by_kind = {}
+    for kind, value in events:
+        by_kind.setdefault(kind, []).append(value)
+
+    assert app.current_context == context
+    assert app.current_chat_type == chat_type
+    assert by_kind["context"][-1] == context
+    assert by_kind["replies"][-1] == [expected_reply]
+    assert by_kind["reply_source"][-1] == "来源：批准知识库"
+    assert by_kind["status"][-1] == "已生成候选回复，仅预览，未发送"
+    assert decision_calls == [(context, ["社会团体能设多少个分会？"])]
+    assert effects == {"worker": 0, "activate": 0, "send": 0, "ledger": 0}
+
+
+def test_manual_group_preview_without_account_mention_clears_stale_candidate() -> None:
+    import main
+
+    window = SimpleNamespace(hwnd=200, title="企业微信")
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.settings = SimpleNamespace(
+        managed_mode="observe",
+        wecom_account_name="程正恒",
+    )
+    app.queue = Queue()
+    app.current_context = "旧上下文"
+    app.current_chat_type = "personal"
+    app._capture_runtime_source = lambda _selected: (
+        "测试群",
+        "group",
+        "[发送者] 张三@微信\n[对方] 普通群消息",
+    )
+    app.group_handler = SimpleNamespace(
+        detect_at_mention=lambda _context, _account: False,
+    )
+    app.engine = SimpleNamespace(
+        decide_managed=lambda *_args: pytest.fail(
+            "a group message without an account mention must not be decided"
+        )
+    )
+
+    app._manual_managed_preview(window)
+
+    events = []
+    while not app.queue.empty():
+        events.append(app.queue.get_nowait())
+    assert events[-2:] == [
+        ("clear_replies", None),
+        ("status", "已识别群聊；最新消息未 @ 当前账号，不生成候选"),
+    ]
+
+
+def test_manual_preview_no_match_displays_exact_fixed_answer_without_sending() -> None:
+    import main
+
+    window = SimpleNamespace(hwnd=200, title="企业微信")
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.settings = SimpleNamespace(
+        managed_mode="observe",
+        wecom_account_name="程正恒",
+    )
+    app.queue = Queue()
+    app.current_context = ""
+    app.current_chat_type = "personal"
+    app._capture_runtime_source = lambda _selected: (
+        "测试联系人",
+        "personal",
+        "[对方] 知识库没有的问题",
+    )
+    app.engine = SimpleNamespace(
+        decide_managed=lambda *_args: ReplyDecision.no_answer("no_match"),
+        last_source="知识库 · 未命中",
+        last_error="",
+    )
+
+    app._manual_managed_preview(window)
+
+    events = []
+    while not app.queue.empty():
+        events.append(app.queue.get_nowait())
+    assert ("replies", ["暂未查到对应答案"]) in events
+    assert events[-1] == ("status", "已生成候选回复，仅预览，未发送")
+
+
+def test_manual_preview_technical_failure_clears_stale_candidate_without_send_wording() -> None:
+    import main
+
+    window = SimpleNamespace(hwnd=200, title="企业微信")
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.settings = SimpleNamespace(
+        managed_mode="observe",
+        wecom_account_name="程正恒",
+    )
+    app.queue = Queue()
+    app.current_context = ""
+    app.current_chat_type = "personal"
+    app._capture_runtime_source = lambda _selected: (
+        "测试联系人",
+        "personal",
+        "[对方] 需要知识判断的问题",
+    )
+    app.engine = SimpleNamespace(
+        decide_managed=lambda *_args: ReplyDecision.technical_failure(
+            "repository_unavailable"
+        ),
+        last_source="知识库 · 技术失败",
+        last_error="托管知识库技术校验失败",
+    )
+
+    app._manual_managed_preview(window)
+
+    events = []
+    while not app.queue.empty():
+        events.append(app.queue.get_nowait())
+    assert events[-2:] == [
+        ("clear_replies", None),
+        ("status", "匹配暂不可用，未发送"),
+    ]
+    assert not any(kind == "replies" for kind, _value in events)
 
 
 def test_managed_group_route_publishes_recognized_context_to_ui() -> None:

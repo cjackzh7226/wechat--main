@@ -205,6 +205,10 @@ MSG = {
     "managed_inactive": "已保留识别结果；企业微信当前不在前台，托管发送已暂停",
     "current": "当前聊天：{title}",
     "manual_ready": "已定位聊天窗口。点“识别当前聊天”生成回复。",
+    "manual_preview_ready": "已生成候选回复，仅预览，未发送",
+    "manual_group_no_mention": "已识别群聊；最新消息未 @ 当前账号，不生成候选",
+    "manual_ocr_empty": "未识别到聊天内容，请确认企业微信窗口可见且未最小化",
+    "manual_match_error": "匹配暂不可用，未发送",
     "recognizing": "\u6b63\u5728\u8bc6\u522b\u5f53\u524d\u804a\u5929...",
     "step_located": "1/5 已定位聊天窗口：{title}",
     "step_capture": "2/5 \u6b63\u5728\u622a\u53d6\u5f53\u524d\u804a\u5929\u533a\u57df...",
@@ -1302,13 +1306,66 @@ class WeChatStyleReplyAssistant:
             self.ui.set_status(MSG["no_window"])
             return
         self.current_window = wechat
+        threading.Thread(
+            target=lambda: self._manual_managed_preview(wechat),
+            daemon=True,
+        ).start()
 
-        def recognize() -> None:
-            if _managed_mode_enabled(self.settings) and self._route_managed_window(wechat):
+    def _manual_managed_preview(self, wechat: WeChatWindow) -> None:
+        """Build a knowledge-only preview without entering any send authority."""
+        self.queue.put(("status", MSG["recognizing"]))
+        title, chat_type, context = self._capture_runtime_source(wechat)
+        self.current_chat_type = chat_type
+        self.queue.put(("window", wechat))
+        if not context.strip():
+            self.queue.put(("clear_replies", None))
+            self.queue.put(("status", MSG["manual_ocr_empty"]))
+            return
+
+        self.current_context = context
+        self.queue.put(("context", context))
+        target_turn: list[str]
+        sender_name = ""
+        if chat_type == "group":
+            account_name = str(getattr(self.settings, "wecom_account_name", "") or "").strip()
+            if not account_name or not self.group_handler.detect_at_mention(context, account_name):
+                self.queue.put(("clear_replies", None))
+                self.queue.put(("status", MSG["manual_group_no_mention"]))
                 return
-            self._process_window(wechat, force=True)
+            latest_message = self.group_handler.latest_other_message(context)
+            question = self.group_handler.extract_question(latest_message, account_name)
+            sender_name = self.group_handler.extract_sender_name(context)
+            if not question.strip() or not sender_name.strip():
+                self.queue.put(("clear_replies", None))
+                self.queue.put(("status", MSG["manual_ocr_empty"]))
+                return
+            target_turn = [question]
+        elif chat_type == "personal":
+            target_turn = _current_unreplied_turn(context)
+            if not target_turn:
+                self.queue.put(("clear_replies", None))
+                self.queue.put(("status", MSG["manual_ocr_empty"]))
+                return
+        else:
+            self.queue.put(("clear_replies", None))
+            self.queue.put(("status", "当前会话类型无法可靠确认，仅预览未发送"))
+            return
 
-        threading.Thread(target=recognize, daemon=True).start()
+        try:
+            decision = self.engine.decide_managed(context, list(target_turn))
+        except Exception:
+            decision = None
+        if not isinstance(decision, ReplyDecision) or decision.kind == "technical_failure":
+            self.queue.put(("clear_replies", None))
+            self.queue.put(("status", MSG["manual_match_error"]))
+            return
+
+        reply = decision.text
+        if chat_type == "group":
+            reply = self.group_handler.build_reply(sender_name, reply)
+        self.queue.put(("replies", [reply]))
+        self.queue.put(("reply_source", self._reply_source_label()))
+        self.queue.put(("status", MSG["manual_preview_ready"]))
 
     def _auto_changed(self, enabled: bool) -> None:
         if getattr(self, "startup_blocking_error", ""):
