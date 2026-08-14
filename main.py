@@ -52,6 +52,7 @@ from managed_runtime import (
     RuntimeAdapters,
     RuntimeOutcome,
     SendAttempt,
+    SendWindowPreparation,
 )
 from settings import AppSettings, SettingsPersistenceError, SettingsValidationError
 from sop_analyzer import (
@@ -488,11 +489,14 @@ class WeChatStyleReplyAssistant:
     def _monitor_loop(self) -> None:
         while self.running:
             try:
-                wechat = self.detector.foreground_chat()
-                if not wechat and not _managed_mode_enabled(self.settings) and (
-                    self.settings.auto_recognize or self.settings.training_mode
-                ):
-                    wechat = self.detector.any_chat_window()
+                if _managed_mode_enabled(self.settings):
+                    wechat = self._visible_wecom_target()
+                else:
+                    wechat = self.detector.foreground_chat()
+                    if not wechat and (
+                        self.settings.auto_recognize or self.settings.training_mode
+                    ):
+                        wechat = self.detector.any_chat_window()
                 if not wechat:
                     self.queue.put(("idle", None))
                     time.sleep(self._poll_interval() / 1000)
@@ -1618,11 +1622,98 @@ class WeChatStyleReplyAssistant:
         self.ui.set_status(f"回复来源已切换为：{names.get(self.settings.reply_source_mode, '大模型+话术库')}")
 
     def _target_wechat_window(self) -> WeChatWindow | None:
-        return _choose_target_wechat_window(
-            self.detector.foreground_chat(),
-            self.detector.any_chat_window(),
-            self.current_window,
-        )
+        return self._visible_wecom_target()
+
+    def _visible_wecom_target(self) -> WeChatWindow | None:
+        """Return a visible WeCom window without changing foreground focus."""
+        try:
+            foreground = self.detector.foreground_chat()
+        except Exception:
+            foreground = None
+        if foreground is not None:
+            return foreground
+
+        current = self._revalidated_send_window(getattr(self, "current_window", None))
+        if current is not None:
+            return current
+        try:
+            return self.detector.any_chat_window()
+        except Exception:
+            return None
+
+    def _revalidated_send_window(
+        self,
+        expected_window: WeChatWindow | None,
+    ) -> WeChatWindow | None:
+        if expected_window is None:
+            return None
+        hwnd = int(getattr(expected_window, "hwnd", 0) or 0)
+        resolver = getattr(self.detector, "window_from_hwnd", None)
+        if not hwnd or not callable(resolver):
+            return None
+        try:
+            live = resolver(hwnd)
+        except Exception:
+            return None
+        if not _same_strict_send_window(expected_window, live):
+            return None
+        return live
+
+    def _prepare_managed_send_window(
+        self,
+        expected: ChatObservation,
+        expected_window: WeChatWindow,
+    ) -> SendWindowPreparation:
+        """Safely hand focus from this assistant to the exact queued WeCom HWND."""
+        live = self._revalidated_send_window(expected_window)
+        if (
+            live is None
+            or int(getattr(live, "hwnd", 0) or 0) != expected.identity.hwnd
+            or str(getattr(getattr(live, "platform", None), "key", "") or "")
+            != "wecom"
+        ):
+            return "target_window_unavailable"
+
+        foreground_hwnd = getattr(self.detector, "foreground_hwnd", None)
+        root_hwnd = getattr(self.detector, "root_hwnd", None)
+        if not callable(foreground_hwnd) or not callable(root_hwnd):
+            return "activation_failed"
+        try:
+            raw_foreground = int(foreground_hwnd() or 0)
+            foreground_root = int(root_hwnd(raw_foreground) or raw_foreground)
+            target_hwnd = int(getattr(live, "hwnd", 0) or 0)
+            target_root = int(root_hwnd(target_hwnd) or target_hwnd)
+        except Exception:
+            return "activation_failed"
+        if not raw_foreground or not foreground_root or not target_root:
+            return "activation_failed"
+        if foreground_root == target_root:
+            return "ready"
+
+        try:
+            assistant_hwnd = int(self.ui.root.winfo_id() or 0)
+            assistant_root = int(root_hwnd(assistant_hwnd) or assistant_hwnd)
+        except Exception:
+            return "activation_failed"
+        if not assistant_root or foreground_root != assistant_root:
+            return "user_active_elsewhere"
+        try:
+            activated = self.sender.activate_verified_target(live)
+        except Exception:
+            activated = False
+        if activated is not True:
+            return "activation_failed"
+
+        try:
+            confirmed_raw = int(foreground_hwnd() or 0)
+            confirmed_root = int(root_hwnd(confirmed_raw) or confirmed_raw)
+        except Exception:
+            return "activation_failed"
+        if confirmed_root != target_root:
+            return "activation_failed"
+        if self._revalidated_send_window(live) is None:
+            return "target_window_unavailable"
+        return "ready"
 
     def _maybe_managed_send(
         self,
@@ -1767,8 +1858,15 @@ class WeChatStyleReplyAssistant:
         self,
         expected: ChatObservation,
         window: WeChatWindow,
+        *,
+        require_foreground: bool = True,
     ) -> ChatObservation | None:
-        live_window = _strict_foreground_send_window(self.detector, window)
+        if type(require_foreground) is not bool:
+            return None
+        if require_foreground:
+            live_window = _strict_foreground_send_window(self.detector, window)
+        else:
+            live_window = self._revalidated_send_window(window)
         if live_window is None:
             return None
         return self._capture_runtime_observation(
@@ -1894,6 +1992,7 @@ class WeChatStyleReplyAssistant:
         transform = outgoing_text if callable(outgoing_text) else (lambda text: text)
         live = {"window": window}
         active: dict[str, ReplyDecision | None] = {"decision": None}
+        runtime_mode = str(getattr(self.settings, "managed_mode", "off") or "off")
 
         def decide(_question: str, context: str) -> ReplyDecision:
             decision = self.engine.decide_managed(
@@ -1905,12 +2004,25 @@ class WeChatStyleReplyAssistant:
 
         def fresh(expected: ChatObservation) -> ChatObservation | None:
             _diag("preflight_checked")
-            current = self._capture_fresh_runtime_observation(expected, window)
+            current = self._capture_fresh_runtime_observation(
+                expected,
+                window,
+                require_foreground=runtime_mode != "observe",
+            )
             if current is not None:
-                current_window = _strict_foreground_send_window(self.detector, window)
+                current_window = self._revalidated_send_window(window)
                 if current_window is not None:
                     live["window"] = current_window
             return current
+
+        def prepare_send_window(expected: ChatObservation) -> SendWindowPreparation:
+            preparation = self._prepare_managed_send_window(expected, window)
+            if preparation == "ready":
+                current_window = self._revalidated_send_window(window)
+                if current_window is None:
+                    return "target_window_unavailable"
+                live["window"] = current_window
+            return preparation
 
         def send(_identity: ChatIdentity, text: str):
             candidate = active["decision"]
@@ -1953,7 +2065,7 @@ class WeChatStyleReplyAssistant:
         adapters = RuntimeAdapters(
             decide=decide,
             validate_for_send=validate_for_send,
-            prepare_send_window=lambda _expected: "target_window_unavailable",
+            prepare_send_window=prepare_send_window,
             fresh_observation=fresh,
             send=send,
             verify=verify,

@@ -1400,6 +1400,275 @@ def test_managed_manual_recognize_can_target_visible_wecom_while_assistant_has_f
     assert app._target_wechat_window() is visible
 
 
+def test_visible_wecom_target_revalidates_current_before_discovery() -> None:
+    import main
+
+    stale = SimpleNamespace(
+        hwnd=100,
+        title="旧对象",
+        platform=SimpleNamespace(key="wecom"),
+    )
+    live = SimpleNamespace(
+        hwnd=100,
+        title="当前对象",
+        platform=SimpleNamespace(key="wecom"),
+    )
+    calls = []
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.current_window = stale
+    app.detector = SimpleNamespace(
+        foreground_chat=lambda: None,
+        window_from_hwnd=lambda hwnd: calls.append(("revalidate", hwnd)) or live,
+        any_chat_window=lambda: calls.append(("discover",)) or pytest.fail(
+            "a valid current HWND must win before broad discovery"
+        ),
+    )
+
+    assert app._target_wechat_window() is live
+    assert calls == [("revalidate", 100)]
+
+
+def test_visible_wecom_target_discovers_when_current_hwnd_is_stale() -> None:
+    import main
+
+    stale = SimpleNamespace(
+        hwnd=100,
+        title="旧对象",
+        platform=SimpleNamespace(key="wecom"),
+    )
+    discovered = SimpleNamespace(
+        hwnd=200,
+        title="可见企业微信",
+        platform=SimpleNamespace(key="wecom"),
+    )
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.current_window = stale
+    app.detector = SimpleNamespace(
+        foreground_chat=lambda: None,
+        window_from_hwnd=lambda _hwnd: None,
+        any_chat_window=lambda: discovered,
+    )
+
+    assert app._target_wechat_window() is discovered
+
+
+def test_managed_monitor_uses_visible_wecom_while_assistant_has_focus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main
+
+    visible = SimpleNamespace(
+        hwnd=200,
+        title="可见企业微信",
+        platform=SimpleNamespace(key="wecom"),
+    )
+    routed = []
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.running = True
+    app.settings = SimpleNamespace(
+        managed_mode="full",
+        auto_recognize=True,
+        training_mode=False,
+        poll_interval_ms=1,
+        group_poll_interval_ms=1,
+    )
+
+    def assistant_is_foreground():
+        app.running = False
+        return None
+
+    app.detector = SimpleNamespace(
+        foreground_chat=assistant_is_foreground,
+        window_from_hwnd=lambda _hwnd: None,
+        any_chat_window=lambda: visible,
+    )
+    app.current_window = None
+    app.current_chat_type = "personal"
+    app.last_window_key = ""
+    app.current_hash = ""
+    app.last_capture = 0.0
+    app.managed_send_inflight = False
+    app.queue = Queue()
+
+    def route(window):
+        routed.append(window)
+        app.running = False
+        return True
+
+    app._route_managed_window = route
+    app._conversation_list_bypass = lambda _window: None
+    monkeypatch.setattr(main.time, "sleep", lambda _seconds: None)
+
+    app._monitor_loop()
+
+    assert routed == [visible]
+    assert app.current_window is visible
+
+
+@pytest.mark.parametrize(
+    ("foreground_hwnd", "target_available", "activation_succeeds", "expected", "activations"),
+    (
+        (100, True, True, "ready", 0),
+        (50, True, True, "ready", 1),
+        (700, True, True, "user_active_elsewhere", 0),
+        (50, True, False, "activation_failed", 1),
+        (50, False, True, "target_window_unavailable", 0),
+    ),
+)
+def test_prepare_managed_send_window_only_activates_from_assistant_focus(
+    foreground_hwnd: int,
+    target_available: bool,
+    activation_succeeds: bool,
+    expected: str,
+    activations: int,
+) -> None:
+    import main
+
+    observation = _personal_observation()
+    queued = SimpleNamespace(
+        hwnd=100,
+        title="企业微信",
+        platform=SimpleNamespace(key="wecom"),
+    )
+    live = SimpleNamespace(
+        hwnd=100,
+        title="企业微信",
+        platform=SimpleNamespace(key="wecom"),
+    )
+    state = {"foreground": foreground_hwnd}
+    activation_calls = []
+
+    def activate(target):
+        activation_calls.append(target)
+        if activation_succeeds:
+            state["foreground"] = 100
+        return activation_succeeds
+
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.detector = SimpleNamespace(
+        window_from_hwnd=lambda hwnd: live if target_available and hwnd == 100 else None,
+        foreground_hwnd=lambda: state["foreground"],
+        root_hwnd=lambda hwnd: hwnd,
+    )
+    app.sender = SimpleNamespace(activate_verified_target=activate)
+    app.ui = SimpleNamespace(root=SimpleNamespace(winfo_id=lambda: 50))
+
+    result = app._prepare_managed_send_window(observation, queued)
+
+    assert result == expected
+    assert len(activation_calls) == activations
+
+
+def test_prepare_managed_send_window_converts_activation_exception_to_failure() -> None:
+    import main
+
+    observation = _personal_observation()
+    window = SimpleNamespace(
+        hwnd=100,
+        title="企业微信",
+        platform=SimpleNamespace(key="wecom"),
+    )
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.detector = SimpleNamespace(
+        window_from_hwnd=lambda _hwnd: window,
+        foreground_hwnd=lambda: 50,
+        root_hwnd=lambda hwnd: hwnd,
+    )
+    app.sender = SimpleNamespace(
+        activate_verified_target=lambda _target: (_ for _ in ()).throw(
+            RuntimeError("activation failed")
+        )
+    )
+    app.ui = SimpleNamespace(root=SimpleNamespace(winfo_id=lambda: 50))
+
+    assert app._prepare_managed_send_window(observation, window) == "activation_failed"
+
+
+def test_fresh_runtime_capture_can_revalidate_visible_background_without_focus() -> None:
+    import main
+
+    expected = replace(_personal_observation(), foreground=False)
+    queued = SimpleNamespace(
+        hwnd=100,
+        title="企业微信",
+        platform=SimpleNamespace(key="wecom"),
+    )
+    live = SimpleNamespace(
+        hwnd=100,
+        title="企业微信",
+        platform=SimpleNamespace(key="wecom"),
+    )
+    captured = []
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.detector = SimpleNamespace(
+        window_from_hwnd=lambda hwnd: live if hwnd == 100 else None,
+        foreground_chat=lambda: None,
+    )
+    app._capture_runtime_observation = lambda window, chat_type=None: captured.append(
+        (window, chat_type)
+    ) or expected
+
+    assert app._capture_fresh_runtime_observation(
+        expected,
+        queued,
+        require_foreground=False,
+    ) is expected
+    assert captured == [(live, "personal")]
+    assert app._capture_fresh_runtime_observation(
+        expected,
+        queued,
+        require_foreground=True,
+    ) is None
+
+
+def test_main_runtime_adapter_wires_real_send_window_preparation() -> None:
+    import main
+
+    observation = _personal_observation()
+    window = SimpleNamespace(
+        hwnd=100,
+        title="企业微信",
+        platform=SimpleNamespace(key="wecom"),
+    )
+    submitted = []
+    preparation_calls = []
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.settings = SimpleNamespace(managed_mode="full", managed_allowed_chats=[])
+    app.engine = SimpleNamespace(
+        decide_managed=lambda *_args: ReplyDecision.no_answer("no_match"),
+        managed_decision_still_valid=lambda _decision: True,
+    )
+    app.sender = SimpleNamespace(send=lambda *_args, **_kwargs: SendAttempt(True, "keypress"))
+    app.detector = SimpleNamespace(window_from_hwnd=lambda _hwnd: window)
+    app.managed_worker = SimpleNamespace(
+        submit=lambda observation, adapters, callback: submitted.append(
+            (observation, adapters, callback)
+        )
+        or True
+    )
+    app.managed_send_inflight = False
+    app._managed_pending_count = 0
+    app.queue = Queue()
+    app._managed_reply_readiness_allows_send = lambda: True
+    app._prepare_managed_send_window = lambda expected, target: preparation_calls.append(
+        (expected, target)
+    ) or "ready"
+    app._capture_fresh_runtime_observation = (
+        lambda expected, _target, *, require_foreground: replace(
+            expected,
+            foreground=require_foreground,
+        )
+    )
+    app._verify_runtime_send = lambda *_args: "verified"
+
+    assert app._queue_runtime_observation(observation, window) is True
+    adapters = submitted[0][1]
+
+    assert adapters.prepare_send_window(observation) == "ready"
+    assert preparation_calls == [(observation, window)]
+    assert adapters.fresh_observation(observation).foreground is True
+
+
 @pytest.mark.parametrize("mode", ("off", "observe", "controlled", "full"))
 def test_manual_recognize_uses_preview_in_every_mode_without_background_routing(
     mode: str,
