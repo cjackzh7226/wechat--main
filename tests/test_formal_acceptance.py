@@ -182,6 +182,7 @@ def _formal_runtime_fault(tmp_path: Path, fault: str):
     adapters = RuntimeAdapters(
         decide=decide,
         validate_for_send=validate,
+        prepare_send_window=lambda _expected: "ready",
         fresh_observation=fresh,
         send=send,
         verify=lambda _fresh, _text: "uncertain",

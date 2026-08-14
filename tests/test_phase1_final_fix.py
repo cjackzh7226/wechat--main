@@ -147,7 +147,14 @@ def _new_managed_app(engine: ReplyEngine, ledger: SendLedger, sender: object) ->
         platform=ChatPlatform.for_key("wecom"),
     )
     app.current_window = window
-    app.detector = SimpleNamespace(foreground_chat=lambda: window, any_chat_window=lambda: None)
+    app.detector = SimpleNamespace(
+        foreground_chat=lambda: window,
+        any_chat_window=lambda: None,
+        window_from_hwnd=lambda hwnd: window if hwnd == window.hwnd else None,
+        foreground_hwnd=lambda: window.hwnd,
+        root_hwnd=lambda hwnd: hwnd,
+    )
+    app.ui = SimpleNamespace(root=SimpleNamespace(winfo_id=lambda: 999))
     app.current_context = "[对方] 测试问题"
 
     def personal_observation(_window, chat_type=None):
@@ -165,7 +172,9 @@ def _new_managed_app(engine: ReplyEngine, ledger: SendLedger, sender: object) ->
         )
 
     app._capture_runtime_observation = personal_observation
-    app._capture_fresh_runtime_observation = lambda expected, _window: expected
+    app._capture_fresh_runtime_observation = (
+        lambda expected, _window, *, require_foreground=True: expected
+    )
     app._verify_runtime_send = lambda *_args: "verified"
     app.managed_send_inflight = False
     return app, window
@@ -193,7 +202,12 @@ def _send_group_reply(engine: ReplyEngine, question: str, replies: list[str]) ->
     )
     turn_message = f"@客服 {question}"
     app.chat_identity = SimpleNamespace(current_chat_key=window.title)
-    app.detector = SimpleNamespace(foreground_chat=lambda: window)
+    app.detector = SimpleNamespace(
+        foreground_chat=lambda: window,
+        window_from_hwnd=lambda hwnd: window if hwnd == window.hwnd else None,
+        foreground_hwnd=lambda: window.hwnd,
+        root_hwnd=lambda hwnd: hwnd,
+    )
     group_observation = ChatObservation(
         ChatIdentity(window.hwnd, window.title, "group"),
         f"[对方] 张三@微信\n[对方] {turn_message}",
