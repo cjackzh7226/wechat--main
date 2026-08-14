@@ -24,6 +24,24 @@ except Exception:  # pragma: no cover
 
 
 class WeChatSender:
+    def activate_verified_target(self, target: object) -> bool:
+        """Activate one visible, non-minimized HWND and confirm it owns focus."""
+        hwnd = _target_hwnd(target)
+        if win32gui is None or not hwnd:
+            return False
+        try:
+            if (
+                not win32gui.IsWindow(hwnd)
+                or not win32gui.IsWindowVisible(hwnd)
+                or win32gui.IsIconic(hwnd)
+            ):
+                return False
+            win32gui.SetForegroundWindow(hwnd)
+            time.sleep(0.15)
+            return self._is_target_foreground(target)
+        except Exception:
+            return False
+
     def send(
         self,
         target: object,

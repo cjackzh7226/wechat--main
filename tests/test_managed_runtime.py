@@ -149,6 +149,8 @@ def _install_sender_fakes(
 
     fake_pyperclip = SimpleNamespace(paste=lambda: clipboard["value"], copy=copy)
     fake_win32gui = SimpleNamespace(
+        IsWindow=lambda _hwnd: True,
+        IsWindowVisible=lambda _hwnd: True,
         IsIconic=lambda _hwnd: False,
         ShowWindow=lambda *_args: calls.append(("show",)),
         SetForegroundWindow=lambda hwnd: calls.append(("activate", hwnd)),
@@ -461,6 +463,104 @@ def test_automatic_sender_never_activates_a_background_window(
     assert attempt.keypress_performed is False
     assert not any(call[0] == "activate" for call in calls if isinstance(call, tuple))
     assert not any(call[0] in {"click", "hotkey", "press"} for call in calls if isinstance(call, tuple))
+
+
+@pytest.mark.parametrize(
+    ("valid", "visible", "minimized"),
+    (
+        (False, True, False),
+        (True, False, False),
+        (True, True, True),
+    ),
+)
+def test_window_detector_rejects_invalid_hidden_and_minimized_wecom(
+    monkeypatch: pytest.MonkeyPatch,
+    valid: bool,
+    visible: bool,
+    minimized: bool,
+) -> None:
+    import wechat_window as window_module
+
+    fake_win32gui = SimpleNamespace(
+        IsWindow=lambda _hwnd: valid,
+        IsWindowVisible=lambda _hwnd: visible,
+        IsIconic=lambda _hwnd: minimized,
+        GetWindowText=lambda _hwnd: "企业微信",
+        GetWindowRect=lambda _hwnd: (0, 0, 1000, 700),
+    )
+    monkeypatch.setattr(window_module, "win32gui", fake_win32gui)
+    detector = window_module.ChatWindowDetector()
+    monkeypatch.setattr(
+        detector,
+        "_match_platform",
+        lambda _hwnd, _title: window_module.ChatPlatform.for_key("wecom"),
+    )
+
+    assert detector.window_from_hwnd(9) is None
+
+
+def test_window_detector_exposes_raw_foreground_and_normalized_root_hwnd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import wechat_window as window_module
+
+    fake_win32gui = SimpleNamespace(
+        GetForegroundWindow=lambda: 91,
+        GetAncestor=lambda hwnd, flag: 90 if (hwnd, flag) == (91, 2) else 0,
+    )
+    monkeypatch.setattr(window_module, "win32gui", fake_win32gui)
+    detector = window_module.ChatWindowDetector()
+
+    assert detector.foreground_hwnd() == 91
+    assert detector.root_hwnd(91) == 90
+
+
+def test_activate_verified_target_activates_only_given_hwnd_and_confirms_focus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target, calls, _clipboard = _install_sender_fakes(
+        monkeypatch,
+        foreground_values=(9,),
+    )
+
+    assert WeChatSender().activate_verified_target(target) is True
+    assert [
+        call
+        for call in calls
+        if isinstance(call, tuple) and call[0] == "activate"
+    ] == [("activate", 9)]
+
+
+@pytest.mark.parametrize(
+    ("valid", "visible", "minimized"),
+    (
+        (False, True, False),
+        (True, False, False),
+        (True, True, True),
+    ),
+)
+def test_activate_verified_target_rejects_unusable_target_without_activation(
+    monkeypatch: pytest.MonkeyPatch,
+    valid: bool,
+    visible: bool,
+    minimized: bool,
+) -> None:
+    calls = []
+    monkeypatch.setattr(
+        sender_module,
+        "win32gui",
+        SimpleNamespace(
+            IsWindow=lambda _hwnd: valid,
+            IsWindowVisible=lambda _hwnd: visible,
+            IsIconic=lambda _hwnd: minimized,
+            SetForegroundWindow=lambda hwnd: calls.append(("activate", hwnd)),
+            GetForegroundWindow=lambda: 9,
+        ),
+    )
+    monkeypatch.setattr(sender_module.time, "sleep", lambda _seconds: None)
+
+    assert WeChatSender().activate_verified_target(SimpleNamespace(hwnd=9)) is False
+    assert calls == []
 
 
 def test_automatic_sender_fails_closed_when_foreground_api_is_unavailable(
