@@ -2177,7 +2177,10 @@ def test_enabling_managed_mode_requires_baseline_before_starting_processing(
 def test_main_defers_knowledge_decision_until_the_serial_runtime_worker() -> None:
     import main
 
-    observation = _personal_observation()
+    observation = replace(
+        _personal_observation(),
+        customer_turn=("虚构旧问题", "社会团体能向分支机构收管理费、赞助费吗？"),
+    )
     decision = ReplyDecision.no_answer("no_match")
     submitted = []
     decide_calls = []
@@ -2211,7 +2214,7 @@ def test_main_defers_knowledge_decision_until_the_serial_runtime_worker() -> Non
     assert adapters.decide(
         observation.customer_turn[-1], observation.context
     ) is decision
-    assert decide_calls == [(observation.context, list(observation.customer_turn))]
+    assert decide_calls == [(observation.context, [observation.customer_turn[-1]])]
 
 
 def test_same_turn_cannot_be_queued_twice_while_first_runtime_job_is_pending() -> None:

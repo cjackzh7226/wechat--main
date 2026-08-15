@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "kind": "formal_appdata_comparison",
+  "release_version": "2026.08.16.2",
+  "data_root": "%APPDATA%\\WeChatStyleReplyAssistant",
+  "operation": "packaged_runtime_check",
+  "before_count": 37,
+  "after_count": 37,
+  "mismatch_count": 0,
+  "compared_fields": [
+    "relative_path",
+    "size",
+    "sha256",
+    "mtime_ticks"
+  ],
+  "runtime_check_report_sha256": "92C91D327815A66342CF8B4613AD43DF1EECBE503338A562D4416EC1BDF077CE",
+  "ok": true
+}

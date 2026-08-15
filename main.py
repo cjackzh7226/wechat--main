@@ -2056,10 +2056,10 @@ class WeChatStyleReplyAssistant:
         active: dict[str, ReplyDecision | None] = {"decision": None}
         runtime_mode = str(getattr(self.settings, "managed_mode", "off") or "off")
 
-        def decide(_question: str, context: str) -> ReplyDecision:
+        def decide(question: str, context: str) -> ReplyDecision:
             decision = self.engine.decide_managed(
                 context,
-                list(observation.customer_turn),
+                [question],
             )
             active["decision"] = decision
             return decision

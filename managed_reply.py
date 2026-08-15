@@ -48,13 +48,19 @@ class ReplyDecision:
             raise ValueError("technical_failure decision must not contain sendable text")
 
     @classmethod
-    def answer(cls, record: KnowledgeRecord, candidate: KnowledgeCandidate) -> "ReplyDecision":
+    def answer(
+        cls,
+        record: KnowledgeRecord,
+        candidate: KnowledgeCandidate,
+        *,
+        reason: str = "approved_candidate_reloaded",
+    ) -> "ReplyDecision":
         return cls(
             kind="answer",
             text=record.reply,
             record_id=record.record_id,
             answer_hash=record.answer_hash,
-            reason="approved_candidate_reloaded",
+            reason=reason,
             score=candidate.score,
             org_scope=record.org_scope,
         )
@@ -92,6 +98,17 @@ class ManagedReplyService:
         if not candidates:
             return ReplyDecision.no_answer("no_eligible_candidate")
 
+        exact_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.exact and candidate.score == 100
+        ]
+        if len(exact_candidates) == 1:
+            return self._reload_answer(
+                exact_candidates[0],
+                reason="approved_exact_candidate_reloaded",
+            )
+
         try:
             judgement = self.judge.judge(current_question, candidates)
         except Exception:
@@ -104,6 +121,14 @@ class ManagedReplyService:
             return ReplyDecision.no_answer("judge_index_out_of_range")
 
         selected = candidates[judgement.chosen_index]
+        return self._reload_answer(selected)
+
+    def _reload_answer(
+        self,
+        selected: KnowledgeCandidate,
+        *,
+        reason: str = "approved_candidate_reloaded",
+    ) -> ReplyDecision:
         try:
             record = self.repository.get_active(selected.record_id)
         except Exception:
@@ -117,7 +142,7 @@ class ManagedReplyService:
             return ReplyDecision.technical_failure(
                 "record_changed_after_judgement"
             )
-        return ReplyDecision.answer(record, selected)
+        return ReplyDecision.answer(record, selected, reason=reason)
 
     def validate_for_send(self, decision: ReplyDecision) -> bool:
         """Recheck queued decisions immediately before any sender side effect."""

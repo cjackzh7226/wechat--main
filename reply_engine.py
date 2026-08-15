@@ -184,15 +184,20 @@ class ReplyEngine:
             if target_turn is not None
             else _infer_unreplied_other_messages(conversation_text)
         )
-        question = "\n".join(
+        questions = [
             message.strip() for message in effective_target_turn if message.strip()
-        )
+        ]
+        question = questions[-1] if questions else ""
         if not question:
             question = last_meaningful_other_message(conversation_text) or conversation_text
         decision = self.managed_service.decide(question, conversation_text)
         self.last_managed_decision = decision
         if decision.kind == "answer":
-            self.last_source = "批准知识库 · 大模型确认一致"
+            self.last_source = (
+                "批准知识库 · 精确命中"
+                if decision.reason == "approved_exact_candidate_reloaded"
+                else "批准知识库 · 大模型确认一致"
+            )
             self.last_error = ""
         elif decision.kind == "no_answer":
             self.last_source = "知识库 · 未命中"

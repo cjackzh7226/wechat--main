@@ -812,7 +812,7 @@ def test_managed_reply_reloads_and_returns_the_unchanged_answer_by_id():
     judge = _FixedJudge(Judgement(chosen_index=0, consistent=True))
 
     decision = ManagedReplyService(repo, judge).decide(
-        "社会团体理事会次数", ""
+        "社会团体理事会次数有何要求？", ""
     )
 
     assert decision.kind == "answer"
@@ -820,6 +820,35 @@ def test_managed_reply_reloads_and_returns_the_unchanged_answer_by_id():
     assert decision.record_id == record.record_id
     assert decision.answer_hash == record.answer_hash
     assert len(judge.calls) == 1
+
+
+def test_exact_active_candidate_is_returned_without_model_judgement():
+    record = _record(
+        "20-exact",
+        question="社会团体能向分支机构收管理费、赞助费吗？",
+        reply="知识库原始答案",
+        scope="social",
+    )
+    judge = _FixedJudge(None)
+
+    decision = ManagedReplyService(KnowledgeRepository([record]), judge).decide(
+        "社会团体能向分支机构收管理费、赞助费吗?",
+        "[对方] 前面还有其他无关问题",
+    )
+
+    assert decision.kind == "answer"
+    assert decision.text == "知识库原始答案"
+    assert decision.record_id == record.record_id
+    assert decision.reason == "approved_exact_candidate_reloaded"
+    assert judge.calls == []
+
+    engine = ReplyEngine(
+        AppSettings(),
+        StyleMemory(),
+        managed_service=SimpleNamespace(decide=lambda *_args: decision),
+    )
+    assert engine.decide_managed("", [record.question]) is decision
+    assert engine.last_source == "批准知识库 · 精确命中"
 
 
 @pytest.mark.parametrize(
@@ -830,7 +859,7 @@ def test_judge_failure_inconsistency_or_bad_index_returns_exact_no_match(judge_r
     record = _record("21")
     service = ManagedReplyService(KnowledgeRepository([record]), _FixedJudge(judge_result))
 
-    decision = service.decide("社会团体住所不一致怎么办？", "")
+    decision = service.decide("社会团体住所不一致需要如何整改？", "")
 
     assert decision.kind == "no_answer"
     assert decision.text == "暂未查到对应答案" == NO_MATCH_REPLY
@@ -1006,15 +1035,15 @@ def test_reply_engine_knowledge_only_uses_typed_service_without_legacy_fallback(
     )
 
     replies = engine.generate(
-        "[对方] 旧上下文\n[对方] 社会团体住所不一致怎么办？",
-        target_turn=["社会团体住所不一致怎么办？"],
+        "[对方] 虚构问题一\n[对方] 虚构问题二\n[对方] 社会团体住所不一致怎么办？",
+        target_turn=["虚构问题一", "虚构问题二", "社会团体住所不一致怎么办？"],
     )
 
     assert replies == ["知识库原文"]
     assert service.calls == [
         (
             "社会团体住所不一致怎么办？",
-            "[对方] 旧上下文\n[对方] 社会团体住所不一致怎么办？",
+            "[对方] 虚构问题一\n[对方] 虚构问题二\n[对方] 社会团体住所不一致怎么办？",
         )
     ]
     assert engine.last_managed_decision == answer_decision
