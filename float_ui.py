@@ -20,6 +20,20 @@ MANAGED_MODE_OPTIONS = (
 )
 
 
+def managed_mode_label(value: str) -> str:
+    labels = {mode: label for mode, label in MANAGED_MODE_OPTIONS}
+    return labels.get(str(value), labels["off"])
+
+
+def managed_mode_value(value: str) -> str:
+    text = str(value)
+    modes = {mode for mode, _label in MANAGED_MODE_OPTIONS}
+    if text in modes:
+        return text
+    labels = {label: mode for mode, label in MANAGED_MODE_OPTIONS}
+    return labels.get(text, "off")
+
+
 def parse_managed_allowed_chats(value: str) -> list[str]:
     chats: list[str] = []
     for item in re.split(r"[,;\n\uff0c\uff1b]+", value):
@@ -202,7 +216,7 @@ class ReplyAssistantUI:
         self.progress_var = tk.StringVar(value="")
         self.training_var = tk.BooleanVar(value=self.settings.training_mode)
         self.auto_var = tk.BooleanVar(value=self.settings.auto_recognize)
-        self.managed_var = tk.StringVar(value=self.settings.managed_mode)
+        self.managed_var = tk.StringVar(value=managed_mode_label(self.settings.managed_mode))
         self.source_mode_var = tk.StringVar(value=self.settings.reply_source_mode)
         self.source_mode_label_var = tk.StringVar(value=self._source_mode_short_label(self.settings.reply_source_mode))
         self.selected_reply = ""
@@ -330,7 +344,7 @@ class ReplyAssistantUI:
         managed = tk.OptionMenu(
             managed_group,
             self.managed_var,
-            *[mode for mode, _label in MANAGED_MODE_OPTIONS],
+            *[label for _mode, label in MANAGED_MODE_OPTIONS],
             command=self._set_managed_mode,
         )
         managed.configure(
@@ -572,11 +586,8 @@ class ReplyAssistantUI:
         self._set_managed_mode("full" if value is True else "off" if value is False else str(value))
 
     def _set_managed_mode(self, mode: str, *, persist: bool = True) -> None:
-        label_to_mode = {label: value for value, label in MANAGED_MODE_OPTIONS}
-        selected = label_to_mode.get(mode, mode)
-        if selected not in {value for value, _label in MANAGED_MODE_OPTIONS}:
-            selected = "off"
-        self.managed_var.set(selected)
+        selected = managed_mode_value(mode)
+        self.managed_var.set(managed_mode_label(selected))
         self.settings.managed_mode = selected
         if selected != "off":
             self.settings.auto_recognize = True
@@ -1149,7 +1160,7 @@ class ReplyAssistantUI:
             anchor="w",
         ).pack(fill="x", pady=(0, 10))
 
-        managed_mode_var = tk.StringVar(value=self.settings.managed_mode)
+        managed_mode_var = tk.StringVar(value=managed_mode_label(self.settings.managed_mode))
         tk.Label(
             frame,
             text="\u6258\u7ba1\u6a21\u5f0f",
@@ -1160,7 +1171,7 @@ class ReplyAssistantUI:
         managed_mode_menu = tk.OptionMenu(
             frame,
             managed_mode_var,
-            *[mode for mode, _label in MANAGED_MODE_OPTIONS],
+            *[label for _mode, label in MANAGED_MODE_OPTIONS],
         )
         managed_mode_menu.configure(
             bg=COLORS["panel"],

@@ -319,7 +319,7 @@ def test_spec_and_dependency_locks_are_release_exact() -> None:
     assert "copy_metadata" in spec
     assert "requests" in spec
     assert "pywin32" in spec
-    assert __version__ == "2026.08.16.2"
+    assert __version__ == "2026.08.16.3"
     for distribution, expected in RUNTIME_DEPENDENCIES.items():
         assert f"{distribution}=={expected}" in runtime_lock
     assert "pytest==9.1.1" in dev_lock
@@ -560,7 +560,7 @@ def test_managed_cli_synchronizes_ui_and_records_configuration_before_start(
     assert app.started is True
     assert app.settings.managed_mode == "observe"
     assert app.settings.auto_recognize is True
-    assert app.ui.managed_var.get() == "observe"
+    assert app.ui.managed_var.get() == "观察"
     assert app.ui.auto_var.get() is True
     event = json.loads(report.read_text(encoding="utf-8"))
     assert event["reason"] == "runtime_configured"

@@ -22,7 +22,7 @@ from chat_training import (
     stage_training_import,
 )
 from capture_ocr import ChatOCR
-from float_ui import ReplyAssistantUI
+from float_ui import ReplyAssistantUI, managed_mode_label
 from memory import ENTERPRISE_ANNUAL_REPORT_SOURCE, StyleMemory, VectorIndexError
 from managed_reply import ReplyDecision
 from runtime_logging import (
@@ -250,6 +250,7 @@ MANAGED_OUTCOME_MESSAGES = {
     "chat_identity_changed": "会话或问题已变化，本轮未发送",
     "customer_turn_changed": "会话或问题已变化，本轮未发送",
     "fresh_observation_unavailable": "发送前无法重新识别当前会话，本轮未发送",
+    "chat_not_allowed": "当前聊天不在受控模式允许列表中，本轮未发送",
 }
 
 
@@ -536,17 +537,20 @@ class WeChatStyleReplyAssistant:
             time.sleep(self._poll_interval() / 1000)
 
     def _route_managed_window(self, wechat: WeChatWindow) -> bool:
-        """Refresh type from the current bitmap and directly route non-personal chats."""
+        """Refresh type from one bitmap and route every managed chat on each poll."""
         title, chat_type, context = self._capture_runtime_source(wechat)
         del title
         self.current_chat_type = chat_type
         if chat_type == "personal":
-            return False
+            if context.strip():
+                self._handle_managed_personal(wechat, context)
+            return True
         if chat_type == "group":
             if context.strip():
                 if context != getattr(self, "current_context", ""):
                     self.current_context = context
                     self.queue.put(("context", context))
+                    self.queue.put(("clear_replies", None))
                 self._handle_group_chat(wechat, context=context)
             return True
         if chat_type == "system":
@@ -554,6 +558,28 @@ class WeChatStyleReplyAssistant:
         else:
             self.queue.put(("status", "当前会话类型无法可靠确认，托管模式不会回复"))
         return True
+
+    def _handle_managed_personal(self, wechat: WeChatWindow, context: str) -> None:
+        """Sample personal managed chats on every poll, independent of preview cooldown."""
+        if not context.strip():
+            return
+        if context != getattr(self, "current_context", ""):
+            self.current_context = context
+            self.queue.put(("clear_replies", None))
+            self.queue.put(("context", context))
+        if not _should_auto_generate_for_context(
+            context,
+            force=False,
+            managed=True,
+            handled_messages=None,
+        ):
+            self.queue.put(("status", MSG["wait_other"]))
+            return
+        target_turn = _current_unreplied_turn(context)
+        if not target_turn:
+            self.queue.put(("status", MSG["wait_other"]))
+            return
+        self._schedule_generation(context, wechat, target_turn)
 
     def _conversation_list_bypass(self, wechat: WeChatWindow) -> None:
         """会话列表自动切换旁路（托管模式）。
@@ -1481,7 +1507,7 @@ class WeChatStyleReplyAssistant:
         self.settings.managed_mode = "off"
         managed_var = getattr(self.ui, "managed_var", None)
         if managed_var is not None:
-            managed_var.set("off")
+            managed_var.set(managed_mode_label("off"))
         self.ui.set_status(self.startup_blocking_error)
 
     def _install_blocking_startup_guards(self) -> None:
@@ -2417,7 +2443,7 @@ def _run_main(app_factory=WeChatStyleReplyAssistant, *, args=None) -> None:
         managed_var = getattr(ui, "managed_var", None)
         auto_var = getattr(ui, "auto_var", None)
         if managed_var is not None:
-            managed_var.set(args.managed_mode)
+            managed_var.set(managed_mode_label(args.managed_mode))
         if auto_var is not None:
             auto_var.set(args.managed_mode != "off")
     if app.acceptance_report_path is not None:

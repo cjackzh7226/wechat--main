@@ -457,6 +457,40 @@ def test_controlled_prepares_window_before_strict_fresh_capture_and_send(
     assert ledger.status(observed.turn_key) == "verified"
 
 
+def test_full_mode_sends_personal_or_group_without_any_allowlist_entry(
+    tmp_path: Path,
+) -> None:
+    ManagedReplyCoordinator, RuntimeAdapters = _runtime_api()
+    ChatIdentity, ChatObservation, _Tracker, _normalize, _fingerprint = _identity_api()
+    observations = (
+        _personal_observation(title="任意新联系人 @微信"),
+        ChatObservation(
+            identity=ChatIdentity(101, "任意新群聊", "group"),
+            context="[对方] 张三@微信\n[对方] @程正恒 怎么申报？",
+            customer_turn=("怎么申报？",),
+            sender_name="张三@微信",
+            captured_at=10.0,
+            foreground=True,
+        ),
+    )
+    for index, observation in enumerate(observations):
+        scenario = _RuntimeScenario(observation)
+        ledger = SendLedger(tmp_path / f"full-no-allowlist-{index}.json").load()
+
+        outcome = ManagedReplyCoordinator(ledger).process(
+            observation,
+            RuntimeAdapters.from_object(
+                scenario,
+                mode="full",
+                allowlist=frozenset(),
+            ),
+        )
+
+        assert outcome.sent is True
+        assert outcome.reason == "verified"
+        assert scenario.send_calls == 1
+
+
 @pytest.mark.parametrize(
     "reason",
     ("user_active_elsewhere", "target_window_unavailable", "activation_failed"),
@@ -1510,6 +1544,38 @@ def test_managed_window_routing_refreshes_chat_type_on_manual_group_switch() -> 
     assert handled == [(window, "[对方] 张三@微信\n[对方] 没有@客服")]
 
 
+def test_managed_personal_route_schedules_each_poll_without_four_second_capture_cooldown() -> None:
+    import main
+
+    window = SimpleNamespace(hwnd=301, title="任意联系人", platform=SimpleNamespace(key="wecom"))
+    context = "[对方] 社会团体能向分支机构收管理费、赞助费吗？"
+    scheduled = []
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.current_chat_type = "group"
+    app.current_context = ""
+    app.queue = Queue()
+    app.settings = SimpleNamespace(managed_mode="full")
+    app._capture_runtime_source = lambda _window: (
+        "任意联系人 @微信",
+        "personal",
+        context,
+    )
+    app._schedule_generation = lambda ctx, current, turn: scheduled.append(
+        (ctx, current, turn)
+    )
+
+    assert app._route_managed_window(window) is True
+    assert app.current_chat_type == "personal"
+    assert app.current_context == context
+    assert scheduled == [
+        (
+            context,
+            window,
+            ["社会团体能向分支机构收管理费、赞助费吗？"],
+        )
+    ]
+
+
 def test_start_with_managed_off_does_not_require_an_ocr_baseline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2133,6 +2199,7 @@ def test_managed_idle_keeps_recognized_preview_without_overwriting_status() -> N
         ("chat_identity_changed", "会话或问题已变化，本轮未发送"),
         ("customer_turn_changed", "会话或问题已变化，本轮未发送"),
         ("fresh_observation_unavailable", "发送前无法重新识别当前会话，本轮未发送"),
+        ("chat_not_allowed", "当前聊天不在受控模式允许列表中，本轮未发送"),
         ("unmapped_reason", ""),
     ),
 )

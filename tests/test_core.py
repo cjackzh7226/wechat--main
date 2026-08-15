@@ -3235,9 +3235,16 @@ class SettingsTests(unittest.TestCase):
 
         self.assertEqual([value for value, _label in float_ui.SOURCE_MODE_OPTIONS], ["knowledge_only"])
         self.assertEqual(
-            [value for value, _label in float_ui.MANAGED_MODE_OPTIONS],
-            ["off", "observe", "controlled", "full"],
+            float_ui.MANAGED_MODE_OPTIONS,
+            (
+                ("off", "关闭"),
+                ("observe", "观察"),
+                ("controlled", "受控"),
+                ("full", "全托管"),
+            ),
         )
+        self.assertEqual(float_ui.managed_mode_label("observe"), "观察")
+        self.assertEqual(float_ui.managed_mode_value("全托管"), "full")
 
     def test_managed_allowlist_parser_deduplicates_in_display_order(self):
         import float_ui
@@ -3270,8 +3277,36 @@ class SettingsTests(unittest.TestCase):
         ui._set_managed_mode("controlled")
 
         self.assertEqual(ui.settings.managed_mode, "controlled")
+        self.assertEqual(ui.managed_var.get(), "受控")
         self.assertTrue(ui.settings.auto_recognize)
         self.assertEqual(callback_values, [False])
+
+    def test_managed_mode_callback_accepts_chinese_label_but_keeps_internal_key(self):
+        from float_ui import ReplyAssistantUI
+
+        class FakeVar:
+            def __init__(self, value=None):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        callback_values = []
+        ui = ReplyAssistantUI.__new__(ReplyAssistantUI)
+        ui.settings = AppSettings()
+        ui.managed_var = FakeVar("关闭")
+        ui.auto_var = FakeVar(False)
+        ui.callbacks = {"managed_mode_changed": callback_values.append}
+
+        ui._set_managed_mode("观察", persist=False)
+
+        self.assertEqual(ui.settings.managed_mode, "observe")
+        self.assertEqual(ui.managed_var.get(), "观察")
+        self.assertTrue(ui.settings.auto_recognize)
+        self.assertEqual(callback_values, ["observe"])
 
     def test_source_mode_callback_cannot_enable_free_generation(self):
         from float_ui import ReplyAssistantUI
