@@ -1095,6 +1095,22 @@ def test_startup_baselines_only_the_detected_chat_type(tmp_path: Path) -> None:
     assert app.send_ledger.status(personal.turn_key) is None
 
 
+def test_explicit_manual_trigger_can_release_a_baseline_but_not_a_terminal_send(
+    tmp_path: Path,
+) -> None:
+    ledger = SendLedger(tmp_path / "release-baseline-ledger.json").load()
+    assert ledger.baseline("baseline-turn", "chat") is True
+
+    assert ledger.release_baseline("baseline-turn") is True
+    assert ledger.status("baseline-turn") is None
+    assert ledger.prepare("baseline-turn", "chat", "record", "answer") is True
+    ledger.mark_keypress("baseline-turn")
+    ledger.mark_verified("baseline-turn")
+
+    assert ledger.release_baseline("baseline-turn") is False
+    assert ledger.status("baseline-turn") == "verified"
+
+
 def test_startup_baseline_retries_one_transient_unreadable_capture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1902,8 +1918,8 @@ def test_main_runtime_adapter_wires_real_send_window_preparation() -> None:
     assert adapters.fresh_observation(observation).foreground is True
 
 
-@pytest.mark.parametrize("mode", ("off", "observe", "controlled", "full"))
-def test_manual_recognize_uses_preview_in_every_mode_without_background_routing(
+@pytest.mark.parametrize("mode", ("off", "observe"))
+def test_manual_recognize_uses_preview_only_in_non_sending_modes(
     mode: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1936,6 +1952,194 @@ def test_manual_recognize_uses_preview_in_every_mode_without_background_routing(
 
     assert app.current_window is window
     assert previewed == [window]
+
+
+@pytest.mark.parametrize("mode", ("controlled", "full"))
+def test_manual_recognize_uses_managed_send_path_in_sending_modes(
+    mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main
+
+    window = SimpleNamespace(hwnd=200, title="测试联系人")
+    handled = []
+
+    class InlineThread:
+        def __init__(self, *, target, daemon):
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            self.target()
+
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.settings = SimpleNamespace(managed_mode=mode)
+    app._target_wechat_window = lambda: window
+    app._managed_recognize_current = lambda selected: handled.append(selected)
+    app._manual_managed_preview = lambda *_args: pytest.fail(
+        "sending modes must not leave the manual button in preview-only"
+    )
+    monkeypatch.setattr(main.threading, "Thread", InlineThread)
+
+    app._recognize_current()
+
+    assert app.current_window is window
+    assert handled == [window]
+
+
+def test_manual_managed_recognize_releases_only_current_startup_baseline_and_queues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main
+
+    observation = _personal_observation(question="社会团体能设多少个分会？")
+    window = SimpleNamespace(hwnd=observation.identity.hwnd, title="企业微信")
+    ledger = SendLedger(tmp_path / "manual-managed-ledger.json").load()
+    assert ledger.baseline(observation.turn_key, observation.identity.key) is True
+    stable_results = iter((False, True))
+    captures = iter((observation, observation))
+    queued = []
+    sleeps = []
+
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.settings = SimpleNamespace(
+        managed_mode="full",
+        auto_reply_delay_seconds=1.2,
+        wecom_account_name="程正恒",
+    )
+    app.queue = Queue()
+    app.current_context = ""
+    app.current_chat_type = "personal"
+    app.send_ledger = ledger
+    app._startup_baseline_turns = {
+        app._startup_baseline_slot(observation): observation.customer_turn,
+    }
+    app._managed_reply_readiness_allows_send = lambda: True
+    app._capture_runtime_observation = lambda _window: next(captures)
+    app.stable_identity_tracker = SimpleNamespace(
+        observe=lambda *_args, **_kwargs: next(stable_results)
+    )
+    app._queue_runtime_observation = lambda current, selected, **kwargs: queued.append(
+        (current, selected, kwargs)
+    ) or True
+    monkeypatch.setattr(main.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    app._managed_recognize_current(window)
+
+    assert sleeps == [1.2]
+    assert ledger.status(observation.turn_key) is None
+    assert app._startup_baseline_turns == {}
+    assert queued == [(observation, window, {})]
+    events = []
+    while not app.queue.empty():
+        events.append(app.queue.get_nowait())
+    assert ("context", observation.context) in events
+    assert events[-1] == ("status", "已进入串行知识库匹配与发送复核队列")
+    assert not any("仅预览" in str(value) for _kind, value in events)
+
+
+def test_manual_managed_recognize_releases_similar_ocr_startup_baseline(
+    tmp_path: Path,
+) -> None:
+    import main
+
+    baseline = _personal_observation(question="社会团体能设多少个分会？")
+    current = _personal_observation(question="社会团体能设几个分会？")
+    window = SimpleNamespace(hwnd=current.identity.hwnd, title="企业微信")
+    ledger = SendLedger(tmp_path / "manual-ocr-baseline-ledger.json").load()
+    assert ledger.baseline(baseline.turn_key, baseline.identity.key) is True
+    queued = []
+
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.settings = SimpleNamespace(
+        managed_mode="full",
+        auto_reply_delay_seconds=1.2,
+        wecom_account_name="程正恒",
+    )
+    app.queue = Queue()
+    app.current_context = ""
+    app.current_chat_type = "personal"
+    app.send_ledger = ledger
+    app._startup_baseline_turns = {
+        app._startup_baseline_slot(baseline): baseline.customer_turn,
+    }
+    app._managed_reply_readiness_allows_send = lambda: True
+    app._capture_runtime_observation = lambda _window: current
+    app.stable_identity_tracker = SimpleNamespace(
+        observe=lambda *_args, **_kwargs: True
+    )
+    app._queue_runtime_observation = lambda observation, selected, **kwargs: queued.append(
+        (observation, selected, kwargs)
+    ) or True
+
+    app._managed_recognize_current(window)
+
+    assert ledger.status(baseline.turn_key) is None
+    assert app._startup_baseline_turns == {}
+    assert queued == [(current, window, {})]
+
+
+@pytest.mark.parametrize("mentioned", (False, True))
+def test_manual_managed_group_requires_mention_and_preserves_at_reply(
+    tmp_path: Path,
+    mentioned: bool,
+) -> None:
+    import main
+
+    ChatIdentity, ChatObservation, _Tracker, _normalize, _fingerprint = _identity_api()
+    context = (
+        "[发送者] 张三@微信\n[对方] @程正恒 社会团体能设多少个分会？"
+        if mentioned
+        else "[发送者] 张三@微信\n[对方] 社会团体能设多少个分会？"
+    )
+    observation = ChatObservation(
+        identity=ChatIdentity(100, "测试群", "group"),
+        context=context,
+        customer_turn=("社会团体能设多少个分会？",),
+        sender_name="张三",
+        captured_at=10.0,
+        foreground=True,
+    )
+    window = SimpleNamespace(hwnd=100, title="企业微信")
+    queued = []
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.settings = SimpleNamespace(
+        managed_mode="full",
+        auto_reply_delay_seconds=1.2,
+        wecom_account_name="程正恒",
+    )
+    app.queue = Queue()
+    app.current_context = ""
+    app.current_chat_type = "personal"
+    app.send_ledger = SendLedger(tmp_path / f"group-{mentioned}.json").load()
+    app._startup_baseline_turns = {}
+    app._managed_reply_readiness_allows_send = lambda: True
+    app._capture_runtime_observation = lambda _window: observation
+    app.stable_identity_tracker = SimpleNamespace(observe=lambda *_args, **_kwargs: True)
+    app.group_handler = SimpleNamespace(
+        detect_at_mention=lambda _context, _account: mentioned,
+        build_reply=lambda sender, answer: f"@{sender} {answer}",
+    )
+    app._queue_runtime_observation = lambda current, selected, **kwargs: queued.append(
+        (current, selected, kwargs)
+    ) or True
+
+    app._managed_recognize_current(window)
+
+    if not mentioned:
+        assert queued == []
+        events = []
+        while not app.queue.empty():
+            events.append(app.queue.get_nowait())
+        assert events[-1] == (
+            "status",
+            "已识别群聊；最新消息未 @ 当前账号，不进入发送队列",
+        )
+        return
+    assert len(queued) == 1
+    outgoing = queued[0][2]["outgoing_text"]
+    assert outgoing("批准答案") == "@张三 批准答案"
 
 
 @pytest.mark.parametrize(

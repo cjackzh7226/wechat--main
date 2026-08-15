@@ -211,6 +211,26 @@ class SendLedger:
             self._replace_entry(turn_hash, entry)
             return True
 
+    def release_baseline(self, turn_key: str) -> bool:
+        """Release only a startup baseline after an explicit user action.
+
+        Verified, uncertain, prepared, keypress and failed entries are never
+        removed by this operation.  This keeps manual processing of the
+        currently visible startup message possible without weakening durable
+        duplicate-send protection for any terminal or in-flight send.
+        """
+        with self._lock:
+            self._ensure_loaded()
+            turn_hash = _sha256(turn_key)
+            previous = self._entries.get(turn_hash)
+            if previous is None or previous["status"] != "baseline":
+                return False
+            updated = deepcopy(self._entries)
+            del updated[turn_hash]
+            self._persist_entries(updated)
+            self._entries = updated
+            return True
+
     def _transition(self, turn_key: str, allowed: set[str], status: LedgerStatus, reason: str) -> None:
         with self._lock:
             self._ensure_loaded()

@@ -43,7 +43,13 @@ from reply_engine import (
     unreplied_other_messages,
 )
 from sender import WeChatSender
-from chat_identity import ChatIdentity, ChatObservation, StableIdentityTracker, normalize_chat_title
+from chat_identity import (
+    ChatIdentity,
+    ChatObservation,
+    StableIdentityTracker,
+    normalize_chat_title,
+    turn_fingerprint,
+)
 from capture_ocr import verify_own_bubble
 from managed_runtime import (
     ManagedPhase,
@@ -1352,10 +1358,129 @@ class WeChatStyleReplyAssistant:
             self.ui.set_status(MSG["no_window"])
             return
         self.current_window = wechat
+        send_enabled = getattr(self.settings, "managed_mode", "off") in {
+            "controlled",
+            "full",
+        }
+        work = (
+            self._managed_recognize_current
+            if send_enabled
+            else self._manual_managed_preview
+        )
         threading.Thread(
-            target=lambda: self._manual_managed_preview(wechat),
+            target=lambda: work(wechat),
             daemon=True,
         ).start()
+
+    def _managed_recognize_current(self, wechat: WeChatWindow) -> None:
+        """Process an explicit click through the real managed-send pipeline.
+
+        The click may release only the exact startup-baseline entry currently
+        visible.  Every other safety gate remains mandatory: two stable OCR
+        samples, exact chat/turn identity, serialized preparation, a fresh
+        preflight capture, the durable ledger and outgoing-bubble verification.
+        """
+        self.queue.put(("status", "正在识别当前聊天并准备托管发送…"))
+        if not self._managed_reply_readiness_allows_send():
+            return
+
+        observation = self._capture_runtime_observation(wechat)
+        if observation is None:
+            self.queue.put(("clear_replies", None))
+            self.queue.put(("status", "当前聊天无法可靠识别，未进入发送队列"))
+            return
+        if observation.identity.chat_type == "group":
+            account_name = str(
+                getattr(self.settings, "wecom_account_name", "") or ""
+            ).strip()
+            if not account_name or not self.group_handler.detect_at_mention(
+                observation.context,
+                account_name,
+            ):
+                self.queue.put(("clear_replies", None))
+                self.queue.put((
+                    "status",
+                    "已识别群聊；最新消息未 @ 当前账号，不进入发送队列",
+                ))
+                return
+
+        self.current_context = observation.context
+        self.current_chat_type = observation.identity.chat_type
+        self.queue.put(("context", observation.context))
+        self.queue.put(("clear_replies", None))
+
+        if not self.stable_identity_tracker.observe(
+            observation.identity,
+            observation.context_hash,
+            now=time.monotonic(),
+        ):
+            delay = max(
+                0.2,
+                float(getattr(self.settings, "auto_reply_delay_seconds", 1.2)),
+            )
+            time.sleep(delay)
+            fresh = self._capture_runtime_observation(wechat)
+            if (
+                fresh is None
+                or fresh.identity != observation.identity
+                or fresh.context_hash != observation.context_hash
+                or fresh.turn_key != observation.turn_key
+            ):
+                self.queue.put(("status", "聊天对象或最新问题已变化，未进入发送队列"))
+                return
+            observation = fresh
+            if not self.stable_identity_tracker.observe(
+                observation.identity,
+                observation.context_hash,
+                now=time.monotonic(),
+            ):
+                self.queue.put(("status", "当前聊天识别尚未稳定，请稍后再试"))
+                return
+
+        try:
+            baselines = getattr(self, "_startup_baseline_turns", None)
+            slot = self._startup_baseline_slot(observation)
+            baseline_turn = baselines.get(slot) if isinstance(baselines, dict) else None
+            baseline_key = (
+                turn_fingerprint(
+                    observation.identity,
+                    baseline_turn,
+                    sender_name=observation.sender_name,
+                )
+                if baseline_turn
+                else ""
+            )
+            keys = tuple(dict.fromkeys((observation.turn_key, baseline_key)))
+            released = False
+            for turn_key in (key for key in keys if key):
+                ledger_status = self.send_ledger.status(turn_key)
+                if ledger_status == "baseline":
+                    if not self.send_ledger.release_baseline(turn_key):
+                        self.queue.put(("status", "当前消息的启动基线无法解除，未发送"))
+                        return
+                    released = True
+                elif ledger_status in {"prepared", "keypress", "verified", "uncertain"}:
+                    self.queue.put(("status", "当前消息已在处理或已经处理，不会重复发送"))
+                    return
+            if isinstance(baselines, dict) and (released or baseline_turn):
+                baselines.pop(slot, None)
+        except LedgerBlockingError as error:
+            self._block_managed_for_ledger(error)
+            return
+
+        kwargs = {}
+        if observation.identity.chat_type == "group":
+            sender_name = observation.sender_name
+            kwargs["outgoing_text"] = lambda answer: self.group_handler.build_reply(
+                sender_name,
+                answer,
+            )
+        accepted = self._queue_runtime_observation(observation, wechat, **kwargs)
+        if accepted:
+            _diag("send_queued")
+            self.queue.put(("status", "已进入串行知识库匹配与发送复核队列"))
+        else:
+            self.queue.put(("status", "当前消息已在处理或已经处理，不会重复发送"))
 
     def _manual_managed_preview(self, wechat: WeChatWindow) -> None:
         """Build a knowledge-only preview without entering any send authority."""

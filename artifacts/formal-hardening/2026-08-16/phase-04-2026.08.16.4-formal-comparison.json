@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "version": "2026.08.16.4",
+  "before": {
+    "file_count": 40,
+    "tree_sha256": "d41be29237a5fcce8dc0f5c4acfd71968e6219e93dd5591adbd3aee3d6d20f00"
+  },
+  "after": {
+    "file_count": 40,
+    "tree_sha256": "d41be29237a5fcce8dc0f5c4acfd71968e6219e93dd5591adbd3aee3d6d20f00"
+  },
+  "mismatch_count": 0
+}
