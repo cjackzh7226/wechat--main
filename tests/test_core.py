@@ -2109,6 +2109,45 @@ class ReplyParsingTests(unittest.TestCase):
         status_texts = [str(item) for item in app.queue.items]
         self.assertTrue(any("串行知识库匹配" in text for text in status_texts), status_texts)
 
+    def test_rejected_runtime_submission_does_not_report_false_queue_status(self):
+        import main as main_module
+
+        class _FakeQueue:
+            def __init__(self):
+                self.items = []
+
+            def put(self, item):
+                self.items.append(item)
+
+        context = "[对方] 蓝色鲸鱼如何办理火星营业执照？"
+        observation = main_module.ChatObservation(
+            main_module.ChatIdentity(100, "- @微信", "personal"),
+            context,
+            ("蓝色鲸鱼如何办理火星营业执照？",),
+            captured_at=1.0,
+            foreground=True,
+        )
+        app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
+        app.settings = types.SimpleNamespace(managed_mode="observe")
+        app.current_window = types.SimpleNamespace(title="企业微信")
+        app.managed_send_inflight = False
+        app.observed_runtime_turns = set()
+        app.queue = _FakeQueue()
+        app.stable_identity_tracker = types.SimpleNamespace(
+            observe=lambda *_args, **_kwargs: True
+        )
+        app._managed_reply_readiness_allows_send = lambda: True
+        app._capture_runtime_observation = lambda *_args, **_kwargs: observation
+        app._queue_runtime_observation = lambda *_args, **_kwargs: False
+        diagnostics = []
+
+        with patch.object(main_module, "_diag", lambda state, **_kwargs: diagnostics.append(state)):
+            app._maybe_managed_send(context, [])
+
+        self.assertNotIn("send_queued", diagnostics)
+        status_texts = [str(item) for item in app.queue.items]
+        self.assertFalse(any("串行知识库匹配" in text for text in status_texts), status_texts)
+
     def test_enterprise_low_score_returns_no_answer_without_api_in_model_memory(self):
         # model_memory 模式：低分（<20）企业范围问法直接回未命中文案，不再让模型生成
         settings = AppSettings(api_key="configured", reply_source_mode="model_memory")
@@ -2782,6 +2821,50 @@ class OCRCleaningTests(unittest.TestCase):
             ],
         )
 
+    def test_marker_only_group_sender_restores_visible_dash_nickname(self):
+        from PIL import Image, ImageDraw
+
+        image = Image.new("RGB", (160, 90), "white")
+        draw = ImageDraw.Draw(image)
+        draw.line((32, 40, 35, 40), fill=(110, 110, 110), width=1)
+        items = [
+            {
+                "text": "@\u5fae\u4fe1",
+                "x": 55,
+                "left": 32,
+                "right": 79,
+                "y": 40,
+            }
+        ]
+
+        lines = ChatOCR._to_chat_lines(items, image.width, image)
+
+        self.assertEqual(
+            [(line.role, line.text) for line in lines],
+            [("\u53d1\u9001\u8005", "-@\u5fae\u4fe1")],
+        )
+
+    def test_marker_only_group_sender_without_visible_dash_remains_unknown(self):
+        from PIL import Image
+
+        image = Image.new("RGB", (160, 90), "white")
+        items = [
+            {
+                "text": "@\u5fae\u4fe1",
+                "x": 55,
+                "left": 32,
+                "right": 79,
+                "y": 40,
+            }
+        ]
+
+        lines = ChatOCR._to_chat_lines(items, image.width, image)
+
+        self.assertEqual(
+            [(line.role, line.text) for line in lines],
+            [("\u53d1\u9001\u8005", "@\u5fae\u4fe1")],
+        )
+
     def test_visible_image_text_can_be_read_without_being_chat_context(self):
         ocr = ChatOCR(AppSettings())
         ocr._recognize = lambda image: [
@@ -2793,6 +2876,54 @@ class OCRCleaningTests(unittest.TestCase):
 
         self.assertIn("codex", text)
         self.assertIn("生成模板视频", text)
+
+    def test_chat_title_restores_visible_dash_and_drops_far_right_action_icon(self):
+        from PIL import Image, ImageDraw
+
+        image = Image.new("RGB", (200, 60), "white")
+        draw = ImageDraw.Draw(image)
+        draw.line((33, 39, 35, 40), fill=(110, 110, 110), width=1)
+        ocr = ChatOCR(AppSettings())
+        ocr._recognize = lambda _image: [
+            {"text": "@微信", "x": 61.5, "left": 44.0, "right": 79.0, "y": 39.0},
+            {"text": "Ω+", "x": 190.0, "left": 184.0, "right": 196.0, "y": 39.0},
+        ]
+
+        self.assertEqual(ocr.read_chat_title(image), "- @微信")
+
+    def test_chat_title_does_not_invent_dash_when_pixels_are_absent(self):
+        from PIL import Image
+
+        image = Image.new("RGB", (200, 60), "white")
+        ocr = ChatOCR(AppSettings())
+        ocr._recognize = lambda _image: [
+            {"text": "@微信", "x": 61.5, "left": 44.0, "right": 79.0, "y": 39.0},
+            {"text": "Ω+", "x": 190.0, "left": 184.0, "right": 196.0, "y": 39.0},
+        ]
+
+        self.assertEqual(ocr.read_chat_title(image), "@微信")
+
+    def test_chat_title_keeps_multiline_group_identity_before_action_zone(self):
+        from PIL import Image
+
+        image = Image.new("RGB", (300, 80), "white")
+        ocr = ChatOCR(AppSettings())
+        ocr._recognize = lambda _image: [
+            {"text": "阳光、琳、阿琳、", "x": 90.0, "left": 20.0, "right": 160.0, "y": 28.0},
+            {
+                "text": "由企业微信用户创建的外部群",
+                "x": 130.0,
+                "left": 25.0,
+                "right": 235.0,
+                "y": 52.0,
+            },
+            {"text": "Ω+", "x": 286.0, "left": 278.0, "right": 294.0, "y": 40.0},
+        ]
+
+        self.assertEqual(
+            ocr.read_chat_title(image),
+            "阳光、琳、阿琳、\n由企业微信用户创建的外部群",
+        )
 
     def test_short_ascii_visual_artifact_is_filtered_from_chat_context(self):
         self.assertTrue(_is_noise_text("ETJ"))

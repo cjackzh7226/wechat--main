@@ -756,6 +756,38 @@ def test_own_bubble_verification_requires_a_new_latest_own_message(
     assert _verify_own_bubble(before, after, expected) == result
 
 
+def test_long_own_bubble_can_be_verified_from_a_new_visible_middle_segment() -> None:
+    expected = (
+        "年检程序开始说明" + "登记管理机关依法审查年度工作报告并公布结论" * 12 + "年检程序结束说明"
+    )
+    visible = expected[72:360]
+    before = "[对方] 年检的基本程序是怎样的？"
+    after = f"{before}\n[我] {visible}"
+
+    assert _verify_own_bubble(before, after, expected) == "verified"
+
+
+def test_long_own_bubble_allows_small_ocr_error_inside_large_matching_segment() -> None:
+    expected = "办理流程如下：" + "社会组织提交材料后由登记管理机关依法审查并公示结果" * 12
+    visible = expected[35:330]
+    visible = visible[:145] + "依珐审查" + visible[149:]
+
+    assert _verify_own_bubble("[对方] 问题", f"[对方] 问题\n[我] {visible}", expected) == "verified"
+
+
+def test_short_visible_fragment_cannot_verify_a_long_reply() -> None:
+    expected = "完整答案" + "登记管理机关依法审查并公示年检结论" * 15
+
+    assert (
+        _verify_own_bubble(
+            "[对方] 问题",
+            "[对方] 问题\n[我] 登记管理机关依法审查",
+            expected,
+        )
+        == "uncertain"
+    )
+
+
 def test_main_bubble_verifier_polls_before_classifying_not_sent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1056,6 +1088,111 @@ def test_startup_baseline_retries_one_transient_unreadable_capture(
     assert app.startup_blocking_error == ""
 
 
+def test_startup_baseline_uses_visible_chat_when_assistant_has_focus(
+    tmp_path: Path,
+) -> None:
+    import main
+
+    window = SimpleNamespace(hwnd=100, title="WeCom", platform=SimpleNamespace(key="wecom"))
+    observation = _personal_observation(question="启动前已经可见的旧问题")
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.detector = SimpleNamespace(
+        foreground_chat=lambda: None,
+        any_chat_window=lambda: window,
+    )
+    app.send_ledger = SendLedger(tmp_path / "startup-visible-ledger.json").load()
+    app._capture_runtime_observation = lambda _window, chat_type=None: observation
+    app.stable_identity_tracker = SimpleNamespace(observe=lambda *_args, **_kwargs: False)
+    app.current_window = None
+    app.current_context = ""
+    app.startup_blocking_error = ""
+    app.settings = SimpleNamespace(managed_mode="observe", auto_recognize=True)
+
+    assert app._establish_startup_baseline() is True
+    assert app.send_ledger.status(observation.turn_key) == "baseline"
+    assert app.current_window is window
+
+
+def test_startup_baseline_fails_closed_without_any_visible_chat(tmp_path: Path) -> None:
+    import main
+
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.detector = SimpleNamespace(
+        foreground_chat=lambda: None,
+        any_chat_window=lambda: None,
+    )
+    app.send_ledger = SendLedger(tmp_path / "startup-no-window-ledger.json").load()
+    app.stable_identity_tracker = SimpleNamespace(observe=lambda *_args, **_kwargs: False)
+    app.current_window = None
+    app.current_context = ""
+    app.startup_blocking_error = ""
+    app.settings = SimpleNamespace(managed_mode="controlled", auto_recognize=True)
+    app.queue = Queue()
+
+    assert app._establish_startup_baseline() is False
+    assert app.settings.managed_mode == "off"
+    assert app.settings.auto_recognize is False
+    assert "启动基线无法可靠建立" in app.startup_blocking_error
+
+
+def test_startup_baseline_accepts_readable_chat_with_no_unreplied_turn(
+    tmp_path: Path,
+) -> None:
+    import main
+
+    window = SimpleNamespace(hwnd=100, title="WeCom", platform=SimpleNamespace(key="wecom"))
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.detector = SimpleNamespace(foreground_chat=lambda: window)
+    app.send_ledger = SendLedger(tmp_path / "startup-idle-ledger.json").load()
+    app._capture_runtime_observation = lambda _window, chat_type=None: None
+    app._capture_runtime_source = lambda _window: (
+        "- @微信",
+        "personal",
+        "[对方] 已经回答的问题\n[我] 已发送的知识答案",
+    )
+    app.stable_identity_tracker = SimpleNamespace(observe=lambda *_args, **_kwargs: False)
+    app.current_window = None
+    app.current_context = ""
+    app.startup_blocking_error = ""
+    app.settings = SimpleNamespace(managed_mode="controlled", auto_recognize=True)
+    app.queue = Queue()
+
+    assert app._establish_startup_baseline() is True
+    assert app.current_window is window
+    assert app.current_context.endswith("已发送的知识答案")
+    assert app.settings.managed_mode == "controlled"
+    assert app.startup_blocking_error == ""
+
+
+def test_startup_baseline_does_not_call_an_unreadable_pending_turn_idle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main
+
+    window = SimpleNamespace(hwnd=100, title="WeCom", platform=SimpleNamespace(key="wecom"))
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.detector = SimpleNamespace(foreground_chat=lambda: window)
+    app.send_ledger = SendLedger(tmp_path / "startup-pending-unreadable-ledger.json").load()
+    app._capture_runtime_observation = lambda _window, chat_type=None: None
+    app._capture_runtime_source = lambda _window: (
+        "- @微信",
+        "personal",
+        "[对方] 仍然等待回复的问题",
+    )
+    app.stable_identity_tracker = SimpleNamespace(observe=lambda *_args, **_kwargs: False)
+    app.current_window = None
+    app.current_context = ""
+    app.startup_blocking_error = ""
+    app.settings = SimpleNamespace(managed_mode="controlled", auto_recognize=True)
+    app.queue = Queue()
+    monkeypatch.setattr(main.time, "sleep", lambda _seconds: None)
+
+    assert app._establish_startup_baseline() is False
+    assert app.settings.managed_mode == "off"
+    assert "启动基线无法可靠建立" in app.startup_blocking_error
+
+
 def test_top_title_capture_uses_the_detector_calibration() -> None:
     import main
 
@@ -1085,6 +1222,36 @@ def test_top_title_capture_uses_the_detector_calibration() -> None:
 
     assert app._read_top_title(_Image()) == "- @微信"
     assert crop_boxes == [(300, 7, 800, 63)]
+
+
+def test_top_title_capture_prefers_identity_specific_ocr_reader() -> None:
+    import main
+
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.chat_type_detector = SimpleNamespace(
+        cal={
+            "top_title_area": {
+                "x_left": 0.2,
+                "x_right": 0.9,
+                "y_top": 0.0,
+                "y_bottom": 0.1,
+            }
+        }
+    )
+    app.ocr = SimpleNamespace(
+        read_chat_title=lambda _image, limit: "- @微信" if limit == 3 else "",
+        read_visible_text=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("generic visible-text OCR must not read chat identity")
+        ),
+    )
+
+    class _Image:
+        size = (1000, 800)
+
+        def crop(self, _box):
+            return object()
+
+    assert app._read_top_title(_Image()) == "- @微信"
 
 
 def test_runtime_source_uses_the_same_platform_chat_area_as_main_capture(
@@ -2094,6 +2261,125 @@ def test_same_turn_cannot_be_queued_twice_while_first_runtime_job_is_pending() -
 
     assert app._queue_runtime_observation(observation, object()) is True
     assert len(submissions) == 2
+
+
+def test_handled_turn_is_rejected_before_runtime_worker_submission(tmp_path: Path) -> None:
+    import main
+
+    observation = _personal_observation()
+    ledger = SendLedger(tmp_path / "handled-before-submit.json").load()
+    assert ledger.baseline(observation.turn_key, observation.identity.key) is True
+    submissions = []
+
+    class Worker:
+        def submit(self, submitted, _adapters, callback=None):
+            submissions.append((submitted, callback))
+            return True
+
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.send_ledger = ledger
+    app.settings = SimpleNamespace(managed_mode="controlled", managed_allowed_chats=[])
+    app.engine = SimpleNamespace(
+        decide_managed=lambda *_args: ReplyDecision.no_answer("no_match"),
+        managed_decision_still_valid=lambda _value: True,
+    )
+    app.sender = SimpleNamespace(send=lambda *_args, **_kwargs: SendAttempt(True, "keypress"))
+    app.managed_worker = Worker()
+    app.managed_send_inflight = False
+    app._managed_pending_count = 0
+    app._managed_pending_turns = set()
+    app._managed_pending_lock = threading.Lock()
+    app.queue = Queue()
+    app._capture_fresh_runtime_observation = lambda expected, _window: expected
+    app._verify_runtime_send = lambda *_args: "verified"
+    app._managed_reply_readiness_allows_send = lambda: True
+
+    assert app._queue_runtime_observation(observation, object()) is False
+    assert submissions == []
+
+
+def test_startup_baseline_suppresses_a_similar_ocr_variant_before_submission() -> None:
+    import main
+
+    baseline = _personal_observation(question="法定代表人信息与登记系统不一致如何修改？")
+    variant = _personal_observation(question="法定代表人信息与登记系統不一致如何修改？")
+    submissions = []
+
+    class Worker:
+        def submit(self, submitted, _adapters, callback=None):
+            submissions.append((submitted, callback))
+            return True
+
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app._startup_baseline_turns = {
+        (baseline.identity.key, ""): baseline.customer_turn,
+    }
+    app.settings = SimpleNamespace(managed_mode="observe", managed_allowed_chats=[])
+    app.engine = SimpleNamespace(
+        decide_managed=lambda *_args: ReplyDecision.no_answer("no_match"),
+        managed_decision_still_valid=lambda _value: True,
+    )
+    app.sender = SimpleNamespace(send=lambda *_args, **_kwargs: SendAttempt(True, "keypress"))
+    app.managed_worker = Worker()
+    app.managed_send_inflight = False
+    app._managed_pending_count = 0
+    app._managed_pending_turns = set()
+    app._managed_pending_lock = threading.Lock()
+    app.queue = Queue()
+    app._capture_fresh_runtime_observation = lambda expected, _window: expected
+    app._verify_runtime_send = lambda *_args: "verified"
+    app._managed_reply_readiness_allows_send = lambda: True
+
+    assert app._queue_runtime_observation(variant, object()) is False
+    assert submissions == []
+
+
+def test_new_message_after_startup_baseline_submits_only_the_new_tail() -> None:
+    import main
+
+    baseline = _personal_observation(question="启动前旧问题")
+    combined = _personal_observation(question="启动后新问题")
+    combined = type(combined)(
+        identity=combined.identity,
+        context="[对方] 启动前旧问题\n[对方] 启动后新问题",
+        customer_turn=("启动前旧问题", "启动后新问题"),
+        sender_name=combined.sender_name,
+        captured_at=combined.captured_at,
+        foreground=combined.foreground,
+    )
+    submissions = []
+
+    class Worker:
+        def submit(self, submitted, adapters, callback=None):
+            submissions.append((submitted, adapters))
+            return True
+
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app._startup_baseline_turns = {
+        (baseline.identity.key, ""): baseline.customer_turn,
+    }
+    app.settings = SimpleNamespace(managed_mode="observe", managed_allowed_chats=[])
+    app.engine = SimpleNamespace(
+        decide_managed=lambda *_args: ReplyDecision.no_answer("no_match"),
+        managed_decision_still_valid=lambda _value: True,
+    )
+    app.sender = SimpleNamespace(send=lambda *_args, **_kwargs: SendAttempt(True, "keypress"))
+    app.managed_worker = Worker()
+    app.managed_send_inflight = False
+    app._managed_pending_count = 0
+    app._managed_pending_turns = set()
+    app._managed_pending_lock = threading.Lock()
+    app.queue = Queue()
+    app._capture_fresh_runtime_observation = lambda _expected, _window, **_kwargs: combined
+    app._revalidated_send_window = lambda window: window
+    app._verify_runtime_send = lambda *_args: "verified"
+    app._managed_reply_readiness_allows_send = lambda: True
+
+    assert app._queue_runtime_observation(combined, object()) is True
+    assert len(submissions) == 1
+    queued, adapters = submissions[0]
+    assert queued.customer_turn == ("启动后新问题",)
+    assert adapters.fresh_observation(queued).customer_turn == ("启动后新问题",)
 
 
 def test_observe_mode_evaluates_each_unchanged_turn_only_once_per_session() -> None:

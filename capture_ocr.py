@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+from difflib import SequenceMatcher
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -83,20 +84,52 @@ def verify_own_bubble(before_context: str, after_context: str, expected_text: st
     if not after:
         return "uncertain"
     expected = _verification_text(expected_text)
+
+    def matches_expected(text: str) -> bool:
+        return _verification_text(text) == expected or _long_visible_reply_matches(
+            expected_text,
+            text,
+        )
+
     before_matching = sum(
-        1 for role, text in before if role == "own" and _verification_text(text) == expected
+        1 for role, text in before if role == "own" and matches_expected(text)
     )
     after_matching = sum(
-        1 for role, text in after if role == "own" and _verification_text(text) == expected
+        1 for role, text in after if role == "own" and matches_expected(text)
     )
     latest_role, latest_text = after[-1]
     if (
         latest_role == "own"
-        and _verification_text(latest_text) == expected
+        and matches_expected(latest_text)
         and after_matching > before_matching
     ):
         return "verified"
     return "uncertain"
+
+
+def _long_visible_reply_matches(expected_text: str, visible_text: str) -> bool:
+    """Verify a clipped long bubble using substantial distinctive evidence."""
+    expected = "".join(
+        character
+        for character in unicodedata.normalize("NFKC", str(expected_text or ""))
+        if character.isalnum()
+    )
+    visible = "".join(
+        character
+        for character in unicodedata.normalize("NFKC", str(visible_text or ""))
+        if character.isalnum()
+    )
+    if len(expected) < 96 or len(visible) < 48:
+        return False
+    if visible in expected:
+        return True
+    matcher = SequenceMatcher(None, expected, visible, autojunk=False)
+    blocks = [block for block in matcher.get_matching_blocks() if block.size]
+    if not blocks:
+        return False
+    longest = max(block.size for block in blocks)
+    covered = sum(block.size for block in blocks)
+    return longest >= 48 and covered / len(visible) >= 0.82
 
 
 class ChatOCR:
@@ -156,6 +189,45 @@ class ChatOCR:
             text = re.sub(r"\s+", " ", str(item.get("text", "")).strip())
             if text and not _is_noise_text(text):
                 rows.append(text)
+            if len(rows) >= limit:
+                break
+        return "\n".join(rows)
+
+    def read_chat_title(self, image, limit: int = 3) -> str:
+        """Read only the actual chat identity from the WeCom title strip.
+
+        The far-right title action button is outside the identity region but
+        RapidOCR can render it as text such as ``Ω+``.  A one-stroke ``-``
+        nickname is restored only when the corresponding pixels are present
+        immediately before a marker-only ``@微信`` result.
+        """
+        results = self._recognize(image)
+        if not results:
+            return ""
+        try:
+            image_width = max(1.0, float(image.size[0]))
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return ""
+        rows: list[str] = []
+        for item in sorted(
+            results,
+            key=lambda value: (float(value.get("y", 0)), float(value.get("x", 0))),
+        ):
+            left = float(item.get("left", item.get("x", 0)))
+            if left >= image_width * 0.90:
+                continue
+            text = re.sub(r"\s+", " ", str(item.get("text", "")).strip())
+            if not text or _is_noise_text(text):
+                continue
+            restored = _restore_visible_dash_sender(
+                item,
+                text,
+                image,
+                leading_search_px=16,
+            )
+            if restored != text and restored.startswith("-@"):
+                restored = f"- {restored[1:]}"
+            rows.append(restored)
             if len(rows) >= limit:
                 break
         return "\n".join(rows)
@@ -286,6 +358,7 @@ class ChatOCR:
                 continue
             text = re.sub(r"\s+", " ", item["text"]).strip()
             if text and not _is_noise_text(text):
+                text = _restore_visible_dash_sender(item, text, image)
                 role = "发送者" if _is_group_sender_header(text) else _infer_chat_role(item, image_width, image)
                 lines.append(ChatLine(role=role, text=text, y=item["y"]))
         return _merge_wrapped_chat_lines(lines)
@@ -949,3 +1022,60 @@ def _is_group_sender_header(text: str) -> bool:
         "\u00b7\u4f01\u4e1a\u5fae\u4fe1",
     )
     return compact.casefold().endswith(markers)
+
+
+def _restore_visible_dash_sender(
+    item: dict,
+    text: str,
+    image,
+    *,
+    leading_search_px: int = 2,
+) -> str:
+    """Restore a one-stroke ``-`` nickname only when its pixels are visible.
+
+    RapidOCR intermittently returns the external-contact header ``- @微信`` as
+    just ``@微信``.  A marker-only header remains unknown unless a tiny,
+    isolated neutral-dark horizontal component is present at the OCR box's
+    leading edge.  This avoids guessing a sender name from text alone.
+    """
+    compact = re.sub(r"\s+", "", unicodedata.normalize("NFKC", text or ""))
+    if compact.casefold() not in {"@微信", "@wecom"} or image is None:
+        return text
+    try:
+        width, height = image.size
+        left = int(round(float(item.get("left", item.get("x", 0)))))
+        center_y = int(round(float(item.get("y", 0))))
+        x_start = max(0, left - max(0, int(leading_search_px)))
+        x_end = min(int(width) - 1, left + 6)
+        y_start = max(0, center_y - 4)
+        y_end = min(int(height) - 1, center_y + 4)
+        pixels: set[tuple[int, int]] = set()
+        for y in range(y_start, y_end + 1):
+            for x in range(x_start, x_end + 1):
+                value = image.getpixel((x, y))
+                rgb = tuple(int(channel) for channel in value[:3])
+                if max(rgb) < 210 and max(rgb) - min(rgb) <= 28:
+                    pixels.add((x, y))
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return text
+
+    while pixels:
+        seed = pixels.pop()
+        component = [seed]
+        stack = [seed]
+        while stack:
+            x, y = stack.pop()
+            for neighbor_x in range(x - 1, x + 2):
+                for neighbor_y in range(y - 1, y + 2):
+                    neighbor = (neighbor_x, neighbor_y)
+                    if neighbor in pixels:
+                        pixels.remove(neighbor)
+                        stack.append(neighbor)
+                        component.append(neighbor)
+        component_x = [point[0] for point in component]
+        component_y = [point[1] for point in component]
+        component_width = max(component_x) - min(component_x) + 1
+        component_height = max(component_y) - min(component_y) + 1
+        if 2 <= component_width <= 8 and component_height <= 2:
+            return f"-{text}"
+    return text

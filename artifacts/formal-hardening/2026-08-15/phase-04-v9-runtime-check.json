@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "kind": "runtime",
+  "ok": true,
+  "missing": [],
+  "errors": [],
+  "private_files": [],
+  "details": {
+    "data_root_exists": true,
+    "managed_mode": "observe",
+    "credential_readable": true,
+    "knowledge_record_count": 435,
+    "vector_ready": true,
+    "ledger_transient": false,
+    "wecom_detected": true
+  }
+}

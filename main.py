@@ -369,6 +369,7 @@ class WeChatStyleReplyAssistant:
         self._managed_pending_turns: set[str] = set()
         self._managed_pending_lock = threading.Lock()
         self.observed_runtime_turns: set[str] = set()
+        self._startup_baseline_turns: dict[tuple[str, str], tuple[str, ...]] = {}
         self.queue: Queue[tuple[str, object]] = Queue()
         self.current_window: WeChatWindow | None = None
         self.current_context = ""
@@ -858,6 +859,9 @@ class WeChatStyleReplyAssistant:
             top = int(height * float(area.get("y_top", 0.0)))
             bottom = int(height * float(area.get("y_bottom", 0.10)))
             crop = full_window_image.crop((left, top, right, bottom))
+            title_reader = getattr(self.ocr, "read_chat_title", None)
+            if callable(title_reader):
+                return title_reader(crop, limit=3)
             return self.ocr.read_visible_text(crop, limit=3)
         except Exception:
             return ""
@@ -1544,25 +1548,48 @@ class WeChatStyleReplyAssistant:
         try:
             window = self.detector.foreground_chat()
             if window is None:
-                return True
+                visible_chat = getattr(self.detector, "any_chat_window", None)
+                window = visible_chat() if callable(visible_chat) else None
+            if window is None:
+                return self._block_for_unreadable_startup_baseline()
             observation = None
+            idle_state: tuple[str, str, str] | None = None
             for attempt in range(3):
                 if attempt:
                     current_window = self.detector.foreground_chat()
+                    if current_window is None:
+                        visible_chat = getattr(self.detector, "any_chat_window", None)
+                        current_window = visible_chat() if callable(visible_chat) else None
                     if not _same_strict_send_window(window, current_window):
                         return self._block_for_unreadable_startup_baseline()
                     window = current_window
                 observation = self._capture_runtime_observation(window)
                 if observation is not None:
                     break
+                idle_state = self._readable_idle_startup_context(window)
+                if idle_state is not None:
+                    break
                 if attempt < 2:
                     time.sleep(0.25)
             if observation is None:
-                return self._block_for_unreadable_startup_baseline()
+                if idle_state is None:
+                    return self._block_for_unreadable_startup_baseline()
+                _title, chat_type, context = idle_state
+                self.current_window = window
+                self.current_context = context
+                self.current_chat_type = chat_type
+                return True
             self.current_window = window
             self.current_context = observation.context
             self.current_chat_type = observation.identity.chat_type
             self.send_ledger.baseline(observation.turn_key, observation.identity.key)
+            baseline_turns = getattr(self, "_startup_baseline_turns", None)
+            if not isinstance(baseline_turns, dict):
+                baseline_turns = {}
+                self._startup_baseline_turns = baseline_turns
+            baseline_turns[self._startup_baseline_slot(observation)] = tuple(
+                observation.customer_turn
+            )
             self.stable_identity_tracker.observe(
                 observation.identity,
                 observation.context_hash,
@@ -1574,6 +1601,33 @@ class WeChatStyleReplyAssistant:
             return False
         except Exception:
             return self._block_for_unreadable_startup_baseline()
+
+    def _readable_idle_startup_context(
+        self,
+        window: WeChatWindow,
+    ) -> tuple[str, str, str] | None:
+        try:
+            title, chat_type, context = self._capture_runtime_source(window)
+        except Exception:
+            return None
+        if (
+            not title
+            or chat_type not in {"personal", "group"}
+            or not context.strip()
+        ):
+            return None
+        if chat_type == "personal":
+            if _current_unreplied_turn(context):
+                return None
+        else:
+            latest = self.group_handler.latest_other_message(context)
+            question = self.group_handler.extract_question(
+                latest,
+                self.settings.wecom_account_name,
+            )
+            if question.strip():
+                return None
+        return title, chat_type, context
 
     def _block_for_unreadable_startup_baseline(self) -> bool:
         self.settings.managed_mode = "off"
@@ -1769,9 +1823,10 @@ class WeChatStyleReplyAssistant:
         ):
             self.queue.put(("status", "当前聊天仍在稳定识别中，本轮不发送"))
             return
-        _diag("send_queued")
-        self.queue.put(("status", "已进入串行知识库匹配与发送复核队列"))
-        self._queue_runtime_observation(observation, send_window)
+        accepted = self._queue_runtime_observation(observation, send_window)
+        if accepted:
+            _diag("send_queued")
+            self.queue.put(("status", "已进入串行知识库匹配与发送复核队列"))
 
     def _capture_runtime_source(
         self,
@@ -1989,6 +2044,13 @@ class WeChatStyleReplyAssistant:
         *,
         outgoing_text=None,
     ) -> bool:
+        observation = self._observation_after_startup_baseline(observation)
+        if observation is None:
+            return False
+        if getattr(self, "send_ledger", None) is not None and self._ledger_is_handled(
+            observation.turn_key
+        ):
+            return False
         transform = outgoing_text if callable(outgoing_text) else (lambda text: text)
         live = {"window": window}
         active: dict[str, ReplyDecision | None] = {"decision": None}
@@ -2009,6 +2071,8 @@ class WeChatStyleReplyAssistant:
                 window,
                 require_foreground=runtime_mode != "observe",
             )
+            if current is not None:
+                current = self._observation_after_startup_baseline(current)
             if current is not None:
                 current_window = self._revalidated_send_window(window)
                 if current_window is not None:
@@ -2178,6 +2242,39 @@ class WeChatStyleReplyAssistant:
                 self._managed_pending_count = max(0, self._managed_pending_count - 1)
                 self.managed_send_inflight = self._managed_pending_count > 0
         return accepted
+
+    @staticmethod
+    def _startup_baseline_slot(observation: ChatObservation) -> tuple[str, str]:
+        sender = normalize_chat_title(observation.sender_name).casefold()
+        return observation.identity.key, sender
+
+    def _observation_after_startup_baseline(
+        self,
+        observation: ChatObservation,
+    ) -> ChatObservation | None:
+        baselines = getattr(self, "_startup_baseline_turns", None)
+        if not isinstance(baselines, dict):
+            return observation
+        slot = self._startup_baseline_slot(observation)
+        baseline = baselines.get(slot)
+        if not baseline:
+            return observation
+        baseline_messages = list(baseline)
+        current_messages = list(observation.customer_turn)
+        if _turns_are_same_or_similar(baseline_messages, current_messages):
+            return None
+        if _turn_has_real_new_message(baseline_messages, current_messages):
+            new_tail = tuple(current_messages[len(baseline_messages) :])
+            return ChatObservation(
+                identity=observation.identity,
+                context=observation.context,
+                customer_turn=new_tail,
+                sender_name=observation.sender_name,
+                captured_at=observation.captured_at,
+                foreground=observation.foreground,
+            )
+        baselines.pop(slot, None)
+        return observation
 
     def _progress(self, text: str) -> None:
         self.progress_steps.append(text)
