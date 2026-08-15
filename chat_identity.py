@@ -156,4 +156,3 @@ class StableIdentityTracker:
             self._samples >= 2
             and observed_at - self._first_seen_at + 1e-9 >= self.required_seconds
         )
-
