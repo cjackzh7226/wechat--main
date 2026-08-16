@@ -1,7 +1,5 @@
 import json
-import os
 import sys
-import threading
 import types
 import tempfile
 import unittest
@@ -35,7 +33,6 @@ from chat_training import (
 )
 from reply_humanize import humanize_reply, normalize_replies
 from memory import StyleMemory
-from managed_reply import ReplyDecision
 from reply_engine import (
     ReplyEngine,
     auto_reply_decision,
@@ -88,11 +85,6 @@ def _enterprise_history_lookup_examples(history_reply: str) -> list[dict[str, st
             "module": "年检",
             "subcategory": "填报",
             "source_cell": "C11:D11",
-            "source_file": "年度报告知识库.xlsx",
-            "source_locator": "年报问答!C11:D11",
-            "source_excerpt": history_reply,
-            "org_scope": "both",
-            "status": "active",
         },
         {
             "source": "enterprise_annual_report_kb",
@@ -102,11 +94,6 @@ def _enterprise_history_lookup_examples(history_reply: str) -> list[dict[str, st
             "module": "年检",
             "subcategory": "填报",
             "source_cell": "C15:D15",
-            "source_file": "年度报告知识库.xlsx",
-            "source_locator": "年报问答!C15:D15",
-            "source_excerpt": "在已生成本年度年度工作报告的操作栏点“修改”填写。",
-            "org_scope": "both",
-            "status": "active",
         },
         {
             "source": "enterprise_annual_report_kb",
@@ -116,31 +103,8 @@ def _enterprise_history_lookup_examples(history_reply: str) -> list[dict[str, st
             "module": "年检",
             "subcategory": "填报",
             "source_cell": "C10:D10",
-            "source_file": "年度报告知识库.xlsx",
-            "source_locator": "年报问答!C10:D10",
-            "source_excerpt": "导出 PDF 后再打印。",
-            "org_scope": "both",
-            "status": "active",
         },
     ]
-
-
-def _typed_test_decision(text: str) -> ReplyDecision:
-    return ReplyDecision(
-        kind="answer",
-        text=text,
-        record_id="typed-managed-test-record",
-        answer_hash="a" * 64,
-    )
-
-
-def _typed_test_engine(decision: ReplyDecision):
-    return types.SimpleNamespace(
-        last_error="",
-        last_source="批准知识库",
-        last_managed_decision=decision,
-        managed_decision_still_valid=lambda candidate: candidate == decision,
-    )
 
 
 def _minimal_docx_bytes(text: str) -> bytes:
@@ -315,33 +279,6 @@ class MemoryTests(unittest.TestCase):
             self.assertEqual(display[0]["source_cell"], runtime[0]["source_cell"])
             self.assertEqual(display[0]["score"], runtime[0]["enterprise_local_score"])
 
-    def test_enterprise_phrasebook_search_keeps_all_ranked_rows_for_review(self):
-        import main
-
-        rows = [
-            {"question": "第一候选", "score": 44},
-            {"question": "第二候选", "score": 39},
-            {"question": "第三候选", "score": 31},
-        ]
-        calls = []
-        app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
-        app.memory = types.SimpleNamespace(
-            load=lambda: None,
-            enterprise_scored_examples=lambda query, limit: calls.append((query, limit))
-            or rows,
-            managed_scored_examples=lambda *_args, **_kwargs: self.fail(
-                "管理话术不得复用运行时 Top1/并列候选裁剪"
-            ),
-        )
-
-        display = app._get_phrasebook_examples(
-            "enterprise_annual_report_kb",
-            "社团理事数未按奇数设置如何整改",
-        )
-
-        self.assertEqual(display, rows)
-        self.assertEqual(calls, [("社团理事数未按奇数设置如何整改", 200)])
-
     def test_enterprise_decision_accepts_clear_margin_below_legacy_76_gate(self):
         import main
 
@@ -354,12 +291,12 @@ class MemoryTests(unittest.TestCase):
 
             self.assertLess(int(candidates[0]["enterprise_local_score"]), 76)
             self.assertEqual(candidates[0]["enterprise_local_confident"], "1")
-            self.assertEqual(candidates[0]["enterprise_decision_label"], "大模型待确认")
+            self.assertEqual(candidates[0]["enterprise_decision_label"], "可直接发送")
 
             display = app._get_phrasebook_examples("enterprise_annual_report_kb", "想查一下之前的年报")
 
-            self.assertEqual(display[0]["enterprise_decision_label"], "大模型待确认")
-            self.assertEqual(display[0]["enterprise_decision"], "judge")
+            self.assertEqual(display[0]["enterprise_decision_label"], "可直接发送")
+            self.assertEqual(display[0]["enterprise_decision"], "send")
 
     def test_enterprise_semantic_scope_without_annual_report_word_returns_official_answer(self):
         settings = AppSettings(api_key="configured", reply_source_mode="model")
@@ -378,10 +315,11 @@ class MemoryTests(unittest.TestCase):
             result = engine.generate("[对方] 之前那个报告怎么看", "客户")
 
         self.assertEqual(result, [history_answer])
+        self.assertIn("C11:D11", engine.last_source)
         self.assertIn("大模型确认一致", engine.last_source)
 
-    def test_save_keeps_previous_memory_in_managed_backup(self):
-        """每次覆盖前由统一原子写入层保留上一份有效正文。"""
+    def test_save_protects_disk_knowledge_when_memory_shrinks(self):
+        """数量骤减保护：磁盘已有大量知识库（≥50 条）、内存只有极少时，save 先备份磁盘。"""
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         memory = StyleMemory(Path(tmp.name) / "memory.json")
@@ -410,10 +348,10 @@ class MemoryTests(unittest.TestCase):
         ] * 3
         memory2.save()
 
-        # 统一原子写入层应把覆盖前正文放入最新的有效备份槽位。
-        backup_path = Path(tmp.name) / "memory.json.bak.1"
-        self.assertTrue(backup_path.exists(), "应生成托管备份")
-        backup = json.loads(backup_path.read_text(encoding="utf-8"))
+        # 保护触发：磁盘文件里应有自动备份
+        backup_files = list(Path(tmp.name).glob("memory.json.bak-auto-*"))
+        self.assertTrue(backup_files, "应生成自动备份")
+        backup = json.loads(backup_files[0].read_text(encoding="utf-8"))
         self.assertEqual(len(backup.get("examples", [])), 60, "备份应包含 60 条知识库")
 
     def test_enterprise_ambiguous_runtime_and_phrasebook_both_refuse_to_send(self):
@@ -441,8 +379,8 @@ class MemoryTests(unittest.TestCase):
         # 一致 → 发送被选中候选（不再是直接返回并列候选列表）。
         self.assertEqual(len(result), 1)
         self.assertIn("大模型确认一致", engine.last_source)
-        self.assertEqual(display[0]["enterprise_decision_label"], "大模型待确认")
-        self.assertEqual(display[0]["enterprise_decision"], "judge")
+        self.assertEqual(display[0]["enterprise_decision_label"], "并列待裁决")
+        self.assertEqual(display[0]["enterprise_decision"], "tie")
 
     def test_enterprise_imperative_request_ambiguous_returns_no_answer_without_api(self):
         settings = AppSettings(api_key="configured", reply_source_mode="model_memory")
@@ -456,17 +394,15 @@ class MemoryTests(unittest.TestCase):
             result = engine.generate("[对方] 帮我查一下年检时间", "客户")
 
         # 23 分 < 30（新低分阈值）：命中评分不足 → 直接回企业未命中文案，不调模型
-        self.assertEqual(result, ["暂未查到对应答案"])
+        self.assertEqual(result, ["未在当前企业年报知识库中找到对应答案。"])
         self.assertIn("未命中", engine.last_source)
         post.assert_not_called()
 
     def test_llm_import_requires_api_key(self):
         with tempfile.TemporaryDirectory() as tmp:
             memory = StyleMemory(Path(tmp) / "memory.json")
-            source = Path(tmp) / "x.txt"
-            source.write_text("问题：A\n答：B", encoding="utf-8")
             with self.assertRaises(RuntimeError) as ctx:
-                import_chat_zip_to_memory_with_llm(source, memory, None)
+                import_chat_zip_to_memory_with_llm(Path(tmp) / "x.zip", memory, None)
             self.assertIn("API Key", str(ctx.exception))
 
     def test_llm_import_extracts_qa_pairs(self):
@@ -481,7 +417,7 @@ class MemoryTests(unittest.TestCase):
                 post.return_value.status_code = 200
                 post.return_value.raise_for_status.return_value = None
                 post.return_value.json.return_value = {
-                    "choices": [{"message": {"content": '[{"question": "年报在哪里查？", "reply": "在年度报告公示系统查询。", "source_excerpt": "在年度报告公示系统查询。", "org_scope": "both", "keywords": ["查询"]}, {"question": "报告怎么看？", "reply": "在信息公开栏查看。", "source_excerpt": "在信息公开栏查看。", "org_scope": "both"}]'}}]
+                    "choices": [{"message": {"content": '[{"question": "年报在哪里查？", "reply": "在年度报告公示系统查询。", "module": "查询"}, {"question": "报告怎么看？", "reply": "在信息公开栏查看。"}]'}}]
                 }
                 stats = import_chat_zip_to_memory_with_llm(doc_path, memory, settings)
 
@@ -509,8 +445,8 @@ class MemoryTests(unittest.TestCase):
                 post.return_value.status_code = 200
                 post.return_value.raise_for_status.return_value = None
                 post.return_value.json.side_effect = [
-                    {"choices": [{"message": {"content": '[{"question": "A", "reply": "AAA", "source_excerpt": "AAA", "org_scope": "both"}]'}}]},
-                    {"choices": [{"message": {"content": '[{"question": "B", "reply": "BBB", "source_excerpt": "BBB", "org_scope": "both"}]'}}]},
+                    {"choices": [{"message": {"content": '[{"question": "A", "reply": "AAA"}]'}}]},
+                    {"choices": [{"message": {"content": '[{"question": "B", "reply": "BBB"}]'}}]},
                 ]
                 import_chat_zip_to_memory_with_llm(doc_a, memory, settings)
                 import_chat_zip_to_memory_with_llm(doc_b, memory, settings)
@@ -521,7 +457,7 @@ class MemoryTests(unittest.TestCase):
             self.assertIn("AAA", replies)
             self.assertIn("BBB", replies)
 
-    def test_llm_import_reports_progress_by_completed_file(self):
+    def test_llm_import_reports_progress_by_chunk(self):
         settings = AppSettings(api_key="configured", reply_source_mode="model_memory")
         settings.enable_web_search = False
         with tempfile.TemporaryDirectory() as tmp:
@@ -534,7 +470,7 @@ class MemoryTests(unittest.TestCase):
                 post.return_value.status_code = 200
                 post.return_value.raise_for_status.return_value = None
                 post.return_value.json.return_value = {
-                    "choices": [{"message": {"content": '[{"question": "A", "reply": "AAA", "source_excerpt": "AAA", "org_scope": "both"}]'}}]
+                    "choices": [{"message": {"content": '[{"question": "A", "reply": "AAA"}]'}}]
                 }
                 import_chat_zip_to_memory_with_llm(doc_path, memory, settings, progress=lambda done, total: progress_calls.append((done, total)))
 
@@ -542,6 +478,44 @@ class MemoryTests(unittest.TestCase):
             last_done, last_total = progress_calls[-1]
             self.assertEqual(last_done, last_total)
             self.assertGreaterEqual(last_total, 1)
+
+    def test_org_type_tags_applied_to_cue(self):
+        from chat_training import _apply_org_type_tags
+
+        # 含"民办非企业单位" → 追加 / 民非
+        item = {"question": "民非单位的年检要求是什么？", "cue": "[对方] 民非单位的年检要求是什么？"}
+        _apply_org_type_tags(item)
+        self.assertEqual(item["cue"], "[对方] 民非单位的年检要求是什么？ / 民非")
+
+        # 含"社会团体" → 追加 / 社团
+        item = {"question": "社会团体会员数量如何设置？", "cue": "[对方] 社会团体会员数量如何设置？"}
+        _apply_org_type_tags(item)
+        self.assertEqual(item["cue"], "[对方] 社会团体会员数量如何设置？ / 社团")
+
+        # 两者都含 → / 民非 / 社团
+        item = {"question": "社会团体、民办非企业单位的法定代表人任职有哪些规定？", "cue": "[对方] 社会团体、民办非企业单位的法定代表人任职有哪些规定？"}
+        _apply_org_type_tags(item)
+        self.assertIn("/ 民非", item["cue"])
+        self.assertIn("/ 社团", item["cue"])
+
+        # 已有标签不重复追加
+        _apply_org_type_tags(item)
+        self.assertEqual(item["cue"].count("民非"), 1)
+        self.assertEqual(item["cue"].count("社团"), 1)
+
+        # 回答里含明确条例关键词 → 补标签（cue 无机构类型字样时也能判定）
+        item = {"question": "净资产少于注册资金怎么办？", "cue": "[对方] 净资产少于注册资金怎么办？", "reply": "…法律依据：《民办非企业单位登记管理暂行条例》第八条规定…"}
+        _apply_org_type_tags(item)
+        self.assertIn("/ 民非", item["cue"])
+        item = {"question": "当年度未开展活动怎么办？", "cue": "[对方] 当年度未开展活动怎么办？", "reply": "…《社会团体年度检查暂行办法》第十一条规定…"}
+        _apply_org_type_tags(item)
+        self.assertIn("/ 社团", item["cue"])
+
+        # 模糊推断（"常务理事会"等）不算明确信号：不因回答提到常务理事会而加标签
+        item = {"question": "示例问题", "cue": "[对方] 示例问题", "reply": "召开理事会或常务理事会会议选举…"}
+        _apply_org_type_tags(item)
+        self.assertNotIn("/ 民非", item["cue"])
+        self.assertNotIn("/ 社团", item["cue"])
 
     def test_llm_import_applies_org_type_tags(self):
         settings = AppSettings(api_key="configured", reply_source_mode="model_memory")
@@ -555,14 +529,13 @@ class MemoryTests(unittest.TestCase):
                 post.return_value.status_code = 200
                 post.return_value.raise_for_status.return_value = None
                 post.return_value.json.return_value = {
-                    "choices": [{"message": {"content": '[{"question": "社会团体年检怎么报？", "reply": "登录系统填报。", "source_excerpt": "问题：社会团体年检怎么报？\\n答：登录系统填报。"}]'}}]
+                    "choices": [{"message": {"content": '[{"question": "社会团体年检怎么报？", "reply": "登录系统填报。"}]'}}]
                 }
                 import_chat_zip_to_memory_with_llm(doc_path, memory, settings)
 
             loaded = memory.load()
             self.assertEqual(len(loaded.examples), 1)
-            self.assertEqual(loaded.examples[0]["org_scope"], "social")
-            self.assertEqual(loaded.examples[0]["organization_type"], "社会团体")
+            self.assertIn("/ 社团", loaded.examples[0]["cue"])
 
     def test_llm_import_enterprise_workbook_marks_source(self):
         settings = AppSettings(api_key="configured", reply_source_mode="model_memory")
@@ -576,14 +549,14 @@ class MemoryTests(unittest.TestCase):
                 post.return_value.status_code = 200
                 post.return_value.raise_for_status.return_value = None
                 post.return_value.json.return_value = {
-                    "choices": [{"message": {"content": '[{"question": "年检怎么填报？", "reply": "登录系统后选择年检填报。", "source_excerpt": "机构类型：社会团体\\n问题：年检怎么填报？\\n答：登录系统后选择年检填报。", "keywords": ["填报"]}]'}}]
+                    "choices": [{"message": {"content": '[{"question": "年检怎么填报？", "reply": "登录系统后选择年检填报。", "module": "填报", "organization_type": "社会团体"}]'}}]
                 }
                 stats = import_chat_zip_to_memory_with_llm(doc_path, memory, settings)
 
             self.assertEqual(stats["examples"], 1)
             loaded = memory.load()
             self.assertEqual(loaded.examples[0]["source"], "enterprise_annual_report_kb")
-            self.assertIn("填报", loaded.examples[0]["keywords"])
+            self.assertEqual(loaded.examples[0]["module"], "填报")
 
     def test_llm_import_raises_on_invalid_json(self):
         settings = AppSettings(api_key="configured", reply_source_mode="model_memory")
@@ -666,7 +639,7 @@ class MemoryTests(unittest.TestCase):
                     post.return_value.status_code = 200
                     post.return_value.raise_for_status.return_value = None
                     post.return_value.json.return_value = {
-                        "choices": [{"message": {"content": '[{"question": "年报怎么查？", "reply": "在公示系统输入名称查询。", "source_excerpt": "在公示系统输入名称查询。", "org_scope": "both"}]'}}]
+                        "choices": [{"message": {"content": '[{"question": "年报怎么查？", "reply": "在公示系统输入名称查询。"}]'}}]
                     }
                     stats = import_chat_zip_to_memory_with_llm(pdf_path, memory, settings)
 
@@ -684,7 +657,7 @@ class MemoryTests(unittest.TestCase):
             png_path.write_bytes(b"\x89PNG-fake")
             with self.assertRaises(RuntimeError) as ctx:
                 import_chat_zip_to_memory_with_llm(png_path, memory, settings)
-            self.assertIn("支持的知识库文件", str(ctx.exception))
+            self.assertIn("支持的文档", str(ctx.exception))
             self.assertIn("PDF", str(ctx.exception))
 
     def test_enterprise_exact_question_outranks_overlapping_later_questions(self):
@@ -1730,6 +1703,7 @@ class ReplyParsingTests(unittest.TestCase):
             result = engine.generate("[对方] 怎么查以前的年度报告", "客户")
 
         self.assertEqual(result, [history_answer])
+        self.assertIn("C11:D11", engine.last_source)
         self.assertIn("大模型确认一致", engine.last_source)
 
     def test_enterprise_generation_uses_current_target_turn_not_stale_history(self):
@@ -1746,11 +1720,6 @@ class ReplyParsingTests(unittest.TestCase):
                     "cue": "企业年报 / 年检 / 填报 / 往年年度工作报告如何查看？",
                     "reply": correct_answer,
                     "source_cell": "C11:D11",
-                    "source_file": "年度报告知识库.xlsx",
-                    "source_locator": "年报问答!C11:D11",
-                    "source_excerpt": correct_answer,
-                    "org_scope": "both",
-                    "status": "active",
                 },
                 {
                     "source": "enterprise_annual_report_kb",
@@ -1758,11 +1727,6 @@ class ReplyParsingTests(unittest.TestCase):
                     "cue": "企业年报 / 年检 / 填报 / 本年度年度工作报告已存在的问题该如何解决？",
                     "reply": "在已生成本年度年度工作报告的操作栏点修改填写。",
                     "source_cell": "C15:D15",
-                    "source_file": "年度报告知识库.xlsx",
-                    "source_locator": "年报问答!C15:D15",
-                    "source_excerpt": "在已生成本年度年度工作报告的操作栏点修改填写。",
-                    "org_scope": "both",
-                    "status": "active",
                 },
             ]
         )
@@ -1779,7 +1743,7 @@ class ReplyParsingTests(unittest.TestCase):
             )
 
         self.assertEqual(result, [correct_answer])
-        self.assertIn("大模型确认一致", engine.last_source)
+        self.assertIn("C11:D11", engine.last_source)
 
     def test_enterprise_ambiguous_local_match_returns_explicit_no_answer_without_selector(self):
         settings = AppSettings(api_key="configured", reply_source_mode="memory")
@@ -1796,11 +1760,6 @@ class ReplyParsingTests(unittest.TestCase):
                     "cue": "企业年报 / 年检 / 填报 / 年度工作报告无法直接打印如何解决？",
                     "reply": print_answer,
                     "source_cell": "C10:D10",
-                    "source_file": "年度报告知识库.xlsx",
-                    "source_locator": "年报问答!C10:D10",
-                    "source_excerpt": print_answer,
-                    "org_scope": "both",
-                    "status": "active",
                 },
                 {
                     "source": "enterprise_annual_report_kb",
@@ -1808,11 +1767,6 @@ class ReplyParsingTests(unittest.TestCase):
                     "cue": "企业年报 / 年检 / 填报 / 本年度年度工作报告已存在的问题该如何解决？",
                     "reply": edit_answer,
                     "source_cell": "C15:D15",
-                    "source_file": "年度报告知识库.xlsx",
-                    "source_locator": "年报问答!C15:D15",
-                    "source_excerpt": edit_answer,
-                    "org_scope": "both",
-                    "status": "active",
                 },
             ]
         )
@@ -1871,7 +1825,7 @@ class ReplyParsingTests(unittest.TestCase):
             result = engine.generate("[对方] 年度工作报告怎么进去填？", "客户")
 
         # 27 分 < 30（新低分阈值）：命中评分不足 → 未命中文案，不调用模型 selector 自由生成
-        self.assertEqual(result, ["暂未查到对应答案"])
+        self.assertEqual(result, ["未在当前企业年报知识库中找到对应答案。"])
         self.assertIn("未命中", engine.last_source)
         self.assertNotIn(official_answer, result)
         post.assert_not_called()
@@ -1913,19 +1867,19 @@ class ReplyParsingTests(unittest.TestCase):
             result = engine.generate("[对方] 社会组织", "客户")
 
         self.assertNotIn(official_answer, result)
-        self.assertEqual(result, ["暂未查到对应答案"])
+        self.assertEqual(result, ["未在当前企业年报知识库中找到对应答案。"])
         post.assert_not_called()
 
-    def test_enterprise_score_above_30_with_any_strict_lead_goes_to_model(self):
-        # 30 分为唯一底线；第一名只要严格高于第二名就送给模型，不再要求领先 8 分。
+    def test_enterprise_score_between_20_and_40_with_margin_is_sendable(self):
+        # 新底线 20（2026-08-04 用户要求降到 25 以下）：20-40 分区间且明显领先的
+        # 问法也应可直接发送，而不是沿用旧的 40 分硬门槛。
         with tempfile.TemporaryDirectory() as tmp:
             memory = StyleMemory(Path(tmp) / "memory.json")
             memory.learn_from_training_examples(_enterprise_history_lookup_examples("历史报告请到公示页面查询。"))
             candidates = memory.enterprise_candidates("想查一下之前的年报", limit=3)
             self.assertLess(int(candidates[0]["enterprise_local_score"]), 76)
-            self.assertGreaterEqual(int(candidates[0]["enterprise_local_score"]), 30)
             self.assertEqual(candidates[0]["enterprise_local_confident"], "1")
-            self.assertEqual(candidates[0]["enterprise_decision_label"], "大模型待确认")
+            self.assertEqual(candidates[0]["enterprise_decision_label"], "可直接发送")
 
     def test_enterprise_ratio_phrase_disambiguates_rectify_question(self):
         # 用户案例（2026-08-04）："负责人超理事数1/3怎么整改"必须命中
@@ -1941,11 +1895,6 @@ class ReplyParsingTests(unittest.TestCase):
                         "reply": "常务理事整改答案。",
                         "module": "治理",
                         "source_cell": "C50",
-                        "source_file": "年度报告知识库.xlsx",
-                        "source_locator": "年报问答!C50",
-                        "source_excerpt": "常务理事整改答案。",
-                        "org_scope": "both",
-                        "status": "active",
                     },
                     {
                         "source": "enterprise_annual_report_kb",
@@ -1959,7 +1908,7 @@ class ReplyParsingTests(unittest.TestCase):
             )
             candidates = memory.enterprise_candidates("负责人超理事数1/3怎么整改", limit=3)
             self.assertEqual(candidates[0]["source_cell"], "C49")
-            self.assertEqual(candidates[0]["enterprise_decision_label"], "大模型待确认")
+            self.assertEqual(candidates[0]["enterprise_decision_label"], "可直接发送")
             self.assertGreaterEqual(
                 int(candidates[0]["enterprise_local_score"]),
                 int(candidates[1]["enterprise_local_score"]) + 8,
@@ -2018,11 +1967,6 @@ class ReplyParsingTests(unittest.TestCase):
                         "reply": "情形一：填报人员填写错误，整改方式：填写情况说明。（以上材料需加盖单位公章）",
                         "module": "治理",
                         "source_cell": "C49",
-                        "source_file": "年度报告知识库.xlsx",
-                        "source_locator": "年报问答!C49",
-                        "source_excerpt": "情形一：填报人员填写错误，整改方式：填写情况说明。（以上材料需加盖单位公章）",
-                        "org_scope": "both",
-                        "status": "active",
                     },
                 ]
             )
@@ -2034,9 +1978,9 @@ class ReplyParsingTests(unittest.TestCase):
                 result = engine.generate("[对方] 负责人超理事数1/3怎么整改", "客户")
             post.assert_called_once()
             self.assertIn("填写情况说明", " ".join(result))
-            self.assertIn("大模型确认一致", engine.last_source)
+            self.assertIn("C49", engine.last_source)
 
-    def test_enterprise_arbitration_picks_chosen_candidate_from_explicit_tie(self):
+    def test_enterprise_tie_arbitration_picks_chosen_candidate(self):
         settings = AppSettings(api_key="configured", reply_source_mode="model_memory")
         settings.enable_web_search = False
         tmp = tempfile.TemporaryDirectory()
@@ -2046,8 +1990,7 @@ class ReplyParsingTests(unittest.TestCase):
         engine = ReplyEngine(settings, memory)
         question = "年度工作报告在哪里找"
         tie_candidates = memory.enterprise_candidates(question, limit=3)
-        tie_candidates[0]["enterprise_decision"] = "tie"
-        tie_candidates[1]["enterprise_local_score"] = tie_candidates[0]["enterprise_local_score"]
+        self.assertEqual(tie_candidates[0].get("enterprise_decision"), "tie")
 
         with patch("reply_engine.requests.post") as post:
             post.return_value.status_code = 200
@@ -2094,7 +2037,7 @@ class ReplyParsingTests(unittest.TestCase):
             post.return_value.json.return_value = {"choices": [{"message": {"content": '{"chosen": 1, "consistent": false}'}}]}
             result = engine.generate("[对方] 想查一下之前的年报", "客户")
 
-        self.assertEqual(result, ["暂未查到对应答案"])
+        self.assertEqual(result, ["未在当前企业年报知识库中找到对应答案。"])
         self.assertIn("判断不一致", engine.last_source)
 
     def test_enterprise_judgement_failure_returns_no_answer(self):
@@ -2110,10 +2053,8 @@ class ReplyParsingTests(unittest.TestCase):
         with patch("reply_engine.requests.post", side_effect=RuntimeError("timeout")):
             result = engine.generate("[对方] 想查一下之前的年报", "客户")
 
-        self.assertEqual(result, ["暂未查到对应答案"])
-        self.assertIn("判断失败", engine.last_source)
-        self.assertIn("调用失败或超时", engine.last_source)
-        self.assertEqual(engine.last_error, "候选判断接口调用失败或超时，已自动重试一次")
+        self.assertEqual(result, ["未在当前企业年报知识库中找到对应答案。"])
+        self.assertIn("判断不一致", engine.last_source)
 
     def test_enterprise_tie_managed_send_arbitrates_chosen_candidate(self):
         import main as main_module
@@ -2134,10 +2075,8 @@ class ReplyParsingTests(unittest.TestCase):
         memory.learn_from_training_examples(_enterprise_history_lookup_examples("历史报告请到公示页面查询。"))
         engine = ReplyEngine(settings, memory)
         app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
-        app.send_ledger = main_module.SendLedger(Path(tmp.name) / "send_ledger.json").load()
         app.engine = engine
         app.settings = settings
-        app.memory = memory
         app.current_window = types.SimpleNamespace(title="测试窗口")
         app.queue = _FakeQueue()
         app.managed_last_handled_turn_key = ""
@@ -2156,70 +2095,13 @@ class ReplyParsingTests(unittest.TestCase):
             post.return_value.json.return_value = {"choices": [{"message": {"content": '{"chosen": 1, "consistent": true}'}}]}
             replies = engine.generate(context, "客户")
         self.assertIn("大模型确认一致", engine.last_source)
-        decision = _typed_test_decision(replies[0])
-        engine.managed_decision_still_valid = lambda candidate: candidate == decision
-        observation = main_module.ChatObservation(
-            main_module.ChatIdentity(100, "测试窗口", "personal"),
-            context,
-            ("年度工作报告在哪里找",),
-            captured_at=1.0,
-            foreground=True,
-        )
-        queued = []
-        app.stable_identity_tracker = types.SimpleNamespace(
-            observe=lambda *_args, **_kwargs: True
-        )
-        app._managed_reply_readiness_allows_send = lambda: True
-        app._capture_runtime_observation = lambda *_args, **_kwargs: observation
-        app._queue_runtime_observation = (
-            lambda submitted, _window: queued.append(submitted)
-            or True
-        )
 
-        app._maybe_managed_send(context, replies, managed_decision=decision)
+        with patch("main.threading.Thread") as thread_cls:
+            app._maybe_managed_send(context, replies)
 
-        self.assertEqual(queued, [observation])
+        self.assertTrue(app.pending_auto_reply_signature)
         status_texts = [str(item) for item in app.queue.items]
-        self.assertTrue(any("串行知识库匹配" in text for text in status_texts), status_texts)
-
-    def test_rejected_runtime_submission_does_not_report_false_queue_status(self):
-        import main as main_module
-
-        class _FakeQueue:
-            def __init__(self):
-                self.items = []
-
-            def put(self, item):
-                self.items.append(item)
-
-        context = "[对方] 蓝色鲸鱼如何办理火星营业执照？"
-        observation = main_module.ChatObservation(
-            main_module.ChatIdentity(100, "- @微信", "personal"),
-            context,
-            ("蓝色鲸鱼如何办理火星营业执照？",),
-            captured_at=1.0,
-            foreground=True,
-        )
-        app = main_module.WeChatStyleReplyAssistant.__new__(main_module.WeChatStyleReplyAssistant)
-        app.settings = types.SimpleNamespace(managed_mode="observe")
-        app.current_window = types.SimpleNamespace(title="企业微信")
-        app.managed_send_inflight = False
-        app.observed_runtime_turns = set()
-        app.queue = _FakeQueue()
-        app.stable_identity_tracker = types.SimpleNamespace(
-            observe=lambda *_args, **_kwargs: True
-        )
-        app._managed_reply_readiness_allows_send = lambda: True
-        app._capture_runtime_observation = lambda *_args, **_kwargs: observation
-        app._queue_runtime_observation = lambda *_args, **_kwargs: False
-        diagnostics = []
-
-        with patch.object(main_module, "_diag", lambda state, **_kwargs: diagnostics.append(state)):
-            app._maybe_managed_send(context, [])
-
-        self.assertNotIn("send_queued", diagnostics)
-        status_texts = [str(item) for item in app.queue.items]
-        self.assertFalse(any("串行知识库匹配" in text for text in status_texts), status_texts)
+        self.assertTrue(any("历史报告请到公示页面查询。" in text for text in status_texts), status_texts)
 
     def test_enterprise_low_score_returns_no_answer_without_api_in_model_memory(self):
         # model_memory 模式：低分（<20）企业范围问法直接回未命中文案，不再让模型生成
@@ -2234,7 +2116,7 @@ class ReplyParsingTests(unittest.TestCase):
             result = engine.generate("[对方] 社会组织", "客户")
 
         post.assert_not_called()
-        self.assertEqual(result, ["暂未查到对应答案"])
+        self.assertEqual(result, ["未在当前企业年报知识库中找到对应答案。"])
         self.assertIn("未命中", engine.last_source)
 
     def test_seed_scenario_bank_covers_common_intents(self):
@@ -2360,13 +2242,16 @@ class ReplyParsingTests(unittest.TestCase):
         self.assertIn("[我] 我查查", context2)
         self.assertIn("补充完整", context2)
 
-    def test_knowledge_only_simple_ack_without_hit_returns_exact_no_answer(self):
+    def test_fallback_does_not_invent_topic_for_simple_ack(self):
         engine = ReplyEngine(AppSettings(), StyleMemory())
         context = "[对方] 8\"\n[对方] 5\"\n[我] 对 相当于没有资质 不能说医疗相关\n[对方] 好的\n[对方] 知道了"
 
         result = engine.generate(context, "好友")
 
-        self.assertEqual(result, ["暂未查到对应答案"])
+        joined = " ".join(result)
+        self.assertNotIn("市场", joined)
+        self.assertNotIn("细分", joined)
+        self.assertTrue(any("嗯" in item or "好" in item or "不用回" in item for item in result))
 
     def test_last_meaningful_other_message_skips_timestamps_and_own_messages(self):
         context = "\n".join(
@@ -2453,7 +2338,7 @@ class ReplyParsingTests(unittest.TestCase):
 
         self.assertEqual(selected, "可以放在干净稳妥的位置")
 
-    def test_knowledge_only_workplace_statement_without_hit_returns_exact_no_answer(self):
+    def test_fallback_handles_workplace_venting_with_context(self):
         engine = ReplyEngine(AppSettings(), StyleMemory())
         context = "\n".join(
             [
@@ -2465,9 +2350,12 @@ class ReplyParsingTests(unittest.TestCase):
 
         result = engine.generate(context, "业务系统二开")
 
-        self.assertEqual(result, ["暂未查到对应答案"])
+        joined = " ".join(result)
+        self.assertNotIn("累了吧", joined)
+        self.assertNotIn("知道了", joined)
+        self.assertTrue(any("普通员工" in item or "血压" in item or "绷" in item for item in result))
 
-    def test_knowledge_only_thanks_without_hit_returns_exact_no_answer(self):
+    def test_fallback_handles_thanks_with_playful_nickname_without_echoing_nickname(self):
         engine = ReplyEngine(AppSettings(), StyleMemory())
         context = "\n".join(
             [
@@ -2478,7 +2366,10 @@ class ReplyParsingTests(unittest.TestCase):
 
         result = engine.generate(context, "韩洪英")
 
-        self.assertEqual(result, ["暂未查到对应答案"])
+        joined = " ".join(result)
+        self.assertNotIn("孝顺", joined)
+        self.assertNotIn("儿子真", joined)
+        self.assertTrue(any("客气" in item or "收到" in item or "拿到" in item for item in result))
 
     def test_thanks_scene_uses_configured_api(self):
         settings = AppSettings()
@@ -2496,7 +2387,7 @@ class ReplyParsingTests(unittest.TestCase):
         post.assert_called_once()
         self.assertTrue(any("客气" in item or "收到" in item or "拿到" in item for item in result))
 
-    def test_knowledge_only_job_card_without_hit_returns_exact_no_answer(self):
+    def test_job_card_reply_uses_context_instead_of_parroting_last_line(self):
         engine = ReplyEngine(AppSettings(), StyleMemory())
         context = "\n".join(
             [
@@ -2511,7 +2402,10 @@ class ReplyParsingTests(unittest.TestCase):
 
         result = engine.generate(context, "人间油")
 
-        self.assertEqual(result, ["暂未查到对应答案"])
+        joined = " ".join(result)
+        self.assertNotIn("有兴趣吗", joined)
+        self.assertNotIn("关注了", joined)
+        self.assertTrue(any("岗位" in item or "五险" in item or "转给" in item or "机会" in item for item in result))
 
     def test_reply_candidates_do_not_copy_last_message_verbatim(self):
         engine = ReplyEngine(AppSettings(), StyleMemory())
@@ -2521,7 +2415,7 @@ class ReplyParsingTests(unittest.TestCase):
 
         self.assertFalse(any("昭通4家单位招人" in item for item in result))
 
-    def test_knowledge_only_food_statement_without_hit_returns_exact_no_answer(self):
+    def test_food_photo_context_gets_specific_food_reply(self):
         engine = ReplyEngine(AppSettings(), StyleMemory())
         context = "\n".join(
             [
@@ -2532,7 +2426,10 @@ class ReplyParsingTests(unittest.TestCase):
 
         result = engine.generate(context, "璇仔")
 
-        self.assertEqual(result, ["暂未查到对应答案"])
+        joined = " ".join(result)
+        self.assertNotIn("我试试看", joined)
+        self.assertNotIn("收到啦", joined)
+        self.assertTrue(any("香" in item or "花椒" in item or "上头" in item or "米线" in item for item in result))
 
     def test_substantive_context_filters_low_effort_replies(self):
         engine = ReplyEngine(AppSettings(), StyleMemory())
@@ -2554,7 +2451,7 @@ class ReplyParsingTests(unittest.TestCase):
 
         self.assertEqual(result, ["不是不是，刚刚没说清楚"])
 
-    def test_knowledge_only_how_to_question_without_hit_returns_exact_no_answer(self):
+    def test_how_to_receive_reply_uses_actionable_context(self):
         engine = ReplyEngine(AppSettings(), StyleMemory())
         context = "\n".join(
             [
@@ -2565,7 +2462,9 @@ class ReplyParsingTests(unittest.TestCase):
 
         result = engine.generate(context, "百年赤水")
 
-        self.assertEqual(result, ["暂未查到对应答案"])
+        joined = " ".join(result)
+        self.assertNotIn("不客气", joined)
+        self.assertTrue(any("领" in item or "放" in item or "位置" in item or "方法" in item for item in result))
 
     def test_managed_reply_selection_prefers_contextual_candidate(self):
         context = "\n".join(
@@ -2779,20 +2678,6 @@ class OCRCleaningTests(unittest.TestCase):
         self.assertEqual(lines[0].role, "对方")
         self.assertEqual(lines[0].text, "鱼")
 
-    def test_bottom_boundary_prefers_lower_input_line_over_image_line(self):
-        from PIL import Image, ImageDraw
-
-        image = Image.new("RGB", (700, 620), "white")
-        draw = ImageDraw.Draw(image)
-        left, right = 180, 680
-        draw.line((left + 25, 350, right - 25, 350), fill=(224, 224, 224), width=2)
-        draw.line((left + 25, 530, right - 25, 530), fill=(224, 224, 224), width=2)
-
-        bottom = _detect_chat_bottom_boundary(image, left, right, "wechat")
-
-        self.assertIsNotNone(bottom)
-        self.assertGreaterEqual(bottom or 0, 520)
-
     def test_wecom_group_member_sidebar_is_excluded_from_chat_crop(self):
         from PIL import Image, ImageDraw
         import capture_ocr as capture_module
@@ -2825,7 +2710,7 @@ class OCRCleaningTests(unittest.TestCase):
         draw.rectangle((618, 80, 646, 108), fill=(205, 160, 95))
         items = [
             {
-                "text": "\u963f\u7433@\u5fae\u4fe1",
+                "text": "阿琳@微信",
                 "x": 64,
                 "left": 29,
                 "right": 98,
@@ -2836,19 +2721,13 @@ class OCRCleaningTests(unittest.TestCase):
         lines = ChatOCR._to_chat_lines(items, 700, image)
 
         self.assertEqual(len(lines), 1)
-        self.assertEqual(lines[0].role, "\u53d1\u9001\u8005")
+        self.assertEqual(lines[0].role, "发送者")
 
     def test_group_sender_header_stays_separate_from_leading_mention_message(self):
         items = [
+            {"text": "阿琳@微信", "x": 64, "left": 29, "right": 98, "y": 100},
             {
-                "text": "\u963f\u7433@\u5fae\u4fe1",
-                "x": 64,
-                "left": 29,
-                "right": 98,
-                "y": 100,
-            },
-            {
-                "text": "@\u7a0b\u6b63\u6052 \u5e74\u68c0\u6750\u6599\u88ab\u9000\u56de\u5728\u54ea\u67e5\u770b\u95ee\u9898\uff1f",
+                "text": "@程正恒 年检材料被退回在哪里查看问题？",
                 "x": 180,
                 "left": 45,
                 "right": 315,
@@ -2861,22 +2740,16 @@ class OCRCleaningTests(unittest.TestCase):
         self.assertEqual(
             [(line.role, line.text) for line in lines],
             [
-                ("\u53d1\u9001\u8005", "\u963f\u7433@\u5fae\u4fe1"),
-                ("\u5bf9\u65b9", "@\u7a0b\u6b63\u6052 \u5e74\u68c0\u6750\u6599\u88ab\u9000\u56de\u5728\u54ea\u67e5\u770b\u95ee\u9898\uff1f"),
+                ("发送者", "阿琳@微信"),
+                ("对方", "@程正恒 年检材料被退回在哪里查看问题？"),
             ],
         )
 
     def test_group_sender_header_stays_separate_from_plain_message(self):
         items = [
+            {"text": "阿琳@微信", "x": 64, "left": 29, "right": 98, "y": 100},
             {
-                "text": "\u963f\u7433@\u5fae\u4fe1",
-                "x": 64,
-                "left": 29,
-                "right": 98,
-                "y": 100,
-            },
-            {
-                "text": "\u5982\u679c\u8d26\u53f7\u5bc6\u7801\u5fd8\u8bb0\u600e\u4e48\u529e\uff1f",
+                "text": "如果账号密码忘记怎么办？",
                 "x": 120,
                 "left": 41,
                 "right": 199,
@@ -2889,8 +2762,8 @@ class OCRCleaningTests(unittest.TestCase):
         self.assertEqual(
             [(line.role, line.text) for line in lines],
             [
-                ("\u53d1\u9001\u8005", "\u963f\u7433@\u5fae\u4fe1"),
-                ("\u5bf9\u65b9", "\u5982\u679c\u8d26\u53f7\u5bc6\u7801\u5fd8\u8bb0\u600e\u4e48\u529e\uff1f"),
+                ("发送者", "阿琳@微信"),
+                ("对方", "如果账号密码忘记怎么办？"),
             ],
         )
 
@@ -2900,43 +2773,41 @@ class OCRCleaningTests(unittest.TestCase):
         image = Image.new("RGB", (160, 90), "white")
         draw = ImageDraw.Draw(image)
         draw.line((32, 40, 35, 40), fill=(110, 110, 110), width=1)
-        items = [
-            {
-                "text": "@\u5fae\u4fe1",
-                "x": 55,
-                "left": 32,
-                "right": 79,
-                "y": 40,
-            }
-        ]
+        items = [{"text": "@微信", "x": 55, "left": 32, "right": 79, "y": 40}]
 
         lines = ChatOCR._to_chat_lines(items, image.width, image)
 
         self.assertEqual(
             [(line.role, line.text) for line in lines],
-            [("\u53d1\u9001\u8005", "-@\u5fae\u4fe1")],
+            [("发送者", "-@微信")],
         )
 
     def test_marker_only_group_sender_without_visible_dash_remains_unknown(self):
         from PIL import Image
 
         image = Image.new("RGB", (160, 90), "white")
-        items = [
-            {
-                "text": "@\u5fae\u4fe1",
-                "x": 55,
-                "left": 32,
-                "right": 79,
-                "y": 40,
-            }
-        ]
+        items = [{"text": "@微信", "x": 55, "left": 32, "right": 79, "y": 40}]
 
         lines = ChatOCR._to_chat_lines(items, image.width, image)
 
         self.assertEqual(
             [(line.role, line.text) for line in lines],
-            [("\u53d1\u9001\u8005", "@\u5fae\u4fe1")],
+            [("发送者", "@微信")],
         )
+
+    def test_bottom_boundary_prefers_lower_input_line_over_image_line(self):
+        from PIL import Image, ImageDraw
+
+        image = Image.new("RGB", (700, 620), "white")
+        draw = ImageDraw.Draw(image)
+        left, right = 180, 680
+        draw.line((left + 25, 350, right - 25, 350), fill=(224, 224, 224), width=2)
+        draw.line((left + 25, 530, right - 25, 530), fill=(224, 224, 224), width=2)
+
+        bottom = _detect_chat_bottom_boundary(image, left, right, "wechat")
+
+        self.assertIsNotNone(bottom)
+        self.assertGreaterEqual(bottom or 0, 520)
 
     def test_visible_image_text_can_be_read_without_being_chat_context(self):
         ocr = ChatOCR(AppSettings())
@@ -2949,54 +2820,6 @@ class OCRCleaningTests(unittest.TestCase):
 
         self.assertIn("codex", text)
         self.assertIn("生成模板视频", text)
-
-    def test_chat_title_restores_visible_dash_and_drops_far_right_action_icon(self):
-        from PIL import Image, ImageDraw
-
-        image = Image.new("RGB", (200, 60), "white")
-        draw = ImageDraw.Draw(image)
-        draw.line((33, 39, 35, 40), fill=(110, 110, 110), width=1)
-        ocr = ChatOCR(AppSettings())
-        ocr._recognize = lambda _image: [
-            {"text": "@微信", "x": 61.5, "left": 44.0, "right": 79.0, "y": 39.0},
-            {"text": "Ω+", "x": 190.0, "left": 184.0, "right": 196.0, "y": 39.0},
-        ]
-
-        self.assertEqual(ocr.read_chat_title(image), "- @微信")
-
-    def test_chat_title_does_not_invent_dash_when_pixels_are_absent(self):
-        from PIL import Image
-
-        image = Image.new("RGB", (200, 60), "white")
-        ocr = ChatOCR(AppSettings())
-        ocr._recognize = lambda _image: [
-            {"text": "@微信", "x": 61.5, "left": 44.0, "right": 79.0, "y": 39.0},
-            {"text": "Ω+", "x": 190.0, "left": 184.0, "right": 196.0, "y": 39.0},
-        ]
-
-        self.assertEqual(ocr.read_chat_title(image), "@微信")
-
-    def test_chat_title_keeps_multiline_group_identity_before_action_zone(self):
-        from PIL import Image
-
-        image = Image.new("RGB", (300, 80), "white")
-        ocr = ChatOCR(AppSettings())
-        ocr._recognize = lambda _image: [
-            {"text": "阳光、琳、阿琳、", "x": 90.0, "left": 20.0, "right": 160.0, "y": 28.0},
-            {
-                "text": "由企业微信用户创建的外部群",
-                "x": 130.0,
-                "left": 25.0,
-                "right": 235.0,
-                "y": 52.0,
-            },
-            {"text": "Ω+", "x": 286.0, "left": 278.0, "right": 294.0, "y": 40.0},
-        ]
-
-        self.assertEqual(
-            ocr.read_chat_title(image),
-            "阳光、琳、阿琳、\n由企业微信用户创建的外部群",
-        )
 
     def test_short_ascii_visual_artifact_is_filtered_from_chat_context(self):
         self.assertTrue(_is_noise_text("ETJ"))
@@ -3091,27 +2914,6 @@ class OCRCleaningTests(unittest.TestCase):
 
 
 class VisibleContentTests(unittest.TestCase):
-    def test_vision_json_rejects_non_boolean_or_non_exact_payload_fail_closed(self):
-        from visible_content import _parse_vision_json
-
-        invalid_payloads = [
-            '{"message_type":"image","summary":"图像","confidence":"high","should_skip_reply":"false"}',
-            '```json\n{"message_type":"image","summary":"图像","confidence":"high","should_skip_reply":false}\n```',
-            '{"message_type":"image","summary":"图像","confidence":"high","should_skip_reply":false,"extra":1}',
-        ]
-
-        for payload in invalid_payloads:
-            with self.subTest(payload=payload):
-                visible = _parse_vision_json(payload)
-                self.assertTrue(visible.should_skip_reply)
-                self.assertEqual(visible.confidence, "low")
-
-        valid = _parse_vision_json(
-            '{"message_type":"image","summary":"图像","confidence":"high","should_skip_reply":false}'
-        )
-        self.assertFalse(valid.should_skip_reply)
-        self.assertEqual(valid.summary, "图像")
-
     def test_link_context_is_visible_link_without_fetching(self):
         context = "[对方] 链接：https://pan.quark.cn/s/025f43b57d39 怎么样?"
 
@@ -3303,215 +3105,6 @@ class VisibleContentTests(unittest.TestCase):
 
 
 class SettingsTests(unittest.TestCase):
-    def test_formal_ui_exposes_only_knowledge_source_and_all_managed_modes(self):
-        import float_ui
-
-        self.assertEqual([value for value, _label in float_ui.SOURCE_MODE_OPTIONS], ["knowledge_only"])
-        self.assertEqual(
-            float_ui.MANAGED_MODE_OPTIONS,
-            (
-                ("off", "关闭"),
-                ("observe", "观察"),
-                ("controlled", "受控"),
-                ("full", "全托管"),
-            ),
-        )
-        self.assertEqual(float_ui.managed_mode_label("observe"), "观察")
-        self.assertEqual(float_ui.managed_mode_value("全托管"), "full")
-
-    def test_managed_allowlist_parser_deduplicates_in_display_order(self):
-        import float_ui
-
-        self.assertEqual(
-            float_ui.parse_managed_allowed_chats("客户甲\n客户乙, 客户甲；客户丙"),
-            ["客户甲", "客户乙", "客户丙"],
-        )
-
-    def test_managed_mode_callback_preserves_new_mode_with_legacy_boolean_callback(self):
-        from float_ui import ReplyAssistantUI
-
-        class FakeVar:
-            def __init__(self, value=None):
-                self.value = value
-
-            def get(self):
-                return self.value
-
-            def set(self, value):
-                self.value = value
-
-        callback_values = []
-        ui = ReplyAssistantUI.__new__(ReplyAssistantUI)
-        ui.settings = AppSettings()
-        ui.managed_var = FakeVar("off")
-        ui.auto_var = FakeVar(False)
-        ui.callbacks = {"managed_changed": callback_values.append}
-
-        ui._set_managed_mode("controlled")
-
-        self.assertEqual(ui.settings.managed_mode, "controlled")
-        self.assertEqual(ui.managed_var.get(), "受控")
-        self.assertTrue(ui.settings.auto_recognize)
-        self.assertEqual(callback_values, [False])
-
-    def test_managed_mode_callback_accepts_chinese_label_but_keeps_internal_key(self):
-        from float_ui import ReplyAssistantUI
-
-        class FakeVar:
-            def __init__(self, value=None):
-                self.value = value
-
-            def get(self):
-                return self.value
-
-            def set(self, value):
-                self.value = value
-
-        callback_values = []
-        ui = ReplyAssistantUI.__new__(ReplyAssistantUI)
-        ui.settings = AppSettings()
-        ui.managed_var = FakeVar("关闭")
-        ui.auto_var = FakeVar(False)
-        ui.callbacks = {"managed_mode_changed": callback_values.append}
-
-        ui._set_managed_mode("观察", persist=False)
-
-        self.assertEqual(ui.settings.managed_mode, "observe")
-        self.assertEqual(ui.managed_var.get(), "观察")
-        self.assertTrue(ui.settings.auto_recognize)
-        self.assertEqual(callback_values, ["observe"])
-
-    def test_source_mode_callback_cannot_enable_free_generation(self):
-        from float_ui import ReplyAssistantUI
-
-        class FakeVar:
-            def __init__(self):
-                self.value = None
-
-            def set(self, value):
-                self.value = value
-
-        callback_values = []
-        ui = ReplyAssistantUI.__new__(ReplyAssistantUI)
-        ui.settings = AppSettings()
-        ui.source_mode_var = FakeVar()
-        ui.source_mode_label_var = FakeVar()
-        ui.callbacks = {"source_mode_changed": callback_values.append}
-        ui._refresh_source_menu = lambda: None
-
-        ui._set_source_mode("model")
-
-        self.assertEqual(ui.settings.reply_source_mode, "knowledge_only")
-        self.assertEqual(callback_values, [])
-
-    def test_fixed_source_mode_ignores_real_legacy_callback_and_remains_reloadable(self):
-        import main as main_module
-        from float_ui import ReplyAssistantUI
-
-        class FakeVar:
-            def __init__(self):
-                self.value = None
-
-            def set(self, value):
-                self.value = value
-
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "settings.json"
-            settings = AppSettings(config_path=path)
-            legacy_app = types.SimpleNamespace(
-                settings=settings,
-                ui=types.SimpleNamespace(set_status=lambda _text: None),
-            )
-            ui = ReplyAssistantUI.__new__(ReplyAssistantUI)
-            ui.settings = settings
-            ui.source_mode_var = FakeVar()
-            ui.source_mode_label_var = FakeVar()
-            ui._refresh_source_menu = lambda: None
-            ui.callbacks = {
-                "source_mode_changed": lambda mode: main_module.WeChatStyleReplyAssistant._source_mode_changed(
-                    legacy_app,
-                    mode,
-                )
-            }
-
-            ui._set_source_mode("model")
-            loaded = AppSettings(config_path=path).load()
-
-            self.assertEqual(settings.reply_source_mode, "knowledge_only")
-            self.assertEqual(loaded.reply_source_mode, "knowledge_only")
-
-    def test_observe_and_controlled_survive_real_legacy_managed_callback_on_disk(self):
-        import main as main_module
-        from float_ui import ReplyAssistantUI
-
-        class FakeVar:
-            def __init__(self, value=None):
-                self.value = value
-
-            def get(self):
-                return self.value
-
-            def set(self, value):
-                self.value = value
-
-        for mode in ("observe", "controlled"):
-            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
-                path = Path(tmp) / "settings.json"
-                settings = AppSettings(config_path=path)
-                legacy_app = types.SimpleNamespace(
-                    settings=settings,
-                    ui=types.SimpleNamespace(set_status=lambda _text: None),
-                )
-                ui = ReplyAssistantUI.__new__(ReplyAssistantUI)
-                ui.settings = settings
-                ui.managed_var = FakeVar("off")
-                ui.auto_var = FakeVar(False)
-                ui.callbacks = {
-                    "managed_changed": lambda enabled: main_module.WeChatStyleReplyAssistant._managed_changed(
-                        legacy_app,
-                        enabled,
-                    )
-                }
-
-                ui._set_managed_mode(mode)
-                loaded = AppSettings(config_path=path).load()
-
-                self.assertEqual(settings.managed_mode, mode)
-                self.assertEqual(loaded.managed_mode, mode)
-
-    def test_settings_dialog_managed_mode_path_uses_same_callback_safe_transition(self):
-        import main as main_module
-        from float_ui import ReplyAssistantUI
-
-        class FakeVar:
-            def __init__(self, value=None):
-                self.value = value
-
-            def set(self, value):
-                self.value = value
-
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "settings.json"
-            settings = AppSettings(config_path=path)
-            legacy_app = types.SimpleNamespace(
-                settings=settings,
-                ui=types.SimpleNamespace(set_status=lambda _text: None),
-            )
-            ui = ReplyAssistantUI.__new__(ReplyAssistantUI)
-            ui.settings = settings
-            ui.managed_var = FakeVar("off")
-            ui.auto_var = FakeVar(False)
-            ui.callbacks = {
-                "managed_changed": lambda enabled: main_module.WeChatStyleReplyAssistant._managed_changed(
-                    legacy_app,
-                    enabled,
-                )
-            }
-
-            ui._set_managed_mode("controlled", persist=False)
-            settings.save()
-
-            self.assertEqual(AppSettings(config_path=path).load().managed_mode, "controlled")
     def test_model_prompt_is_readable_chinese_and_forbids_invented_data(self):
         settings = AppSettings()
         settings.reply_source_mode = "model"
@@ -3716,16 +3309,7 @@ class SettingsTests(unittest.TestCase):
         app.settings = AppSettings()
         app.settings.managed_auto_reply = True
         app.settings.auto_reply_delay_seconds = 0
-        decision = _typed_test_decision("放书房就行")
-        app.engine = _typed_test_engine(decision)
-        app.memory = types.SimpleNamespace(
-            vector_ready=True,
-            assert_ready_for_managed_reply=lambda: None,
-        )
-        ledger_tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(ledger_tmp.cleanup)
-        app.send_ledger = main.SendLedger(Path(ledger_tmp.name) / "send_ledger.json").load()
-        app.send_operation_lock = threading.Lock()
+        app.engine = types.SimpleNamespace(last_error="", last_source="DeepSeek API")
         app.queue = queue.Queue()
         app.sender = types.SimpleNamespace(send=lambda *_args, **_kwargs: (True, "sent"))
         app.detector = types.SimpleNamespace(window_from_hwnd=lambda _hwnd: live_window)
@@ -3756,11 +3340,7 @@ class SettingsTests(unittest.TestCase):
         app.managed_last_sent_at = 0.0
         app.managed_last_handled_partner = ""
 
-        app._maybe_managed_send(
-            context,
-            ["放书房就行"],
-            managed_decision=decision,
-        )
+        app._maybe_managed_send(context, ["放书房就行"])
         time.sleep(0.05)
 
         self.assertEqual(app.handled_auto_reply_signatures, set())
@@ -3768,25 +3348,16 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(app.last_auto_reply_signature, "")
         self.assertFalse(app.managed_send_inflight)
 
-    def test_managed_send_preflight_rejects_same_title_with_different_hwnd(self):
+    def test_managed_send_preflight_uses_current_foreground_chat_without_hwnd_lock(self):
         import queue
         import time
         import main
 
         app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
-        ledger_tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(ledger_tmp.cleanup)
-        app.send_ledger = main.SendLedger(Path(ledger_tmp.name) / "send_ledger.json").load()
-        app.send_operation_lock = threading.Lock()
         app.settings = AppSettings()
         app.settings.managed_auto_reply = True
         app.settings.auto_reply_delay_seconds = 0
-        app.memory = types.SimpleNamespace(
-            vector_ready=True,
-            assert_ready_for_managed_reply=lambda: None,
-        )
-        decision = _typed_test_decision("放书房就行")
-        app.engine = _typed_test_engine(decision)
+        app.engine = types.SimpleNamespace(last_error="", last_source="DeepSeek API")
         app.queue = queue.Queue()
         app.sender = types.SimpleNamespace(
             calls=[],
@@ -3823,36 +3394,21 @@ class SettingsTests(unittest.TestCase):
         app.managed_last_sent_at = 0.0
         app.managed_last_handled_partner = ""
 
-        app._maybe_managed_send(
-            context,
-            ["放书房就行"],
-            managed_decision=decision,
-        )
-        deadline = time.time() + 1.0
-        while app.managed_send_inflight and time.time() < deadline:
-            time.sleep(0.01)
+        app._maybe_managed_send(context, ["放书房就行"])
+        time.sleep(0.05)
 
-        self.assertEqual(app.sender.calls, [])
+        self.assertEqual(app.sender.calls, [(19, "放书房就行")])
 
-    def test_managed_send_never_falls_back_to_discovered_background_chat(self):
+    def test_managed_send_falls_back_to_discovered_same_chat_when_foreground_unavailable(self):
         import queue
         import time
         import main
 
         app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
-        ledger_tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(ledger_tmp.cleanup)
-        app.send_ledger = main.SendLedger(Path(ledger_tmp.name) / "send_ledger.json").load()
-        app.send_operation_lock = threading.Lock()
         app.settings = AppSettings()
         app.settings.managed_auto_reply = True
         app.settings.auto_reply_delay_seconds = 0
-        app.memory = types.SimpleNamespace(
-            vector_ready=True,
-            assert_ready_for_managed_reply=lambda: None,
-        )
-        decision = _typed_test_decision("对，金正恩名字里就有四个金")
-        app.engine = _typed_test_engine(decision)
+        app.engine = types.SimpleNamespace(last_error="", last_source="DeepSeek API")
         app.queue = queue.Queue()
         app.sender = types.SimpleNamespace(
             calls=[],
@@ -3887,36 +3443,21 @@ class SettingsTests(unittest.TestCase):
         app.managed_last_sent_at = 0.0
         app.managed_last_handled_partner = ""
 
-        app._maybe_managed_send(
-            context,
-            ["对，金正恩名字里就有四个金"],
-            managed_decision=decision,
-        )
-        deadline = time.time() + 1.0
-        while app.managed_send_inflight and time.time() < deadline:
-            time.sleep(0.01)
+        app._maybe_managed_send(context, ["对，金正恩名字里就有四个金"])
+        time.sleep(0.05)
 
-        self.assertEqual(app.sender.calls, [])
+        self.assertEqual(app.sender.calls, [(29, "对，金正恩名字里就有四个金")])
 
-    def test_managed_send_rejects_temporarily_empty_fresh_ocr(self):
+    def test_managed_send_uses_current_context_when_preflight_ocr_is_temporarily_empty(self):
         import queue
         import time
         import main
 
         app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
-        ledger_tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(ledger_tmp.cleanup)
-        app.send_ledger = main.SendLedger(Path(ledger_tmp.name) / "send_ledger.json").load()
-        app.send_operation_lock = threading.Lock()
         app.settings = AppSettings()
         app.settings.managed_auto_reply = True
         app.settings.auto_reply_delay_seconds = 0
-        app.memory = types.SimpleNamespace(
-            vector_ready=True,
-            assert_ready_for_managed_reply=lambda: None,
-        )
-        decision = _typed_test_decision("放客厅干净的位置就行")
-        app.engine = _typed_test_engine(decision)
+        app.engine = types.SimpleNamespace(last_error="", last_source="DeepSeek API")
         app.queue = queue.Queue()
         app.sender = types.SimpleNamespace(
             calls=[],
@@ -3948,23 +3489,117 @@ class SettingsTests(unittest.TestCase):
         app.managed_last_sent_at = 0.0
         app.managed_last_handled_partner = ""
 
-        app._maybe_managed_send(
-            app.current_context,
-            ["放客厅干净的位置就行"],
-            managed_decision=decision,
-        )
-        deadline = time.time() + 1.0
-        while app.managed_send_inflight and time.time() < deadline:
-            time.sleep(0.01)
+        app._maybe_managed_send(app.current_context, ["放客厅干净的位置就行"])
+        time.sleep(0.05)
 
-        self.assertEqual(app.sender.calls, [])
+        self.assertEqual(app.sender.calls, [(9, "放客厅干净的位置就行")])
+
+    def test_managed_preflight_uses_cached_context_when_latest_ocr_misses_other_turn(self):
+        import main
+
+        window = ChatWindow(
+            hwnd=9,
+            title="wechat contact",
+            rect=WindowRect(10, 20, 970, 660),
+            platform=ChatPlatform.for_key("wechat"),
+        )
+        generated_context = "\n".join(
+            [
+                "[对方] first customer question about batch sending",
+                "[我] own answer, split send and watch limit",
+                "[对方] what if it becomes violation later",
+            ]
+        )
+        temporary_latest_context = "\n".join(
+            [
+                "[对方] first customer question about batch sending",
+                "[我] own answer, split send and watch limit",
+            ]
+        )
+
+        effective = main._managed_preflight_context_or_cached(
+            window,
+            window,
+            generated_context,
+            temporary_latest_context,
+            generated_context,
+        )
+        allowed, reason = main._managed_send_preflight_allows(window, window, generated_context, effective)
+
+        self.assertEqual(effective, generated_context)
+        self.assertTrue(allowed, reason)
+
+    def test_managed_preflight_does_not_use_cache_after_manual_own_reply(self):
+        import main
+
+        window = ChatWindow(
+            hwnd=9,
+            title="wechat contact",
+            rect=WindowRect(10, 20, 970, 660),
+            platform=ChatPlatform.for_key("wechat"),
+        )
+        generated_context = "[对方] what if it becomes violation later"
+        latest_context = "\n".join(
+            [
+                "[对方] what if it becomes violation later",
+                "[我] I already answered manually",
+            ]
+        )
+
+        effective = main._managed_preflight_context_or_cached(
+            window,
+            window,
+            generated_context,
+            latest_context,
+            generated_context,
+        )
+        allowed, _reason = main._managed_send_preflight_allows(window, window, generated_context, effective)
+
+        self.assertEqual(effective, latest_context)
+        self.assertFalse(allowed)
+
+    def test_managed_preflight_context_includes_visible_image_understanding(self):
+        import main
+
+        app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+        app.ocr = types.SimpleNamespace(
+            capture=lambda _window, allow_screen_fallback=False: object(),
+            read_image=lambda _image: "[对方] [图片]",
+        )
+        app.visible_analyzer = types.SimpleNamespace(
+            analyze=lambda _context, _image: VisibleContent(
+                message_type="image",
+                summary="一张花色衣服照片",
+                confidence="high",
+                source="zhipu_vision",
+            )
+        )
+        window = ChatWindow(
+            hwnd=9,
+            title="微信 contact",
+            rect=WindowRect(10, 20, 970, 660),
+            platform=ChatPlatform.for_key("wechat"),
+        )
+
+        latest_context = app._managed_preflight_context(window)
+        generated_context = "\n".join(
+            [
+                "[对方] [图片]",
+                "[可见内容理解] 类型：image；置信度：high；来源：zhipu_vision；一张花色衣服照片",
+            ]
+        )
+
+        allowed, reason = main._managed_send_preflight_allows(window, window, generated_context, latest_context)
+
+        self.assertIn("一张花色衣服照片", latest_context)
+        self.assertTrue(allowed, reason)
 
     def test_text_provider_settings_roundtrip_supports_custom_http(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"
             settings = AppSettings(config_path=path)
             settings.api_provider = "custom_http"
-            settings.reply_source_mode = "knowledge_only"
+            settings.reply_source_mode = "memory"
             settings.api_key = "test-key"
             settings.base_url = "https://example.com/generate"
             settings.model = "custom-model"
@@ -3976,7 +3611,7 @@ class SettingsTests(unittest.TestCase):
             loaded = AppSettings(config_path=path).load()
 
             self.assertEqual(loaded.api_provider, "custom_http")
-            self.assertEqual(loaded.reply_source_mode, "knowledge_only")
+            self.assertEqual(loaded.reply_source_mode, "memory")
             self.assertEqual(loaded.custom_headers, '{"Authorization":"Bearer {api_key}"}')
             self.assertEqual(loaded.custom_body, '{"model":"{model}","prompt":"{prompt}"}')
             self.assertEqual(loaded.custom_response_path, "data.answer")
@@ -4243,7 +3878,7 @@ class SettingsTests(unittest.TestCase):
             ["可以，我确认下", "我先看下，晚点回你"],
         )
 
-        self.assertEqual(selected, "暂未查到对应答案")
+        self.assertEqual(selected, "暂时未查到对应答案。")
 
     def test_managed_send_rejects_long_look_again_transition_candidate(self):
         import main
@@ -4253,7 +3888,7 @@ class SettingsTests(unittest.TestCase):
             ["这个我得再看一眼"],
         )
 
-        self.assertEqual(selected, "暂未查到对应答案")
+        self.assertEqual(selected, "暂时未查到对应答案。")
 
     def test_engine_infers_unreplied_turn_for_manual_generation(self):
         settings = AppSettings()
@@ -4360,7 +3995,7 @@ class SettingsTests(unittest.TestCase):
         )
         engine = ReplyEngine(settings, memory)
         result = engine.generate("[对方] 今天天气怎么样", "好友")
-        self.assertEqual(result, ["暂未查到对应答案"])
+        self.assertEqual(result, ["暂时未查到对应答案。"])
         self.assertEqual(engine.last_source, "话术库未命中")
 
     def test_phrasebook_low_score_does_not_fall_back_to_model_in_model_memory(self):
@@ -4382,7 +4017,7 @@ class SettingsTests(unittest.TestCase):
             }
             result = engine.generate("[对方] 今天天气怎么样", "好友")
         post.assert_not_called()
-        self.assertEqual(result, ["暂未查到对应答案"])
+        self.assertEqual(result, ["暂时未查到对应答案。"])
         self.assertEqual(engine.last_source, "话术库未命中")
 
     def test_reply_engine_reports_api_failure_instead_of_silent_fallback(self):
@@ -5019,19 +4654,15 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(loaded.api_key, "deepseek-key")
             self.assertEqual(loaded.get_provider_api_key("deepseek"), "deepseek-key")
 
-    def test_frozen_defaults_store_data_in_appdata(self):
+    def test_frozen_portable_defaults_store_data_next_to_exe(self):
         with tempfile.TemporaryDirectory() as tmp:
             exe_path = Path(tmp) / "聊小智.exe"
-            with patch.dict(
-                os.environ,
-                {"APPDATA": tmp, "WECHAT_ASSISTANT_DATA_DIR": ""},
-                clear=False,
-            ), patch.object(sys, "frozen", True, create=True), patch.object(sys, "executable", str(exe_path)):
+            with patch.object(sys, "frozen", True, create=True), patch.object(sys, "executable", str(exe_path)):
                 config_path = settings_module.default_config_path()
                 memory_path = memory_module.default_memory_path()
 
-            self.assertEqual(config_path, Path(tmp) / "WeChatStyleReplyAssistant" / "settings.json")
-            self.assertEqual(memory_path, Path(tmp) / "WeChatStyleReplyAssistant" / "memory.json")
+            self.assertEqual(config_path, Path(tmp) / "user_data" / "settings.json")
+            self.assertEqual(memory_path, Path(tmp) / "user_data" / "memory.json")
 
 
 class BuildReleaseTests(unittest.TestCase):

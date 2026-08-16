@@ -175,33 +175,17 @@ def visible_from_ocr_text(text: str) -> VisibleContent:
 def _parse_vision_json(content: str) -> VisibleContent:
     import json
 
-    if not isinstance(content, str):
-        return _unreliable_vision_result("zhipu_vision")
+    match = re.search(r"\{.*\}", content, re.S)
+    if not match:
+        return VisibleContent()
     try:
-        data = json.loads(content.strip())
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return _unreliable_vision_result("zhipu_vision")
-    if not isinstance(data, dict) or set(data) != {
-        "message_type",
-        "summary",
-        "confidence",
-        "should_skip_reply",
-    }:
-        return _unreliable_vision_result("zhipu_vision")
-    if (
-        type(data["message_type"]) is not str
-        or data["message_type"] not in {"text", "card", "link", "image", "sticker", "unknown"}
-        or type(data["summary"]) is not str
-        or not data["summary"].strip()
-        or type(data["confidence"]) is not str
-        or data["confidence"] not in {"high", "medium", "low"}
-        or type(data["should_skip_reply"]) is not bool
-    ):
-        return _unreliable_vision_result("zhipu_vision")
-    message_type = data["message_type"]
-    summary = data["summary"].strip()
-    confidence = data["confidence"]
-    should_skip = data["should_skip_reply"]
+        data = json.loads(match.group(0))
+    except Exception:
+        return VisibleContent()
+    message_type = str(data.get("message_type", "unknown")).strip() or "unknown"
+    summary = str(data.get("summary", "")).strip()
+    confidence = str(data.get("confidence", "low")).strip() or "low"
+    should_skip = bool(data.get("should_skip_reply", False))
     return VisibleContent(
         message_type=message_type,
         summary=summary,

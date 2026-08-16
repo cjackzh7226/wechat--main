@@ -11,8 +11,6 @@ except Exception:  # pragma: no cover
     requests = None
 
 from llm_clients import build_text_generation_request, extract_text_from_response, provider_source_label
-from candidate_judge import CandidateJudge
-from managed_reply import ManagedReplyService, ReplyDecision
 from memory import ENTERPRISE_ANNUAL_REPORT_SOURCE, ENTERPRISE_LOCAL_MIN_SCORE, PHRASEBOOK_CONFIDENT_SCORE, StyleMemory
 from scenario_bank import replies_for_intent
 from settings import AppSettings
@@ -37,8 +35,8 @@ GENERIC_LOW_EFFORT = {
 }
 UNSUPPORTED_JARGON = {"福宝", "能量", "加持", "祝福孩子", "考试顺利"}
 ENTERPRISE_MIN_LOCAL_CANDIDATE_SCORE = ENTERPRISE_LOCAL_MIN_SCORE
-NO_DIRECT_ANSWER_REPLY = "暂未查到对应答案"
-ENTERPRISE_NO_ANSWER_REPLY = NO_DIRECT_ANSWER_REPLY
+ENTERPRISE_NO_ANSWER_REPLY = "未在当前企业年报知识库中找到对应答案。"
+NO_DIRECT_ANSWER_REPLY = "暂时未查到对应答案。"
 
 
 def parse_numbered_replies(content: str) -> list[str]:
@@ -89,44 +87,40 @@ def auto_reply_decision(conversation_text: str) -> tuple[bool, str]:
 
 
 class ReplyEngine:
-    def __init__(
-        self,
-        settings: AppSettings,
-        memory: StyleMemory,
-        *,
-        managed_service=None,
-    ) -> None:
+    def __init__(self, settings: AppSettings, memory: StyleMemory) -> None:
         self.settings = settings
         self.memory = memory
         self.last_source = "未生成"
         self.last_error = ""
         self.last_search = ""
         self.last_enterprise_tie_candidates: list[dict[str, str]] = []
-        self.managed_service = managed_service or ManagedReplyService(
-            memory.managed_knowledge_repository(), CandidateJudge(settings)
-        )
-        self.last_managed_decision: ReplyDecision | None = None
 
     def generate(self, conversation_text: str, partner: str = "", target_turn: list[str] | None = None) -> list[str]:
         self.last_error = ""
         effective_target_turn = target_turn if target_turn is not None else _infer_unreplied_other_messages(conversation_text)
 
-        if self.settings.reply_source_mode == "knowledge_only":
-            decision = self.decide_managed(conversation_text, effective_target_turn)
-            return [decision.text] if decision.kind in {"answer", "no_answer"} else []
-
-        # 所有回复来源共用同一条企业知识候选管线，避免模式切换后重新落入旧阈值、
-        # 旧并列规则或把答案正文发给模型的历史分支。
-        managed_decision = self.decide_managed(conversation_text, effective_target_turn)
-        if managed_decision.kind == "answer":
-            return [managed_decision.text]
-        if managed_decision.reason != "no_eligible_candidate":
-            # 已有候选但模型判不一致、调用失败或发送前记录复核失败，均按固定
-            # 未命中文案安全收口，绝不继续进入自由生成。
-            return [ENTERPRISE_NO_ANSWER_REPLY]
-
         enterprise_query = "\n".join(message.strip() for message in effective_target_turn if message.strip())
         enterprise_context = enterprise_query or conversation_text
+        enterprise_answer = self._select_enterprise_answer(enterprise_context)
+        if enterprise_answer:
+            # 命中后不直接发送：交大模型做一致性判断（客户问题 vs 候选对应问题）。
+            # 一致 → 发送；不一致/判断失败 → 未命中文案。
+            return self._enterprise_answer_via_judgement(enterprise_query or enterprise_context, [enterprise_answer])
+        # 并列/接近候选：大模型先从并列候选中选出最匹配的一条，再判断一致性。
+        tie_candidates = self.memory.enterprise_candidates(enterprise_context, limit=3)
+        if (
+            len(tie_candidates) >= 2
+            and str(tie_candidates[0].get("enterprise_decision", "")) == "tie"
+        ):
+            tie_replies = [
+                str(item.get("reply", ""))
+                for item in tie_candidates
+                if str(item.get("reply", "")).strip()
+            ][:3]
+            if tie_replies:
+                return self._enterprise_answer_via_judgement(
+                    enterprise_query or enterprise_context, list(tie_candidates[:3])
+                )
         if (
             self.memory.has_enterprise_annual_report_knowledge()
             and self.memory.is_enterprise_annual_report_query(enterprise_context)
@@ -165,70 +159,6 @@ class ReplyEngine:
             return [NO_DIRECT_ANSWER_REPLY]
 
         return self._fallback(conversation_text)
-
-    def decide_managed(
-        self, conversation_text: str, target_turn: list[str] | None = None
-    ) -> ReplyDecision:
-        effective_target_turn = (
-            target_turn
-            if target_turn is not None
-            else _infer_unreplied_other_messages(conversation_text)
-        )
-        questions = [
-            message.strip() for message in effective_target_turn if message.strip()
-        ]
-        question = questions[-1] if questions else ""
-        if not question:
-            question = last_meaningful_other_message(conversation_text) or conversation_text
-        decision = self.managed_service.decide(question, conversation_text)
-        self.last_managed_decision = decision
-        if decision.kind == "answer":
-            self.last_source = "批准知识库 · 大模型确认一致"
-            self.last_error = ""
-        elif decision.kind == "no_answer":
-            if decision.reason == "judge_inconsistent":
-                self.last_source = "企业年报知识库 · 判断不一致"
-            elif decision.reason == "judge_failed_or_invalid":
-                category = str(
-                    getattr(
-                        getattr(self.managed_service, "judge", None),
-                        "last_error_category",
-                        "",
-                    )
-                    or ""
-                )
-                failure_labels = {
-                    "not_configured": "接口未配置",
-                    "http_component_unavailable": "网络组件不可用",
-                    "http_or_response_error": "调用失败或超时",
-                    "invalid_judgement": "返回格式无效",
-                }
-                detail = failure_labels.get(category, "")
-                self.last_source = "企业年报知识库 · 判断失败"
-                if detail:
-                    self.last_source += f"（{detail}）"
-                if category == "http_or_response_error":
-                    self.last_error = "候选判断接口调用失败或超时，已自动重试一次"
-                elif category == "invalid_judgement":
-                    self.last_error = "候选判断接口返回格式无效，已自动纠正并重试一次"
-                elif detail:
-                    self.last_error = f"候选判断接口{detail}"
-            else:
-                self.last_source = "知识库 · 未命中"
-            if decision.reason != "judge_failed_or_invalid":
-                self.last_error = ""
-        else:
-            self.last_source = "知识库 · 技术失败"
-            self.last_error = "托管知识库技术校验失败，已取消发送"
-        return decision
-
-    def managed_decision_still_valid(self, decision: ReplyDecision) -> bool:
-        return bool(self.managed_service.validate_for_send(decision))
-
-    def _generate_knowledge_only(self, conversation_text: str, effective_target_turn: list[str]) -> list[str]:
-        """Compatibility wrapper for non-managed preview callers."""
-        decision = self.decide_managed(conversation_text, effective_target_turn)
-        return [decision.text] if decision.kind in {"answer", "no_answer"} else []
 
     def _generate_from_api(
         self,
@@ -529,14 +459,10 @@ class ReplyEngine:
         except Exception:
             return None
         try:
-            text = (content or "").strip()
+            text = (content or "").strip().strip("`")
             data = json.loads(text)
-            if type(data) is not dict or set(data) != {"chosen", "consistent"}:
-                return None
-            chosen = data["chosen"]
-            consistent = data["consistent"]
-            if type(chosen) is not int or type(consistent) is not bool:
-                return None
+            chosen = int(data.get("chosen", 0))
+            consistent = bool(data.get("consistent", False))
         except Exception:
             return None
         if not (1 <= chosen <= len(candidates)):

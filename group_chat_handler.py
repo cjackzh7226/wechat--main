@@ -38,33 +38,20 @@ def _clean_name(text: str) -> str:
     return re.sub(r"[\s\u3000]+", "", unicodedata.normalize("NFKC", text or ""))
 
 
-def _exact_mention_end(message: str, account_name: str) -> int | None:
-    """Return the end offset of an exact leading @name, tolerating OCR spaces."""
-    text = unicodedata.normalize("NFKC", message or "").lstrip()
-    expected = _clean_name(account_name)
-    if not text.startswith("@") or not expected:
-        return None
-    index = 1
-    while index < len(text) and text[index].isspace():
-        index += 1
-    for expected_char in expected:
-        while index < len(text) and text[index].isspace():
-            index += 1
-        if index >= len(text) or text[index].casefold() != expected_char.casefold():
-            return None
-        index += 1
-    if index < len(text) and not (
-        text[index].isspace() or text[index] in "：:，,、。.!！?？"
-    ):
-        tail = text[index:]
-        if len(tail.strip()) < 2:
-            return None
-        if re.match(
-            r"^[A-Za-z\u3400-\u9fff]{1,3}(?:\s|[:\uff1a,\uff0c\u3001\u3002.!\uff01\uff1f?])",
-            tail,
-        ):
-            return None
-    return index
+def _extract_mention_target(message: str) -> str:
+    """提取消息开头的 @ 后面的用户名部分（@ 后第一个词，去空格标点），无 @ 返回空。
+
+    容错：OCR 可能把名字识别成"程 正恒"（中间插空格），取 @ 后第一个空白/标点分隔的词，
+    判定时与用户名做前缀/相等比较。
+    """
+    text = (message or "").lstrip()
+    if not text.startswith("@"):
+        return ""
+    rest = text[1:].lstrip()
+    matched = re.match(r"^[^\s，,。：:、.！!？?]+", rest)
+    if matched:
+        return _clean_name(matched.group(0))
+    return ""
 
 
 def _strip_platform_marker(text: str) -> str:
@@ -168,15 +155,23 @@ class GroupChatHandler:
         message = _latest_other_message(context)
         if not message:
             return False
-        return _exact_mention_end(message, account_name) is not None
+        target = _extract_mention_target(message)
+        if not target:
+            return False
+        name = _clean_name(account_name)
+        return target == name or name.startswith(target) or target.startswith(name)
 
     def extract_question(self, message: str, account_name: str) -> str:
         """从 @ 我的消息里提取问题内容（去掉 @用户名 前缀及分隔标点）。"""
-        text = unicodedata.normalize("NFKC", message or "").lstrip()
-        end = _exact_mention_end(text, account_name)
-        if end is None:
+        text = (message or "").lstrip()
+        if not text.startswith("@"):
             return text.strip()
-        rest = text[end:]
+        rest = text[1:].lstrip()
+        name = _clean_name(account_name)
+        if name:
+            compact = re.sub(r"[\s\u3000]+", "", rest)
+            if compact.startswith(name):
+                rest = compact[len(name):]
         rest = rest.lstrip("：:，,、。 .")
         return rest.strip()
 

@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Literal
@@ -42,17 +41,9 @@ _DEFAULT_CALIBRATION: dict = {
         "max_consecutive_failures": 3,
         "retry_per_failure": 1,
     },
-    "system_whitelist": [
-        "客户联系", "学习园地", "行业资讯", "邮件提醒", "管理企业",
-        "腾讯云客服", "企业微信团队", "腾讯云企业服务", "程明现的机器人",
-    ],
+    "system_whitelist": ["客户联系", "邮件提醒", "行业资讯", "企业微信团队", "腾讯云企业服务", "管理企业"],
     "system_keywords": ["团队", "客服", "服务", "提醒", "管理", "联系"],
 }
-
-
-def _flattened_pixels(image) -> list[object]:
-    getter = getattr(image, "get_flattened_data", None)
-    return list(getter()) if callable(getter) else list(image.getdata())
 
 
 def load_calibration(path: str | Path | None = None) -> dict:
@@ -192,19 +183,6 @@ class ConversationListMonitor:
             return None
         return full_window_image.crop((avatar_left, top, avatar_right, bottom))
 
-    def extract_row_title(self, full_window_image, hit: RedDotHit):
-        """提取红点所在行的标题，不包含头像及下一行消息摘要。"""
-        if Image is None or full_window_image is None:
-            return None
-        width, height = full_window_image.size
-        left = max(0, int(width * 0.12))
-        right = min(width, int(width * 0.295))
-        top = max(0, int(hit.y) - 15)
-        bottom = min(height, int(hit.y) + 15)
-        if right <= left or bottom <= top:
-            return None
-        return full_window_image.crop((left, top, right, bottom))
-
 
 class ChatIdentityTracker:
     """当前会话标识：顶部标题文字（切换会话 hwnd 不变，必须用标题文字）。"""
@@ -305,7 +283,6 @@ class ConversationTypeDetector:
 
     def __init__(self, calibration: dict | None = None) -> None:
         cal = calibration or load_calibration()
-        self.cal = cal
         self.system_whitelist = [str(item) for item in cal.get("system_whitelist", [])]
         self.system_keywords = [str(item) for item in cal.get("system_keywords", [])]
         avatar = cal.get("avatar_area", {})
@@ -328,8 +305,6 @@ class ConversationTypeDetector:
         """
         if self._is_system(top_title_text):
             return "system"
-        if self._is_explicit_group_title(top_title_text):
-            return "group"
         if list_avatar_type == "group":
             return "group"
         if list_avatar_type == "personal":
@@ -359,27 +334,21 @@ class ConversationTypeDetector:
         if Image is None or avatar is None:
             return False
         small = avatar.resize((8, 8))
-        pixels = _flattened_pixels(small)
+        pixels = list(small.getdata())
         colorful = sum(1 for r, g, b in pixels if max(r, g, b) - min(r, g, b) > 25)
         return colorful >= 4
 
     def _is_system(self, top_title_text: str) -> bool:
-        text = re.sub(r"\s+", "", str(top_title_text or "")).casefold()
+        text = (top_title_text or "").strip()
         if not text:
             return False
         for name in self.system_whitelist:
-            normalized_name = re.sub(r"\s+", "", str(name)).casefold()
-            if text == normalized_name or text.startswith(f"{normalized_name}@"):
+            if text == name or text.startswith(name) or name in text:
+                return True
+        for keyword in self.system_keywords:
+            if keyword in text:
                 return True
         return False
-
-    @staticmethod
-    def _is_explicit_group_title(top_title_text: str) -> bool:
-        text = re.sub(r"\s+", "", str(top_title_text or "")).casefold()
-        return (
-            "\u7531\u4f01\u4e1a\u5fae\u4fe1\u7528\u6237\u521b\u5efa\u7684\u5916\u90e8\u7fa4" in text
-            or ("\u4f4d\u5916\u90e8\u8054\u7cfb\u4eba" in text and "\u7fa4\u4e3b" in text)
-        )
 
     def _crop_avatar(self, full_window_image):
         if Image is None or full_window_image is None:
@@ -453,7 +422,7 @@ class ConversationTypeDetector:
         if Image is None:
             return (0, 0, 0)
         small = block.resize((8, 8))
-        pixels = _flattened_pixels(small)
+        pixels = list(small.getdata())
         r = sorted(p[0] for p in pixels)[len(pixels) // 2]
         g = sorted(p[1] for p in pixels)[len(pixels) // 2]
         b = sorted(p[2] for p in pixels)[len(pixels) // 2]

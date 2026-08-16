@@ -1,37 +1,20 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 import re
 import sys
 import threading
 import time
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from difflib import SequenceMatcher
-from json import JSONDecodeError
 from pathlib import Path
 from queue import Empty, Queue
 
-from app_paths import logs_dir
-from atomic_json import JsonDataError
-from chat_training import (
-    activate_training_import,
-    stage_training_import,
-)
+from chat_training import import_chat_zip_to_memory, import_chat_zip_to_memory_with_llm
 from capture_ocr import ChatOCR
-from float_ui import ReplyAssistantUI, managed_mode_label
-from memory import ENTERPRISE_ANNUAL_REPORT_SOURCE, StyleMemory, VectorIndexError
-from managed_reply import ReplyDecision
-from runtime_logging import (
-    RuntimeLoggerUnavailableError,
-    build_runtime_logger,
-    enable_session_debug,
-)
-from send_ledger import LedgerBlockingError, SendLedger
-from single_instance import SingleInstance
+from float_ui import ReplyAssistantUI
+from memory import ENTERPRISE_ANNUAL_REPORT_SOURCE, StyleMemory
 from reply_engine import (
     NO_DIRECT_ANSWER_REPLY,
     ReplyEngine,
@@ -43,24 +26,7 @@ from reply_engine import (
     unreplied_other_messages,
 )
 from sender import WeChatSender
-from chat_identity import (
-    ChatIdentity,
-    ChatObservation,
-    StableIdentityTracker,
-    normalize_chat_title,
-    turn_fingerprint,
-)
-from capture_ocr import verify_own_bubble
-from managed_runtime import (
-    ManagedPhase,
-    ManagedReplyCoordinator,
-    ManagedRuntimeWorker,
-    RuntimeAdapters,
-    RuntimeOutcome,
-    SendAttempt,
-    SendWindowPreparation,
-)
-from settings import AppSettings, SettingsPersistenceError, SettingsValidationError
+from settings import AppSettings
 from sop_analyzer import (
     analyze_training_source_to_memory,
     build_sop_library_from_memory,
@@ -84,121 +50,30 @@ except Exception:  # pragma: no cover
     pyautogui = None
 
 
-_ACCEPTANCE_REPORT_LOCK = threading.Lock()
-_ACCEPTANCE_MODES = frozenset({"observe", "controlled", "full"})
-_ACCEPTANCE_DECISION_KINDS = frozenset({"answer", "no_answer", "technical_failure", ""})
-_ACCEPTANCE_LIFECYCLE_REASONS = frozenset({"runtime_configured", "runtime_ready"})
-
-
-def _append_acceptance_event(
-    path: Path | str,
-    mode: str,
-    outcome: RuntimeOutcome,
-) -> None:
-    """Append explicit release evidence without chat identity or message text."""
-    if not isinstance(outcome, RuntimeOutcome):
-        raise TypeError("outcome must be RuntimeOutcome")
-    if mode not in _ACCEPTANCE_MODES:
-        raise ValueError("acceptance mode is invalid")
-    decision = outcome.decision
-    decision_kind = decision.kind if isinstance(decision, ReplyDecision) else ""
-    if decision_kind not in _ACCEPTANCE_DECISION_KINDS:
-        decision_kind = ""
-    record_id = decision.record_id if isinstance(decision, ReplyDecision) else ""
-    answer_hash = decision.answer_hash if isinstance(decision, ReplyDecision) else ""
-    record_id = record_id if re.fullmatch(r"[0-9a-f]{64}", record_id) else ""
-    answer_hash = answer_hash if re.fullmatch(r"[0-9a-f]{64}", answer_hash) else ""
-    reason = outcome.reason if re.fullmatch(r"[a-z0-9_]{1,80}", outcome.reason) else "invalid_reason"
-    report = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "mode": mode,
-        "phase": outcome.phase.value,
-        "reason": reason,
-        "sent": outcome.sent,
-        "verification": outcome.verification or "",
-        "decision_kind": decision_kind,
-        "record_id": record_id,
-        "answer_hash": answer_hash,
-        "score": decision.score if isinstance(decision, ReplyDecision) else 0,
-        "org_scope": decision.org_scope if isinstance(decision, ReplyDecision) else "unknown",
-        "attempt_count": outcome.attempt_count,
-    }
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(report, ensure_ascii=False, separators=(",", ":")) + "\n"
-    with _ACCEPTANCE_REPORT_LOCK:
-        with target.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-
-
-def _record_acceptance_status_once(app: object, reason: str) -> bool:
-    """Record one allowlisted lifecycle boundary without chat-derived data."""
-    if reason not in _ACCEPTANCE_LIFECYCLE_REASONS:
-        raise ValueError("acceptance lifecycle reason is invalid")
-    target = getattr(app, "acceptance_report_path", None)
-    if target is None:
-        return False
-    seen = set(getattr(app, "_acceptance_statuses", set()))
-    if reason in seen:
-        return False
-    mode = getattr(getattr(app, "settings", None), "managed_mode", "off")
-    outcome = RuntimeOutcome(
-        phase=ManagedPhase.WAITING,
-        sent=False,
-        reason=reason,
-        turn_key="",
-        decision=None,
-        phase_trace=(ManagedPhase.WAITING.value,),
-    )
-    _append_acceptance_event(target, mode, outcome)
-    seen.add(reason)
-    setattr(app, "_acceptance_statuses", seen)
-    return True
-
-
 def _setup_diag_log() -> logging.Logger:
-    """Create the privacy-safe diagnostic logger only when an event is emitted."""
-    return build_runtime_logger(logs_dir())
+    """全托管发送链路诊断日志：记录每次发送决策与原因，便于排查“候选刷新但不发送”。"""
+    logger = logging.getLogger("managed_send_diag")
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+        base = os.environ.get("APPDATA", "")
+        log_dir = Path(base) / "WeChatStyleReplyAssistant" if base else Path.home() / ".wechat_style_reply_assistant"
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            handler = logging.FileHandler(log_dir / "managed_send.log", encoding="utf-8")
+            handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+            logger.addHandler(handler)
+            logger.propagate = False
+        except Exception:
+            pass
+    return logger
 
 
-DIAG_LOG: logging.Logger | None = None
-_DIAG_LOG_LOCK = threading.Lock()
+DIAG_LOG = _setup_diag_log()
 
 
-def _ensure_diag_logger() -> logging.Logger:
-    global DIAG_LOG
-    if DIAG_LOG is None:
-        with _DIAG_LOG_LOCK:
-            if DIAG_LOG is None:
-                DIAG_LOG = _setup_diag_log()
-    return DIAG_LOG
-
-
-def _diag(
-    code: str,
-    *,
-    error_category: str | None = None,
-    score: int | float | None = None,
-    org_scope: str | None = None,
-    record_id: str | None = None,
-) -> None:
+def _diag(*args: object) -> None:
     try:
-        logger = _ensure_diag_logger()
-        event_data: dict[str, object] = {"event": "managed-send-diagnostic", "state": code}
-        for key, value in {
-            "error_category": error_category,
-            "score": score,
-            "org_scope": org_scope,
-            "record_id": record_id,
-        }.items():
-            if value is not None:
-                event_data[key] = value
-        logger.info(
-            "managed-send-diagnostic",
-            extra={"event_data": event_data},
-        )
+        DIAG_LOG.info(" ".join(str(arg) for arg in args))
     except Exception:
         pass
 
@@ -211,10 +86,6 @@ MSG = {
     "idle_status": "请打开微信、企业微信或 QQ，并点进一个聊天",
     "current": "当前聊天：{title}",
     "manual_ready": "已定位聊天窗口。点“识别当前聊天”生成回复。",
-    "manual_preview_ready": "已生成候选回复，仅预览，未发送",
-    "manual_group_no_mention": "已识别群聊；最新消息未 @ 当前账号，不生成候选",
-    "manual_ocr_empty": "未识别到聊天内容，请确认企业微信窗口可见且未最小化",
-    "manual_match_error": "匹配暂不可用，未发送",
     "recognizing": "\u6b63\u5728\u8bc6\u522b\u5f53\u524d\u804a\u5929...",
     "step_located": "1/5 已定位聊天窗口：{title}",
     "step_capture": "2/5 \u6b63\u5728\u622a\u53d6\u5f53\u524d\u804a\u5929\u533a\u57df...",
@@ -242,147 +113,21 @@ MSG = {
     "managed_off": "\u5df2\u5173\u95ed\u5168\u6258\u7ba1\u3002",
     "auto_sending": "\u5168\u6258\u7ba1\u5ba1\u6838\u540e\u9009\u4e2d\uff1a{text}",
     "managed_preflight_blocked": "全托管发送前复核未通过：{reason}",
-    "managed_vector_blocked": "向量索引未就绪，已关闭全托管自动发送；请修复索引后使用手动诊断。",
     "api_failed_stop_send": "接口未生效，已停止全托管自动发送。请先检查 API Key、额度、模型名或 Base URL。",
     "no_send_window": "没有可发送的聊天窗口",
-    "training_imported": "知识库导入完成：{files} 个文件，暂存并校验 {turns} 条记录，写入 {examples} 条知识记录。",
+    "training_imported": "训练包已导入：{files} 个文件，{turns} 轮对话，写入 {examples} 条长期记忆样例。",
 }
-
-
-MANAGED_OUTCOME_MESSAGES = {
-    "user_active_elsewhere": "检测到你正在使用其他窗口，本轮暂不发送",
-    "target_window_unavailable": "企业微信窗口当前不可用，本轮未发送",
-    "activation_failed": "企业微信窗口当前无法安全激活，本轮未发送",
-    "chat_identity_changed": "会话或问题已变化，本轮未发送",
-    "customer_turn_changed": "会话或问题已变化，本轮未发送",
-    "fresh_observation_unavailable": "发送前无法重新识别当前会话，本轮未发送",
-    "chat_not_allowed": "当前聊天不在受控模式允许列表中，本轮未发送",
-}
-
-
-def _managed_outcome_message(reason: str) -> str:
-    return MANAGED_OUTCOME_MESSAGES.get(str(reason), "")
-
-
-@dataclass
-class StartupState:
-    settings: AppSettings
-    memory: StyleMemory
-    managed_mode: str
-    blocking_error: str = ""
-    error_type: type[Exception] | None = None
-
-
-def _blocked_startup_state(
-    settings: AppSettings,
-    memory: StyleMemory,
-    message: str,
-    error: Exception,
-) -> StartupState:
-    settings.managed_mode = "off"
-    settings.auto_recognize = False
-    settings.training_mode = False
-    return StartupState(
-        settings=settings,
-        memory=memory,
-        managed_mode="off",
-        blocking_error=message,
-        error_type=type(error),
-    )
-
-
-def load_startup_state_for_test() -> StartupState:
-    """Load startup persistence without replacing invalid formal files."""
-    settings = AppSettings()
-    memory = StyleMemory()
-    try:
-        settings.load()
-    except JSONDecodeError as error:
-        typed_error = JsonDataError(
-            settings.config_path,
-            [(settings.config_path, f"JSONDecodeError: {error.msg}")],
-        )
-        return _blocked_startup_state(
-            settings,
-            memory,
-            "配置读取失败，已关闭托管模式；请检查设置文件后使用手动诊断。",
-            typed_error,
-        )
-    except SettingsPersistenceError as error:
-        return _blocked_startup_state(
-            settings,
-            memory,
-            "设置或凭据读取失败，已关闭托管模式；请检查配置与凭据文件后使用手动诊断。",
-            error,
-        )
-    except (SettingsValidationError, JsonDataError) as error:
-        return _blocked_startup_state(
-            settings,
-            memory,
-            "配置读取失败，已关闭托管模式；请检查设置文件后使用手动诊断。",
-            error,
-        )
-    try:
-        memory.load()
-    except JsonDataError as error:
-        return _blocked_startup_state(
-            settings,
-            memory,
-            "记忆读取失败，已关闭托管模式；请检查记忆文件后使用手动诊断。",
-            error,
-        )
-    except VectorIndexError as error:
-        return _blocked_startup_state(
-            settings,
-            memory,
-            "向量索引读取失败，已关闭托管模式；请修复索引后使用手动诊断。",
-            error,
-        )
-    return StartupState(
-        settings=settings,
-        memory=memory,
-        managed_mode=settings.managed_mode,
-    )
 
 
 class WeChatStyleReplyAssistant:
-    def __init__(self, startup_state: StartupState | None = None) -> None:
-        state = startup_state or load_startup_state_for_test()
-        self.startup_state = state
-        self.startup_blocking_error = state.blocking_error
-        self.settings = state.settings
-        self.memory = state.memory
-        if self.startup_blocking_error:
-            self._install_blocking_startup_guards()
-        self.send_ledger = SendLedger()
-        try:
-            self.send_ledger.load()
-            self.send_ledger.prune_expired(max_age_days=90)
-        except LedgerBlockingError:
-            self.startup_blocking_error = (
-                "发送台账读取或恢复失败，已关闭托管自动发送；请修复台账后重启。"
-            )
-            self._install_blocking_startup_guards()
+    def __init__(self) -> None:
+        self.settings = AppSettings().load()
+        self.memory = StyleMemory().load()
         self.detector = WeChatWindowDetector()
         self.ocr = ChatOCR(self.settings)
         self.visible_analyzer = VisibleContentAnalyzer(self.settings)
         self.engine = ReplyEngine(self.settings, self.memory)
         self.sender = WeChatSender()
-        self.send_operation_lock = threading.Lock()
-        self.managed_coordinator = ManagedReplyCoordinator(self.send_ledger)
-        self.managed_worker = ManagedRuntimeWorker(self.managed_coordinator)
-        self.stable_identity_tracker = StableIdentityTracker(required_seconds=1.2)
-        self._managed_pending_count = 0
-        self._managed_pending_turns: set[str] = set()
-        self._managed_pending_lock = threading.Lock()
-        self.observed_runtime_turns: set[str] = set()
-        self._startup_baseline_turns: dict[tuple[str, str], tuple[str, ...]] = {}
-        self._startup_baseline_occurrences: dict[
-            tuple[str, str], tuple[str, int]
-        ] = {}
-        self._startup_baseline_pending = False
-        self._startup_baseline_retry_after = 0.0
-        self._runtime_components_started = False
         self.queue: Queue[tuple[str, object]] = Queue()
         self.current_window: WeChatWindow | None = None
         self.current_context = ""
@@ -391,7 +136,16 @@ class WeChatStyleReplyAssistant:
         self.processing = False
         self.running = True
         self.progress_steps: list[str] = []
+        self.last_auto_reply_signature = ""
+        self.pending_auto_reply_signature = ""
+        self.handled_auto_reply_signatures: set[str] = set()
         self.managed_send_inflight = False
+        self.managed_waiting_for_own_echo = False
+        self.last_managed_sent_text = ""
+        self.managed_last_handled_turn_messages: list[str] = []
+        self.managed_last_handled_turn_key = ""
+        self.managed_last_sent_at = 0.0
+        self.managed_last_handled_partner = ""
         self.last_window_key = ""
         self.last_snap_geometry = ""
         self.generation_inflight = False
@@ -415,6 +169,7 @@ class WeChatStyleReplyAssistant:
 
         self.group_handler = GroupChatHandler(self.settings)
         self.current_chat_type = "personal"
+        self.group_last_handled_msg = ""
         self.bypass_last_scan_at = 0.0
         self.bypass_self_since = 0.0
         self.bypass_fail_count = 0
@@ -429,7 +184,7 @@ class WeChatStyleReplyAssistant:
                 "recognize": self._recognize_current,
                 "training_changed": self._training_changed,
                 "auto_changed": self._auto_changed,
-                "managed_mode_changed": self._managed_mode_changed,
+                "managed_changed": self._managed_changed,
                 "source_mode_changed": self._source_mode_changed,
                 "regenerate": self._regenerate,
                 "send": self._send,
@@ -445,88 +200,16 @@ class WeChatStyleReplyAssistant:
                 "exit": self._exit,
             },
         )
-        if self.startup_blocking_error:
-            self.ui._set_managed_mode = self._blocked_managed_mode
 
     def start(self) -> None:
-        if self.startup_blocking_error:
-            self.ui.set_status(self.startup_blocking_error)
-            self.ui.mainloop()
-            self.running = False
-            return
-        try:
-            self.ui.root.after(250, self._ui_loop)
-            if _managed_mode_enabled(self.settings):
-                self._startup_baseline_pending = True
-                self.ui.set_status("正在初始化文字识别并建立启动防重复基线，请稍候")
-                threading.Thread(
-                    target=self._startup_baseline_worker,
-                    name="startup-baseline",
-                    daemon=True,
-                ).start()
-            else:
-                self._start_runtime_components()
-            # 首次使用群聊功能：用户名未填写 → 弹提示（UI 线程）
-            if not self.settings.wecom_account_name.strip():
-                self.ui.root.after(900, self._prompt_account_name)
-            self.ui.mainloop()
-        finally:
-            self.running = False
-            self.managed_worker.shutdown(timeout=10.0)
-
-    def _startup_baseline_worker(self) -> None:
-        """Build the OCR baseline off the Tk thread; never start sending here."""
-        success = self._establish_startup_baseline()
-        self.queue.put(("startup_baseline_complete", success))
-
-    def _complete_startup_baseline(self, success: bool) -> None:
-        """Finish startup on the Tk thread after the baseline worker reports."""
-        if self.startup_blocking_error:
-            self._startup_baseline_pending = False
-            self.ui.set_status(self.startup_blocking_error)
-            return
-        if not _managed_mode_enabled(self.settings):
-            self._startup_baseline_pending = False
-            self._start_runtime_components()
-            return
-        if success is not True:
-            self._startup_baseline_pending = True
-            self._startup_baseline_retry_after = time.monotonic() + 1.0
-            self.ui.set_status(
-                "暂未识别到可建立启动基线的聊天，已保持持续识别并自动重试；托管发送暂缓。"
-            )
-            self._start_runtime_components()
-            return
-        self._startup_baseline_pending = False
-        self._startup_baseline_retry_after = 0.0
-        self._start_runtime_components()
-
-    def _retry_pending_startup_baseline(self, *, now: float | None = None) -> bool:
-        """Retry a transient baseline failure from the long-lived monitor thread."""
-        if (
-            not getattr(self, "_startup_baseline_pending", False)
-            or getattr(self, "startup_blocking_error", "")
-            or not _managed_mode_enabled(self.settings)
-        ):
-            return False
-        checked_at = time.monotonic() if now is None else float(now)
-        if checked_at < float(getattr(self, "_startup_baseline_retry_after", 0.0) or 0.0):
-            return False
-        self._startup_baseline_retry_after = checked_at + 1.0
-        success = self._establish_startup_baseline()
-        self.queue.put(("startup_baseline_complete", success))
-        return True
-
-    def _start_runtime_components(self) -> None:
-        if getattr(self, "_runtime_components_started", False):
-            return
-        if not self.running or self.startup_blocking_error:
-            return
-        self._runtime_components_started = True
-        _record_acceptance_status_once(self, "runtime_ready")
-        self.managed_worker.start()
         self.ui.set_status(MSG["waiting"] if self.settings.api_key else MSG["no_key"])
         threading.Thread(target=self._monitor_loop, daemon=True).start()
+        self.ui.root.after(250, self._ui_loop)
+        # 首次使用群聊功能：用户名未填写 → 弹提示（UI 线程）
+        if not self.settings.wecom_account_name.strip():
+            self.ui.root.after(900, self._prompt_account_name)
+        self.ui.mainloop()
+        self.running = False
 
     def _prompt_account_name(self) -> None:
         """首次弹提示让用户填写当前账号用户名；填写后保存并回填输入框。"""
@@ -558,14 +241,11 @@ class WeChatStyleReplyAssistant:
     def _monitor_loop(self) -> None:
         while self.running:
             try:
-                if _managed_mode_enabled(self.settings):
-                    wechat = self._visible_wecom_target()
-                else:
-                    wechat = self.detector.foreground_chat()
-                    if not wechat and (
-                        self.settings.auto_recognize or self.settings.training_mode
-                    ):
-                        wechat = self.detector.any_chat_window()
+                wechat = self.detector.foreground_chat()
+                if not wechat and (
+                    self.settings.auto_recognize or self.settings.training_mode or self.settings.managed_auto_reply
+                ):
+                    wechat = self.detector.any_chat_window()
                 if not wechat:
                     self.queue.put(("idle", None))
                     time.sleep(self._poll_interval() / 1000)
@@ -578,21 +258,7 @@ class WeChatStyleReplyAssistant:
                     self.current_hash = ""
                     self.last_capture = 0.0
                 self.queue.put(("window", wechat))
-                if (
-                    _managed_mode_enabled(self.settings)
-                    and getattr(self, "_startup_baseline_pending", False)
-                ):
-                    self._retry_pending_startup_baseline()
-                    time.sleep(self._poll_interval() / 1000)
-                    continue
-                if _managed_mode_enabled(self.settings) and self.managed_send_inflight:
-                    time.sleep(self._poll_interval() / 1000)
-                    continue
-                if _managed_mode_enabled(self.settings) and self._route_managed_window(wechat):
-                    try:
-                        self._conversation_list_bypass(wechat)
-                    except Exception as exc:
-                        self.queue.put(("status", f"会话切换旁路异常：{exc}"))
+                if self.settings.managed_auto_reply and self.managed_send_inflight:
                     time.sleep(self._poll_interval() / 1000)
                     continue
                 if self.settings.auto_recognize or self.settings.training_mode:
@@ -610,51 +276,6 @@ class WeChatStyleReplyAssistant:
                 self.queue.put(("status", MSG["monitor_error"].format(error=exc)))
             time.sleep(self._poll_interval() / 1000)
 
-    def _route_managed_window(self, wechat: WeChatWindow) -> bool:
-        """Refresh type from one bitmap and route every managed chat on each poll."""
-        title, chat_type, context = self._capture_runtime_source(wechat)
-        del title
-        self.current_chat_type = chat_type
-        if chat_type == "personal":
-            if context.strip():
-                self._handle_managed_personal(wechat, context)
-            return True
-        if chat_type == "group":
-            if context.strip():
-                if context != getattr(self, "current_context", ""):
-                    self.current_context = context
-                    self.queue.put(("context", context))
-                    self.queue.put(("clear_replies", None))
-                self._handle_group_chat(wechat, context=context)
-            return True
-        if chat_type == "system":
-            self.queue.put(("status", "当前会话是系统会话，托管模式不会回复"))
-        else:
-            self.queue.put(("status", "当前会话类型无法可靠确认，托管模式不会回复"))
-        return True
-
-    def _handle_managed_personal(self, wechat: WeChatWindow, context: str) -> None:
-        """Sample personal managed chats on every poll, independent of preview cooldown."""
-        if not context.strip():
-            return
-        if context != getattr(self, "current_context", ""):
-            self.current_context = context
-            self.queue.put(("clear_replies", None))
-            self.queue.put(("context", context))
-        if not _should_auto_generate_for_context(
-            context,
-            force=False,
-            managed=True,
-            handled_messages=None,
-        ):
-            self.queue.put(("status", MSG["wait_other"]))
-            return
-        target_turn = _current_unreplied_turn(context)
-        if not target_turn:
-            self.queue.put(("status", MSG["wait_other"]))
-            return
-        self._schedule_generation(context, wechat, target_turn)
-
     def _conversation_list_bypass(self, wechat: WeChatWindow) -> None:
         """会话列表自动切换旁路（托管模式）。
 
@@ -665,7 +286,7 @@ class WeChatStyleReplyAssistant:
         最新消息角色由旁路自己截图 OCR 判定（不依赖主路 current_context，
         托管模式单独开启时主路不识别，current_context 恒为空会导致永不触发）。
         """
-        if not _managed_mode_enabled(self.settings) or self.bypass_switch_in_progress:
+        if not self.settings.managed_auto_reply or self.bypass_switch_in_progress:
             return
         # 一次全窗截图三用：聊天区 OCR 判角色 / 列表区红点 / 顶部标题区
         from capture_ocr import _capture_window_bitmap, _crop_detected_chat_area_with_origin
@@ -688,6 +309,12 @@ class WeChatStyleReplyAssistant:
         if context:
             latest_role, _latest_text = latest_meaningful_message(context)
         now = time.time()
+        if latest_role == "我":
+            if self.bypass_self_since == 0:
+                self.bypass_self_since = now
+        else:
+            self.bypass_self_since = 0.0
+        seconds_as_self = (now - self.bypass_self_since) if self.bypass_self_since else 0.0
         # 群聊：最新消息没 @ 我 = 聊天内容无变化 → 等同"我方发出"，也能触发扫描
         chat_type = getattr(self, "current_chat_type", "personal")
         group_idle = False
@@ -698,6 +325,13 @@ class WeChatStyleReplyAssistant:
             )
             if role_by_sender:
                 latest_role = role_by_sender
+                if latest_role == "我":
+                    if self.bypass_self_since == 0:
+                        self.bypass_self_since = now
+                    seconds_as_self = now - self.bypass_self_since
+                else:
+                    self.bypass_self_since = 0.0
+                    seconds_as_self = 0.0
             # 群聊里最新消息 @ 我 → 直接走群聊回复（不扫描列表）
             account_name = self.settings.wecom_account_name.strip()
             if latest_role == "对方" and account_name and self.group_handler.detect_at_mention(
@@ -706,15 +340,6 @@ class WeChatStyleReplyAssistant:
                 self._handle_group_chat(wechat, context, full)
                 return
             group_idle = self.group_handler.is_chat_idle(context, self.settings.wecom_account_name)
-        stable_for_scan = latest_role == "我" or (
-            chat_type == "group" and latest_role == "对方" and group_idle
-        )
-        if stable_for_scan:
-            if self.bypass_self_since == 0:
-                self.bypass_self_since = now
-        else:
-            self.bypass_self_since = 0.0
-        seconds_as_self = (now - self.bypass_self_since) if self.bypass_self_since else 0.0
         if not self.chat_state_guard.should_start_scan(
             True,
             latest_role,
@@ -726,21 +351,13 @@ class WeChatStyleReplyAssistant:
             group_idle=group_idle,
         ):
             return
-        # 全托管已获得用户授权：需要切换会话时主动恢复企业微信前台。
-        # 激活后仍严格核对原 HWND，不能把点击发到其他窗口。
+        self.bypass_last_scan_at = now
+        # 企业微信必须在最前台（不抢焦点，不在前台就等下一轮）
         if not WeChatSender._is_target_foreground(wechat):
-            if not self.sender.activate_verified_target(wechat):
-                return
-            if not WeChatSender._is_target_foreground(wechat):
-                return
+            return
         user_typing = self._user_typing_detected()
-        interrupt_role = (
-            "我"
-            if chat_type == "group" and latest_role == "对方" and group_idle
-            else latest_role
-        )
         if self.chat_state_guard.is_interrupted(
-            interrupt_role,
+            latest_role,
             user_typing,
             self.managed_send_inflight,
             self.processing,
@@ -748,12 +365,7 @@ class WeChatStyleReplyAssistant:
             self.bypass_retrying,
         ):
             return
-        # 前台可能刚被恢复，之前的全窗截图可能已过期；切换前必须重新截取左侧列表。
-        fresh_full = _capture_window_bitmap(wechat)
-        if fresh_full is None:
-            return
-        self.bypass_last_scan_at = time.time()
-        self._bypass_try_switch(wechat, fresh_full)
+        self._bypass_try_switch(wechat, full)
 
     def _bypass_try_switch(self, wechat: WeChatWindow, full=None) -> None:
         """执行一次扫描+切换（含重试与失败计数）。full 可复用旁路已截的全窗图。"""
@@ -767,31 +379,12 @@ class WeChatStyleReplyAssistant:
         if not hits:
             return
         title_before = self._read_top_title(full)
-        guard_cal = getattr(self.chat_state_guard, "cal", {})
-        attempts = 1 + int(guard_cal.get("timing", {}).get("retry_per_failure", 1))
+        attempts = 1 + int(self.chat_state_guard.cal.get("timing", {}).get("retry_per_failure", 1))
         success = False
-        attempted_switches = 0
-        actionable_seen = False
-        title_after = ""
-        row_avatar_type = ""
-        for hit in hits:
-            row_title = ""
-            try:
-                row_title_crop = self.chat_list_monitor.extract_row_title(full, hit)
-                row_title = self.ocr.read_chat_title(row_title_crop, limit=1)
-            except Exception:
-                row_title = ""
-            # 标题无法识别时不能证明它是可处理的个人/群聊；安全地跳过，
-            # 避免 OCR 暂时失效时误点九个系统入口。
-            if not str(row_title or "").strip():
-                continue
-            if self.chat_type_detector.detect(row_title) == "system":
-                continue
-            actionable_seen = True
-            if attempted_switches >= attempts:
+        for attempt in range(attempts):
+            if attempt >= len(hits):
                 break
-            self.bypass_retrying = attempted_switches > 0
-            attempted_switches += 1
+            self.bypass_retrying = attempt > 0
             if self.chat_state_guard.is_interrupted(
                 "我",
                 self._user_typing_detected(),
@@ -802,6 +395,7 @@ class WeChatStyleReplyAssistant:
             ):
                 self.bypass_retrying = False
                 return
+            hit = hits[attempt]
             # 切换前：用列表行头像预判会话类型（群聊九宫格 vs 个人单块）
             row_avatar_type = ""
             try:
@@ -816,7 +410,7 @@ class WeChatStyleReplyAssistant:
                 pyautogui.click(wechat.rect.left + x, wechat.rect.top + y)
             except Exception:
                 break
-            time.sleep(guard_cal.get("timing", {}).get("switch_wait_seconds", 1.2))
+            time.sleep(self.chat_state_guard.cal.get("timing", {}).get("switch_wait_seconds", 1.2))
             full_after = _capture_window_bitmap(wechat)
             if full_after is None:
                 continue
@@ -835,15 +429,12 @@ class WeChatStyleReplyAssistant:
             self.chat_identity.update_from_top_title(title_after)
             self._after_switch(wechat, title_after, row_avatar_type)
             return
-        # 红点全部来自系统入口：这是正常过滤，不得累计失败或触发暂停。
-        if not actionable_seen:
-            return
         # 切换失败
         self.bypass_fail_count += 1
-        max_failures = int(guard_cal.get("timing", {}).get("max_consecutive_failures", 3))
+        max_failures = int(self.chat_state_guard.cal.get("timing", {}).get("max_consecutive_failures", 3))
         if self.bypass_fail_count >= max_failures:
             self.bypass_fail_count = 0
-            pause = float(guard_cal.get("timing", {}).get("fail_pause_seconds", 300))
+            pause = float(self.chat_state_guard.cal.get("timing", {}).get("fail_pause_seconds", 300))
             self.bypass_paused_until = time.time() + pause
             self.queue.put(("bypass_alert", "会话切换连续失败，已暂停旁路 5 分钟。"))
 
@@ -852,6 +443,9 @@ class WeChatStyleReplyAssistant:
         # 重置主路状态（不破坏主路逻辑，仅通过 force 标志触发重识别）
         self.current_hash = ""
         self.current_context = ""
+        self.managed_last_handled_partner = ""
+        self.managed_last_handled_turn_messages = []
+        self.managed_last_handled_turn_key = ""
         self.force_refresh = True
         # 四分类分流（system 标题优先；group/personal 优先用列表行头像判定）
         full = None
@@ -917,7 +511,11 @@ class WeChatStyleReplyAssistant:
         if not self.group_handler.detect_at_mention(context, account_name):
             # 没 @ 我 → 聊天内容无变化，不回复
             return
+        # 防重：同一 @ 消息只回复一次（回复发送有延迟，800ms 轮询期间会重复触发）
         latest_msg = self.group_handler.latest_other_message(context)
+        if latest_msg and latest_msg == self.group_last_handled_msg:
+            return
+        self.group_last_handled_msg = latest_msg
         # @ 我：提取问题 + 发送者名字 → 复用现有决策链生成 → @ 回
         question = self.group_handler.extract_question(
             self.group_handler.latest_other_message(context), account_name
@@ -925,59 +523,26 @@ class WeChatStyleReplyAssistant:
         sender_name = self.group_handler.extract_sender_name(context)
         if not question.strip():
             return
-        queued_chat_identity = self._read_top_title(full).strip()
-        if not queued_chat_identity:
-            self.queue.put(("status", "群聊发送前无法确认聊天身份，已取消发送"))
+        replies = self.engine.generate(question, "群聊")
+        if not replies:
+            self.queue.put(("status", f"群聊 @ 回复：未找到合适回答（问题：{question[:30]}）"))
             return
-        self._send_group_reply(
-            wechat,
-            question,
-            sender_name=sender_name,
-            chat_identity=queued_chat_identity,
-        )
+        final_reply = self.group_handler.build_reply(sender_name, replies[0])
+        self._send_group_reply(wechat, final_reply, question)
 
-    def _send_group_reply(
-        self,
-        wechat: WeChatWindow,
-        question: str,
-        *,
-        sender_name: str = "",
-        chat_identity: str = "",
-    ) -> None:
-        """Submit a group decision to the single managed runtime worker."""
-        if not self._managed_reply_readiness_allows_send():
-            return
-        outgoing = lambda answer: self.group_handler.build_reply(sender_name, answer)
-        observation = self._capture_runtime_observation(wechat, chat_type="group")
-        if observation is None:
-            self.queue.put(("status", "群聊发送前实时识别失败，已取消发送"))
-            return
-        if (
-            observation.identity.top_title != normalize_chat_title(chat_identity)
-            or normalize_chat_title(observation.sender_name).casefold()
-            != normalize_chat_title(sender_name).casefold()
-            or _normalized_turn_tuple(observation.customer_turn)
-            != _normalized_turn_tuple((question,))
-        ):
-            self.queue.put(("status", "群聊发送前聊天身份或问题已变化，已取消发送"))
-            return
-        if (
-            self.settings.managed_mode == "observe"
-            and observation.turn_key in getattr(self, "observed_runtime_turns", set())
-        ):
-            return
-        if not self.stable_identity_tracker.observe(
-            observation.identity,
-            observation.turn_key,
-            now=time.monotonic(),
-        ):
-            self.queue.put(("status", "群聊仍在稳定识别中，本轮不发送"))
-            return
-        self._queue_runtime_observation(
-            observation,
-            wechat,
-            outgoing_text=outgoing,
-        )
+    def _send_group_reply(self, wechat: WeChatWindow, text: str, question: str) -> None:
+        """群聊回复发送（后台线程，避免阻塞监控循环）。"""
+        def _do_send() -> None:
+            try:
+                ok, message = self.sender.send(wechat, text)
+                if ok:
+                    self.queue.put(("status", f"群聊 @ 回复已发送：{text[:40]}"))
+                else:
+                    self.queue.put(("status", f"群聊回复发送失败：{message}"))
+            except Exception as exc:
+                self.queue.put(("status", f"群聊回复发送异常：{exc}"))
+
+        threading.Thread(target=_do_send, daemon=True).start()
 
     def _read_top_title(self, full_window_image) -> str:
         """顶部标题栏 OCR（会话标题/系统号名称）。"""
@@ -989,9 +554,6 @@ class WeChatStyleReplyAssistant:
             top = int(height * float(area.get("y_top", 0.0)))
             bottom = int(height * float(area.get("y_bottom", 0.10)))
             crop = full_window_image.crop((left, top, right, bottom))
-            title_reader = getattr(self.ocr, "read_chat_title", None)
-            if callable(title_reader):
-                return title_reader(crop, limit=3)
             return self.ocr.read_visible_text(crop, limit=3)
         except Exception:
             return ""
@@ -1029,10 +591,10 @@ class WeChatStyleReplyAssistant:
             # 群聊一律不走个人主路（force 也不行——切换后 force 重识别会重复处理群聊
             # 导致双重回复/状态卡死），群聊由旁路 _handle_group_chat 单独处理
             return
-        if _managed_mode_enabled(self.settings) and self.managed_send_inflight and not force:
+        if self.settings.managed_auto_reply and self.managed_send_inflight and not force:
             return
         self.processing = True
-        training_only = self.settings.training_mode and not self.settings.auto_recognize and not _managed_mode_enabled(self.settings) and not force
+        training_only = self.settings.training_mode and not self.settings.auto_recognize and not self.settings.managed_auto_reply and not force
         try:
             self.queue.put(("progress_clear", None))
             self._progress(MSG["step_located"].format(title=wechat.title))
@@ -1045,23 +607,14 @@ class WeChatStyleReplyAssistant:
                     self.sender.scroll_chat_to_bottom(wechat)
                 except Exception:
                     pass
-            image = _capture_chat_image_without_overlay(
-                self.ocr,
-                self.queue,
-                self.sender,
-                wechat,
-                allow_activate=not _managed_mode_enabled(self.settings),
-            )
+            image = _capture_chat_image_without_overlay(self.ocr, self.queue, self.sender, wechat)
             if image is None:
                 self.queue.put(("status", self.ocr.engine_error or MSG["no_text"]))
                 return
             self._progress(MSG["step_ocr"])
             context = self.ocr.read_image(image)
             latest_role, _latest_text = latest_meaningful_message(context)
-            if (
-                not _managed_mode_enabled(self.settings)
-                and (not context.strip() or latest_role != "对方")
-            ):
+            if not context.strip() or latest_role != "对方":
                 voice_context, voice_image = self._try_transcribe_latest_voice(wechat, image, context)
                 if voice_context and voice_context != context:
                     context = voice_context
@@ -1103,30 +656,54 @@ class WeChatStyleReplyAssistant:
             digest = hashlib.sha1(f"{wechat.title}\n{context}".encode("utf-8")).hexdigest()
             if _should_skip_unchanged_context(
                 force=force,
-                managed=_managed_mode_enabled(self.settings),
+                managed=self.settings.managed_auto_reply,
                 current_context=self.current_context,
                 new_context=context,
                 current_hash=self.current_hash,
                 digest=digest,
-                handled_messages=None,
+                handled_messages=self.managed_last_handled_turn_messages,
             ):
                 self.current_hash = digest
                 self.queue.put(("status", MSG["unchanged"]))
                 return
             self.current_hash = digest
             self.current_context = context
-            if _should_learn_observed_chat(self.settings.training_mode, _managed_mode_enabled(self.settings)):
+            if _should_learn_observed_chat(self.settings.training_mode, self.settings.managed_auto_reply):
                 self.memory.learn_from_chat_text(context)
             self.queue.put(("context", context))
             if training_only:
                 self.queue.put(("status", MSG["training_learned"]))
                 return
+            if self.settings.managed_auto_reply and self.managed_last_handled_partner != wechat.title:
+                self.managed_last_handled_turn_messages = []
+                self.managed_last_handled_turn_key = ""
+                self.managed_last_handled_partner = wechat.title
+            if self.settings.managed_auto_reply and self.managed_waiting_for_own_echo:
+                # 超时保护：等待自己的回声超过 8 秒仍识别不到时强制解除，
+                # 避免企业微信“我”气泡识别不出时永久卡死、不响应新消息。
+                if time.time() - self.managed_last_sent_at > 8.0:
+                    self.managed_waiting_for_own_echo = False
+                else:
+                    allow_generation, still_waiting = _managed_reply_gate_allows_generation(
+                        context,
+                        self.managed_waiting_for_own_echo,
+                        self.last_managed_sent_text,
+                        self.managed_last_handled_turn_messages,
+                        allow_new_without_own_echo=True,
+                    )
+                    self.managed_waiting_for_own_echo = still_waiting
+                    if still_waiting:
+                        self.queue.put(("status", MSG["wait_other"]))
+                        return
+                    if not allow_generation:
+                        self.queue.put(("status", MSG["wait_other"]))
+                        return
             latest_role, _latest_text = latest_meaningful_message(context)
             if not _should_auto_generate_for_context(
                 context,
                 force=force,
-                managed=_managed_mode_enabled(self.settings),
-                handled_messages=None,
+                managed=self.settings.managed_auto_reply,
+                handled_messages=self.managed_last_handled_turn_messages,
             ):
                 self.queue.put(("status", MSG["wait_other"]))
                 return
@@ -1139,7 +716,7 @@ class WeChatStyleReplyAssistant:
     def _schedule_generation(self, context: str, wechat: WeChatWindow, target_turn: list[str]) -> None:
         with self.generation_lock:
             if self.generation_inflight:
-                if _managed_mode_enabled(self.settings) and _turns_are_same_or_similar(
+                if self.settings.managed_auto_reply and _turns_are_same_or_similar(
                     self.generation_active_turn,
                     target_turn,
                 ):
@@ -1152,15 +729,10 @@ class WeChatStyleReplyAssistant:
 
     def _generation_worker(self, context: str, wechat: WeChatWindow, target_turn: list[str]) -> None:
         try:
-            if _managed_mode_enabled(self.settings):
-                replies = []
-            else:
-                replies = self.engine.generate(
-                    context, wechat.title, target_turn=target_turn
-                )
+            replies = self.engine.generate(context, wechat.title, target_turn=target_turn)
             with self.generation_lock:
                 has_newer_pending = self.pending_generation is not None
-            if _managed_mode_enabled(self.settings):
+            if self.settings.managed_auto_reply:
                 result_current = _managed_generation_result_still_current(
                     target_turn,
                     wechat,
@@ -1175,12 +747,10 @@ class WeChatStyleReplyAssistant:
                     self.current_window,
                 )
             if not has_newer_pending and result_current:
-                if _managed_mode_enabled(self.settings):
-                    self._maybe_managed_send(context, replies)
-                else:
-                    self.queue.put(("replies", replies))
-                    self.queue.put(("reply_source", self._reply_source_label()))
-                    self.queue.put(("status", self._generated_status(len(replies))))
+                self.queue.put(("replies", replies))
+                self.queue.put(("reply_source", self._reply_source_label()))
+                self.queue.put(("status", self._generated_status(len(replies))))
+                self._maybe_managed_send(context, replies)
         finally:
             next_job = None
             with self.generation_lock:
@@ -1220,21 +790,8 @@ class WeChatStyleReplyAssistant:
                 break
 
             if kind == "idle":
-                if (
-                    _managed_mode_enabled(self.settings)
-                    and self.current_window is not None
-                    and self.current_context.strip()
-                ):
-                    self.ui.set_partner(MSG["current"].format(
-                        title=getattr(
-                            self.current_window,
-                            "display_title",
-                            self.current_window.title,
-                        )
-                    ))
-                else:
-                    self.ui.set_partner(MSG["idle_partner"])
-                    self.ui.set_status(MSG["idle_status"])
+                self.ui.set_partner(MSG["idle_partner"])
+                self.ui.set_status(MSG["idle_status"])
             elif kind == "window" and isinstance(data, WeChatWindow):
                 self.ui.set_partner(MSG["current"].format(title=getattr(data, "display_title", data.title)))
                 if not self.settings.auto_recognize:
@@ -1252,8 +809,6 @@ class WeChatStyleReplyAssistant:
                     data.set()
             elif kind == "show_after_capture":
                 self.ui.root.deiconify()
-            elif kind == "startup_baseline_complete":
-                self._complete_startup_baseline(data is True)
             elif kind == "status":
                 self.ui.set_status(str(data))
             elif kind == "progress":
@@ -1319,29 +874,17 @@ class WeChatStyleReplyAssistant:
         self.ui.show_settings_dialog()
 
     def _import_training_zip(self, zip_path: str, progress=None) -> str:
-        # 结构化问答直接读取；非结构化文档整篇提取并逐字核对来源。
-        # 暂存或来源校验存在致命错误时不会触碰正式知识库。
-        report = stage_training_import(
+        # 知识库导入统一走大模型识别（任意格式文档 → 提取问答对，叠加进企业年报总库）；
+        # 未配置 API Key 或识别失败会抛错，由 UI 弹窗提示。
+        stats = import_chat_zip_to_memory_with_llm(
             Path(zip_path),
+            self.memory,
             self.settings,
+            max_examples=self.memory.max_examples,
             progress=progress,
         )
-        audit = activate_training_import(report, self.memory)
         self.memory.load()
-        self.engine = ReplyEngine(self.settings, self.memory)
-        result = MSG["training_imported"].format(
-            files=len(report.completed_files),
-            turns=len(report.records),
-            examples=len(report.records),
-        )
-        if report.pending_count:
-            result += f" 其中 {report.pending_count} 条进入待确认区，不会自动发送。"
-        if audit.conflict_record_count:
-            result += (
-                f" 审计后知识库有 {audit.conflict_record_count} 条冲突记录，"
-                "不会自动发送。"
-            )
-        return result
+        return MSG["training_imported"].format(**stats)
 
     def _analyze_sop_training(self, source_path: str) -> str:
         report = analyze_training_source_to_memory(
@@ -1458,247 +1001,9 @@ class WeChatStyleReplyAssistant:
             self.ui.set_status(MSG["no_window"])
             return
         self.current_window = wechat
-        send_enabled = getattr(self.settings, "managed_mode", "off") in {
-            "controlled",
-            "full",
-        }
-        work = (
-            self._managed_recognize_current
-            if send_enabled
-            else self._manual_managed_preview
-        )
-        threading.Thread(
-            target=lambda: work(wechat),
-            daemon=True,
-        ).start()
-
-    def _managed_recognize_current(self, wechat: WeChatWindow) -> None:
-        """Process an explicit click through the real managed-send pipeline.
-
-        The click may release only the exact startup-baseline entry currently
-        visible.  Every other safety gate remains mandatory: two stable OCR
-        samples, exact chat/turn identity, serialized preparation, a fresh
-        preflight capture, the durable ledger and outgoing-bubble verification.
-        """
-        self.queue.put(("status", "正在识别当前聊天并准备托管发送…"))
-        if not self._managed_reply_readiness_allows_send():
-            return
-
-        observation = self._capture_runtime_observation(wechat)
-        if observation is None:
-            self.queue.put(("clear_replies", None))
-            self.queue.put(("status", "当前聊天无法可靠识别，未进入发送队列"))
-            return
-        if observation.identity.chat_type == "group":
-            account_name = str(
-                getattr(self.settings, "wecom_account_name", "") or ""
-            ).strip()
-            if not account_name or not self.group_handler.detect_at_mention(
-                observation.context,
-                account_name,
-            ):
-                self.queue.put(("clear_replies", None))
-                self.queue.put((
-                    "status",
-                    "已识别群聊；最新消息未 @ 当前账号，不进入发送队列",
-                ))
-                return
-
-        self.current_context = observation.context
-        self.current_chat_type = observation.identity.chat_type
-        self.queue.put(("context", observation.context))
-        self.queue.put(("clear_replies", None))
-
-        if not self.stable_identity_tracker.observe(
-            observation.identity,
-            observation.turn_key,
-            now=time.monotonic(),
-        ):
-            delay = max(
-                0.2,
-                float(getattr(self.settings, "auto_reply_delay_seconds", 1.2)),
-            )
-            time.sleep(delay)
-            fresh = self._capture_runtime_observation(wechat)
-            if (
-                fresh is None
-                or fresh.identity != observation.identity
-                or fresh.context_hash != observation.context_hash
-                or fresh.turn_key != observation.turn_key
-            ):
-                self.queue.put(("status", "聊天对象或最新问题已变化，未进入发送队列"))
-                return
-            observation = fresh
-            if not self.stable_identity_tracker.observe(
-                observation.identity,
-                observation.turn_key,
-                now=time.monotonic(),
-            ):
-                self.queue.put(("status", "当前聊天识别尚未稳定，请稍后再试"))
-                return
-
-        try:
-            baselines = getattr(self, "_startup_baseline_turns", None)
-            slot = self._startup_baseline_slot(observation)
-            baseline_turn = baselines.get(slot) if isinstance(baselines, dict) else None
-            occurrences = getattr(self, "_startup_baseline_occurrences", None)
-            baseline_evidence = (
-                occurrences.get(slot) if isinstance(occurrences, dict) else None
-            )
-            baseline_marker = (
-                baseline_evidence[0]
-                if isinstance(baseline_evidence, tuple) and len(baseline_evidence) == 2
-                else observation.occurrence_marker
-            )
-            baseline_key = (
-                turn_fingerprint(
-                    observation.identity,
-                    baseline_turn,
-                    sender_name=observation.sender_name,
-                    occurrence_marker=baseline_marker,
-                )
-                if baseline_turn
-                else ""
-            )
-            keys = tuple(dict.fromkeys((observation.turn_key, baseline_key)))
-            released = False
-            for turn_key in (key for key in keys if key):
-                ledger_status = self.send_ledger.status(turn_key)
-                if ledger_status == "baseline":
-                    if not self.send_ledger.release_baseline(turn_key):
-                        self.queue.put(("status", "当前消息的启动基线无法解除，未发送"))
-                        return
-                    released = True
-                elif ledger_status in {"prepared", "keypress"}:
-                    self.queue.put(("status", "当前消息正在发送复核中，请稍候"))
-                    return
-                elif ledger_status == "verified":
-                    self.queue.put(("status", "当前这条消息已回复；对方重新提问时会再次处理"))
-                    return
-                elif ledger_status == "uncertain":
-                    # 即使稳定跟踪器已被后台轮询预热，手动自愈也必须独立
-                    # 留出至少一秒，让迟到的我方气泡有机会出现在 fresh capture 中。
-                    time.sleep(1.0)
-                    fresh_unreplied = self._capture_runtime_observation(wechat)
-                    visibly_unsent = bool(
-                        turn_key == observation.turn_key
-                        and fresh_unreplied is not None
-                        and fresh_unreplied.identity == observation.identity
-                        and fresh_unreplied.turn_key == observation.turn_key
-                    )
-                    if not visibly_unsent:
-                        self.queue.put((
-                            "status",
-                            "上次发送结果无法确认，为防止重复发送已暂停；请人工核对当前聊天",
-                        ))
-                        return
-                    if not self.send_ledger.reconcile_uncertain_not_sent(turn_key):
-                        self.queue.put((
-                            "status",
-                            "该问题的安全重试次数已用完，仍未确认发出，请人工发送",
-                        ))
-                        return
-                    self.queue.put((
-                        "status",
-                        "已确认上次未实际发出，正在进行唯一一次安全重试",
-                    ))
-            if isinstance(baselines, dict) and (released or baseline_turn):
-                baselines.pop(slot, None)
-                if isinstance(occurrences, dict):
-                    occurrences.pop(slot, None)
-        except LedgerBlockingError as error:
-            self._block_managed_for_ledger(error)
-            return
-
-        kwargs = {}
-        if observation.identity.chat_type == "group":
-            sender_name = observation.sender_name
-            kwargs["outgoing_text"] = lambda answer: self.group_handler.build_reply(
-                sender_name,
-                answer,
-            )
-        accepted = self._queue_runtime_observation(observation, wechat, **kwargs)
-        if accepted:
-            _diag("send_queued")
-            self.queue.put(("status", "已进入串行知识库匹配与发送复核队列"))
-        else:
-            status = self.send_ledger.status(observation.turn_key)
-            messages = {
-                "prepared": "当前消息正在发送复核中，请稍候",
-                "keypress": "当前消息正在发送复核中，请稍候",
-                "verified": "当前这条消息已回复；对方重新提问时会再次处理",
-                "uncertain": "上次发送结果无法确认，为防止重复发送已暂停；请人工核对当前聊天",
-            }
-            self.queue.put(("status", messages.get(status, "当前消息未进入发送队列，请重新识别")))
-
-    def _manual_managed_preview(self, wechat: WeChatWindow) -> None:
-        """Build a knowledge-only preview without entering any send authority."""
-        self.queue.put(("status", MSG["recognizing"]))
-        title, chat_type, context = self._capture_runtime_source(wechat)
-        self.current_chat_type = chat_type
-        self.queue.put(("window", wechat))
-        if not context.strip():
-            self.queue.put(("clear_replies", None))
-            self.queue.put(("status", MSG["manual_ocr_empty"]))
-            return
-
-        self.current_context = context
-        self.queue.put(("context", context))
-        target_turn: list[str]
-        sender_name = ""
-        if chat_type == "group":
-            account_name = str(getattr(self.settings, "wecom_account_name", "") or "").strip()
-            if not account_name or not self.group_handler.detect_at_mention(context, account_name):
-                self.queue.put(("clear_replies", None))
-                self.queue.put(("status", MSG["manual_group_no_mention"]))
-                return
-            latest_message = self.group_handler.latest_other_message(context)
-            question = self.group_handler.extract_question(latest_message, account_name)
-            sender_name = self.group_handler.extract_sender_name(context)
-            if not question.strip() or not sender_name.strip():
-                self.queue.put(("clear_replies", None))
-                self.queue.put(("status", MSG["manual_ocr_empty"]))
-                return
-            target_turn = [question]
-        elif chat_type == "personal":
-            target_turn = _current_unreplied_turn(context)
-            if not target_turn:
-                self.queue.put(("clear_replies", None))
-                self.queue.put(("status", MSG["manual_ocr_empty"]))
-                return
-        else:
-            self.queue.put(("clear_replies", None))
-            self.queue.put(("status", "当前会话类型无法可靠确认，仅预览未发送"))
-            return
-
-        try:
-            decision = self.engine.decide_managed(context, list(target_turn))
-        except Exception:
-            decision = None
-        if not isinstance(decision, ReplyDecision) or decision.kind == "technical_failure":
-            self.queue.put(("clear_replies", None))
-            self.queue.put(("status", MSG["manual_match_error"]))
-            return
-
-        reply = decision.text
-        if chat_type == "group":
-            reply = self.group_handler.build_reply(sender_name, reply)
-        self.queue.put(("replies", [reply]))
-        self.queue.put(("reply_source", self._reply_source_label()))
-        self.queue.put(("status", MSG["manual_preview_ready"]))
+        threading.Thread(target=lambda: self._process_window(wechat, force=True), daemon=True).start()
 
     def _auto_changed(self, enabled: bool) -> None:
-        if getattr(self, "startup_blocking_error", ""):
-            self.settings.auto_recognize = False
-            self.settings.training_mode = False
-            auto_var = getattr(self.ui, "auto_var", None)
-            if auto_var is not None:
-                auto_var.set(False)
-            self.ui.set_status(self.startup_blocking_error)
-            return
-        if enabled and getattr(self, "_startup_baseline_pending", False):
-            self.ui.set_status("正在初始化文字识别并建立启动防重复基线，请稍候")
-            return
         self.current_hash = ""
         self.last_capture = 0.0
         self.ui.set_status(MSG["auto_on"] if enabled else MSG["auto_off"])
@@ -1709,19 +1014,8 @@ class WeChatStyleReplyAssistant:
                 threading.Thread(target=lambda: self._process_window(wechat, force=True), daemon=True).start()
 
     def _training_changed(self, enabled: bool) -> None:
-        if getattr(self, "startup_blocking_error", ""):
-            self.settings.auto_recognize = False
-            self.settings.training_mode = False
-            training_var = getattr(self.ui, "training_var", None)
-            if training_var is not None:
-                training_var.set(False)
-            self.ui.set_status(self.startup_blocking_error)
-            return
         self.settings.training_mode = enabled
         self.settings.save()
-        if enabled and getattr(self, "_startup_baseline_pending", False):
-            self.ui.set_status("正在初始化文字识别并建立启动防重复基线，请稍候")
-            return
         self.current_hash = ""
         self.last_capture = 0.0
         self.ui.set_status(MSG["training_on"] if enabled else MSG["training_off"])
@@ -1731,279 +1025,26 @@ class WeChatStyleReplyAssistant:
                 self.current_window = wechat
                 threading.Thread(target=lambda: self._process_window(wechat, force=False), daemon=True).start()
 
-    def _managed_mode_changed(self, mode: str) -> None:
-        if getattr(self, "startup_blocking_error", ""):
-            self._blocked_managed_mode("off")
-            return
-        selected = mode if mode in {"off", "observe", "controlled", "full"} else "off"
-        self.settings.managed_mode = selected
-        self.observed_runtime_turns = set()
-        if selected != "off":
+    def _managed_changed(self, enabled: bool) -> None:
+        self.settings.managed_auto_reply = enabled
+        if enabled:
             self.settings.auto_recognize = True
             self.last_capture = 0.0
-            self._startup_baseline_pending = True
-            self._startup_baseline_retry_after = 0.0
-            self.settings.save()
-            self.ui.set_status("正在初始化文字识别并建立启动防重复基线，请稍候")
-            return
-        self._startup_baseline_pending = False
-        self._startup_baseline_retry_after = 0.0
+            self.managed_waiting_for_own_echo = False
+            self.managed_last_handled_turn_messages = []
+            self.managed_last_handled_turn_key = ""
+            self.managed_last_sent_at = 0.0
+            self.managed_last_handled_partner = ""
         self.settings.save()
-        self.ui.set_status(MSG["managed_off"])
-
-    def _managed_changed(self, enabled: bool) -> None:
-        """Compatibility callback for older UI builds without collapsing new modes."""
-        if type(enabled) is not bool:
-            return
-        if getattr(self, "startup_blocking_error", ""):
-            self.settings.managed_mode = "off"
-            self.ui.set_status(self.startup_blocking_error)
-            return
-        current = getattr(self.settings, "managed_mode", "off")
+        self.ui.set_status(MSG["managed_on"] if enabled else MSG["managed_off"])
         if enabled:
-            selected = "full"
-        elif current in {"observe", "controlled"}:
-            selected = current
-        else:
-            selected = "off"
-        self.settings.managed_mode = selected
-        if selected != "off":
-            self.settings.auto_recognize = True
-        self.settings.save()
-        self.ui.set_status(MSG["managed_on"] if selected != "off" else MSG["managed_off"])
-
-    def _blocked_managed_mode(self, _mode: str, *, persist: bool = True) -> None:
-        del persist
-        self.settings.managed_mode = "off"
-        managed_var = getattr(self.ui, "managed_var", None)
-        if managed_var is not None:
-            managed_var.set(managed_mode_label("off"))
-        self.ui.set_status(self.startup_blocking_error)
-
-    def _install_blocking_startup_guards(self) -> None:
-        self.settings.managed_mode = "off"
-        self.settings.auto_recognize = False
-        self.settings.training_mode = False
-        self.settings.save = self._blocked_settings_save
-
-    def _blocked_settings_save(self) -> None:
-        self.settings.managed_mode = "off"
-        self.settings.auto_recognize = False
-        self.settings.training_mode = False
-
-    def _block_managed_for_ledger(self, error: BaseException) -> None:
-        self.settings.managed_mode = "off"
-        self.startup_blocking_error = (
-            "发送台账不可用，已关闭托管自动发送；请修复台账后重启。"
-        )
-        queue = getattr(self, "queue", None)
-        if queue is not None:
-            queue.put(("status", self.startup_blocking_error))
-        _diag("ledger_blocked", error_category=type(error).__name__)
-
-    def _ledger_is_handled(self, turn_key: str) -> bool:
-        try:
-            return self.send_ledger.contains(turn_key)
-        except LedgerBlockingError as error:
-            self._block_managed_for_ledger(error)
-            return True
-
-    def _baseline_visible_turn(
-        self,
-        window: WeChatWindow,
-        context: str,
-        *,
-        chat_type: str,
-        sender_name: str = "",
-    ) -> bool:
-        if chat_type == "group":
-            latest = self.group_handler.latest_other_message(context)
-            turn_messages = [latest] if latest.strip() else []
-        else:
-            turn_messages = _current_unreplied_turn(context)
-        if not turn_messages:
-            return True
-        turn_key = _ledger_turn_key(
-            window.title,
-            chat_type,
-            turn_messages,
-            sender_name=sender_name,
-            boundary=_latest_own_message_before_current_turn(context),
-        )
-        try:
-            self.send_ledger.baseline(
-                turn_key,
-                _ledger_identity_key(window.title, chat_type, sender_name=sender_name),
-            )
-        except LedgerBlockingError as error:
-            self._block_managed_for_ledger(error)
-            return False
-        return True
-
-    def _establish_startup_baseline(self) -> bool:
-        try:
-            window = self.detector.foreground_chat()
-            if window is None:
-                visible_chat = getattr(self.detector, "any_chat_window", None)
-                window = visible_chat() if callable(visible_chat) else None
-            if window is None:
-                return self._defer_unreadable_startup_baseline()
-            observation = None
-            idle_state: tuple[str, str, str] | None = None
-            for attempt in range(3):
-                if attempt:
-                    current_window = self.detector.foreground_chat()
-                    if current_window is None:
-                        visible_chat = getattr(self.detector, "any_chat_window", None)
-                        current_window = visible_chat() if callable(visible_chat) else None
-                    if not _same_strict_send_window(window, current_window):
-                        return self._defer_unreadable_startup_baseline()
-                    window = current_window
-                observation = self._capture_runtime_observation(window)
-                if observation is not None:
-                    break
-                idle_state = self._readable_idle_startup_context(window)
-                if idle_state is not None:
-                    break
-                if attempt < 2:
-                    time.sleep(0.25)
-            if observation is None:
-                if idle_state is None:
-                    return self._defer_unreadable_startup_baseline()
-                _title, chat_type, context = idle_state
-                self.current_window = window
-                self.current_context = context
-                self.current_chat_type = chat_type
-                self._publish_startup_baseline_context(window, context)
-                return True
-            self.current_window = window
-            self.current_context = observation.context
-            self.current_chat_type = observation.identity.chat_type
-            self._publish_startup_baseline_context(window, observation.context)
-            existing_status = self.send_ledger.status(observation.turn_key)
-            baseline_created = self.send_ledger.baseline(
-                observation.turn_key,
-                observation.identity.key,
-            )
-            baseline_turns = getattr(self, "_startup_baseline_turns", None)
-            if not isinstance(baseline_turns, dict):
-                baseline_turns = {}
-                self._startup_baseline_turns = baseline_turns
-            if baseline_created or existing_status == "baseline":
-                slot = self._startup_baseline_slot(observation)
-                baseline_turns[slot] = tuple(observation.customer_turn)
-                baseline_occurrences = getattr(
-                    self,
-                    "_startup_baseline_occurrences",
-                    None,
-                )
-                if not isinstance(baseline_occurrences, dict):
-                    baseline_occurrences = {}
-                    self._startup_baseline_occurrences = baseline_occurrences
-                baseline_occurrences[slot] = (
-                    observation.occurrence_marker,
-                    _visible_turn_occurrence_count(
-                        observation.context,
-                        observation.customer_turn,
-                    ),
-                )
-            self.stable_identity_tracker.observe(
-                observation.identity,
-                observation.turn_key,
-                now=time.monotonic(),
-            )
-            return True
-        except LedgerBlockingError as error:
-            self._block_managed_for_ledger(error)
-            return False
-        except Exception:
-            return self._defer_unreadable_startup_baseline()
-
-    def _publish_startup_baseline_context(
-        self,
-        window: WeChatWindow,
-        context: str,
-    ) -> None:
-        """Publish the first readable snapshot even when later OCR is unchanged."""
-        queue = getattr(self, "queue", None)
-        if queue is None:
-            return
-        queue.put(("window", window))
-        queue.put(("clear_replies", None))
-        queue.put(("context", context))
-
-    def _readable_idle_startup_context(
-        self,
-        window: WeChatWindow,
-    ) -> tuple[str, str, str] | None:
-        try:
-            title, chat_type, context = self._capture_runtime_source(window)
-        except Exception:
-            return None
-        if (
-            not title
-            or chat_type not in {"personal", "group"}
-            or not context.strip()
-        ):
-            return None
-        if chat_type == "personal":
-            if _current_unreplied_turn(context):
-                return None
-        else:
-            latest = self.group_handler.latest_other_message(context)
-            question = self.group_handler.extract_question(
-                latest,
-                self.settings.wecom_account_name,
-            )
-            if question.strip():
-                return None
-        return title, chat_type, context
-
-    def _defer_unreadable_startup_baseline(self) -> bool:
-        """Keep observing after transient OCR/window failure while sends stay gated."""
-        self._startup_baseline_pending = True
-        message = (
-            "暂未识别到可建立启动基线的聊天，已保持持续识别并自动重试；托管发送暂缓。"
-        )
-        queue = getattr(self, "queue", None)
-        if queue is not None:
-            queue.put(("status", message))
-        return False
-
-    def _managed_reply_readiness_allows_send(self) -> bool:
-        if getattr(self, "startup_blocking_error", ""):
-            self.settings.managed_mode = "off"
-            self.queue.put(("status", self.startup_blocking_error))
-            return False
-        if getattr(self, "_startup_baseline_pending", False):
-            self.queue.put((
-                "status",
-                "正在初始化文字识别并建立启动防重复基线，请稍候",
-            ))
-            return False
-        try:
-            _ensure_diag_logger()
-        except RuntimeLoggerUnavailableError:
-            self.settings.managed_mode = "off"
-            message = "诊断日志安全基础不可用，已关闭托管自动发送；请修复日志盐文件后重启。"
-            self.queue.put(("status", message))
-            return False
-        if not _managed_mode_enabled(self.settings):
-            self.queue.put(("status", MSG["managed_off"]))
-            return False
-        memory = getattr(self, "memory", None)
-        if memory is None:
-            self.settings.managed_mode = "off"
-            self.queue.put(("status", MSG["managed_vector_blocked"]))
-            return False
-        try:
-            memory.assert_ready_for_managed_reply()
-        except VectorIndexError:
-            self.settings.managed_mode = "off"
-            _diag("vector_index_not_ready", error_category="vector")
-            self.queue.put(("status", MSG["managed_vector_blocked"]))
-            return False
-        return True
+            self.current_hash = ""
+            wechat = self._target_wechat_window()
+            if wechat:
+                self.current_window = wechat
+                threading.Thread(target=lambda: self._process_window(wechat, force=True), daemon=True).start()
+            else:
+                self.ui.set_status(MSG["no_window"])
 
     def _source_mode_changed(self, mode: str) -> None:
         self.settings.reply_source_mode = mode if mode in {"model", "memory", "model_memory"} else "model_memory"
@@ -2012,288 +1053,129 @@ class WeChatStyleReplyAssistant:
         self.ui.set_status(f"回复来源已切换为：{names.get(self.settings.reply_source_mode, '大模型+话术库')}")
 
     def _target_wechat_window(self) -> WeChatWindow | None:
-        return self._visible_wecom_target()
+        return _choose_target_wechat_window(
+            self.detector.foreground_chat(),
+            self.detector.any_chat_window(),
+            self.current_window,
+        )
 
-    def _visible_wecom_target(self) -> WeChatWindow | None:
-        """Return a visible WeCom window without changing foreground focus."""
-        try:
-            foreground = self.detector.foreground_chat()
-        except Exception:
-            foreground = None
-        if foreground is not None:
-            return foreground
-
-        current = self._revalidated_send_window(getattr(self, "current_window", None))
-        if current is not None:
-            return current
-        try:
-            return self.detector.any_chat_window()
-        except Exception:
-            return None
-
-    def _revalidated_send_window(
-        self,
-        expected_window: WeChatWindow | None,
-    ) -> WeChatWindow | None:
-        if expected_window is None:
-            return None
-        hwnd = int(getattr(expected_window, "hwnd", 0) or 0)
-        resolver = getattr(self.detector, "window_from_hwnd", None)
-        if not hwnd or not callable(resolver):
-            return None
-        try:
-            live = resolver(hwnd)
-        except Exception:
-            return None
-        if not _same_strict_send_window(expected_window, live):
-            return None
-        return live
-
-    def _prepare_managed_send_window(
-        self,
-        expected: ChatObservation,
-        expected_window: WeChatWindow,
-    ) -> SendWindowPreparation:
-        """Safely hand focus from this assistant to the exact queued WeCom HWND."""
-        live = self._revalidated_send_window(expected_window)
-        if (
-            live is None
-            or int(getattr(live, "hwnd", 0) or 0) != expected.identity.hwnd
-            or str(getattr(getattr(live, "platform", None), "key", "") or "")
-            != "wecom"
-        ):
-            return "target_window_unavailable"
-
-        foreground_hwnd = getattr(self.detector, "foreground_hwnd", None)
-        root_hwnd = getattr(self.detector, "root_hwnd", None)
-        if not callable(foreground_hwnd) or not callable(root_hwnd):
-            return "activation_failed"
-        try:
-            raw_foreground = int(foreground_hwnd() or 0)
-            foreground_root = int(root_hwnd(raw_foreground) or raw_foreground)
-            target_hwnd = int(getattr(live, "hwnd", 0) or 0)
-            target_root = int(root_hwnd(target_hwnd) or target_hwnd)
-        except Exception:
-            return "activation_failed"
-        if not raw_foreground or not foreground_root or not target_root:
-            return "activation_failed"
-        if foreground_root == target_root:
-            return "ready"
-
-        # 全托管模式下用户已授权程序主动恢复企业微信前台。
-        # 仍只激活排队时已经锁定、且刚刚通过 HWND/平台复核的窗口。
-        try:
-            activated = self.sender.activate_verified_target(live)
-        except Exception:
-            activated = False
-        if activated is not True:
-            return "activation_failed"
-
-        try:
-            confirmed_raw = int(foreground_hwnd() or 0)
-            confirmed_root = int(root_hwnd(confirmed_raw) or confirmed_raw)
-        except Exception:
-            return "activation_failed"
-        if confirmed_root != target_root:
-            return "activation_failed"
-        if self._revalidated_send_window(live) is None:
-            return "target_window_unavailable"
-        return "ready"
-
-    def _maybe_managed_send(
-        self,
-        context: str,
-        replies: list[str],
-        *,
-        managed_decision: ReplyDecision | None = None,
-    ) -> None:
-        del replies, managed_decision
-        if not _managed_mode_enabled(self.settings) or not self.current_window:
-            _diag("managed_preconditions_not_met")
-            return
-        if self.managed_send_inflight:
-            _diag("send_already_pending")
-            return
-        if not self._managed_reply_readiness_allows_send():
+    def _maybe_managed_send(self, context: str, replies: list[str]) -> None:
+        if not self.settings.managed_auto_reply or not replies or not self.current_window:
+            _diag("[send-skip] 前置条件不满足", "managed=", self.settings.managed_auto_reply, "replies=", len(replies), "window=", self.current_window is not None)
             return
         send_window = self.current_window
+        if _managed_api_failure_blocks_send(self.settings, self.engine):
+            _diag("[send-block] api_failure_blocks_send", "last_error=", self.engine.last_error, "last_source=", self.engine.last_source)
+            self.queue.put(("status", MSG["api_failed_stop_send"]))
+            return
         unreplied_messages = _current_unreplied_turn(context)
-        latest_role, _latest_text = latest_meaningful_message(context)
+        latest_role, latest_text = latest_meaningful_message(context)
         if latest_role != "对方" and not unreplied_messages:
-            _diag("latest_message_not_partner")
+            _diag("[send-block] 最后消息非对方且无未回复", "latest_role=", latest_role, "unreplied=", unreplied_messages)
             self.queue.put(("status", MSG["wait_other"]))
             return
         if not unreplied_messages:
-            _diag("no_unreplied_message")
+            _diag("[send-block] 无未回复消息", "context=", context[:120])
             self.queue.put(("status", MSG["wait_other"]))
             return
-        observation = self._capture_runtime_observation(send_window, chat_type="personal")
-        if observation is None:
-            _diag("preflight_rejected", error_category="fresh_capture")
-            self.queue.put(("status", MSG["managed_preflight_blocked"].format(
-                reason="发送前无法重新识别当前聊天内容"
-            )))
-            return
-        if _normalized_turn_tuple(observation.customer_turn) != _normalized_turn_tuple(
-            tuple(unreplied_messages)
-        ):
-            _diag("preflight_rejected", error_category="turn_changed")
-            self.queue.put(("status", MSG["managed_preflight_blocked"].format(
-                reason="对方最新问题已变化，需要重新匹配"
-            )))
+        signature = _managed_turn_cycle_signature(send_window.title, context, unreplied_messages)
+        same_handled_cycle = (
+            bool(self.managed_last_handled_turn_key)
+            and signature == self.managed_last_handled_turn_key
+            and _turns_are_same_or_similar(self.managed_last_handled_turn_messages, unreplied_messages)
+        )
+        if same_handled_cycle:
+            _diag("[send-block] 同一轮已处理过", "signature=", signature[:24])
+            self.queue.put(("status", MSG["wait_other"]))
             return
         if (
-            self.settings.managed_mode == "observe"
-            and observation.turn_key in getattr(self, "observed_runtime_turns", set())
+            signature == self.last_auto_reply_signature
+            or signature == self.pending_auto_reply_signature
+            or signature in self.handled_auto_reply_signatures
+            or self.managed_send_inflight
         ):
+            _diag("[send-block] 签名已处理/发送中", "sig=", signature[:24], "inflight=", self.managed_send_inflight)
+            self.queue.put(("status", MSG["wait_other"]))
             return
-        if not self.stable_identity_tracker.observe(
-            observation.identity,
-            observation.turn_key,
-            now=time.monotonic(),
-        ):
-            self.queue.put(("status", "当前聊天仍在稳定识别中，本轮不发送"))
-            return
-        accepted = self._queue_runtime_observation(observation, send_window)
-        if accepted:
-            _diag("send_queued")
-            self.queue.put(("status", "已进入串行知识库匹配与发送复核队列"))
-
-    def _capture_runtime_source(
-        self,
-        window: WeChatWindow,
-    ) -> tuple[str, str, str]:
-        """Capture title, eligible chat type and OCR context from one fresh bitmap."""
-        from capture_ocr import _capture_window_bitmap, _crop_detected_chat_area_with_origin
-
-        full = _capture_window_bitmap(window)
-        if full is None:
-            return "", "unknown", ""
-        title = normalize_chat_title(self._read_top_title(full))
-        chat_type = self.chat_type_detector.detect(title, full)
-        if chat_type not in {"personal", "group"}:
-            return title, chat_type, ""
-        platform_key = str(getattr(getattr(window, "platform", None), "key", "") or "wecom")
-        platform_area = getattr(
-            getattr(window, "platform", None),
-            "chat_area",
-            self.settings.chat_area,
+        selection_context = _turn_messages_to_context(unreplied_messages)
+        # 企业库命中后的一致性判断已由 generate() 内完成（一致才返回答案，不一致返回未命中），
+        # 这里直接选择候选发送。
+        text = _select_managed_reply(
+            selection_context,
+            replies,
+            prefer_model_order="API" in self.engine.last_source,
         )
+        if not text:
+            _diag("[send-skip] 未选中候选文本", "replies=", replies)
+            return
+        if len(unreplied_messages) == 1:
+            text = _single_wechat_message(text)
+        self.pending_auto_reply_signature = signature
+        self.managed_send_inflight = True
+        self.managed_waiting_for_own_echo = False
+        _diag("[send-go] 启动发送线程", "sig=", signature[:24], "text=", text[:40])
+        self.queue.put(("status", MSG["auto_sending"].format(text=text)))
+
+        def delayed_send() -> None:
+            try:
+                time.sleep(self.settings.auto_reply_delay_seconds)
+                live_window = _managed_live_send_window(self.detector, send_window)
+                latest_context = self._managed_preflight_context(live_window)
+                _diag("[preflight] 重定位窗口", "live_window=", live_window is not None, "preflight_ctx_len=", len(latest_context or ""))
+                latest_context = _managed_preflight_context_or_cached(
+                    send_window,
+                    live_window,
+                    context,
+                    latest_context,
+                    getattr(self, "current_context", ""),
+                )
+                allowed, reason = _managed_send_preflight_allows(send_window, live_window, context, latest_context)
+                if not allowed:
+                    self.pending_auto_reply_signature = ""
+                    _diag("[send-block] preflight 未通过:", reason)
+                    self.queue.put(("status", MSG["managed_preflight_blocked"].format(reason=reason)))
+                    return
+                ok, message = self.sender.send(live_window, text)
+                _diag("[send-result]", "ok=", ok, "message=", message)
+                if ok:
+                    self.last_auto_reply_signature = signature
+                    self.handled_auto_reply_signatures.add(signature)
+                    self.managed_last_handled_turn_messages = list(unreplied_messages)
+                    self.managed_last_handled_turn_key = signature
+                    self.managed_last_handled_partner = send_window.title
+                    self.managed_last_sent_at = time.time()
+                    self.last_managed_sent_text = text
+                    self.managed_waiting_for_own_echo = True
+                else:
+                    self.pending_auto_reply_signature = ""
+                self.queue.put(("status", message))
+            finally:
+                self.managed_send_inflight = False
+                if self.pending_auto_reply_signature == signature:
+                    self.pending_auto_reply_signature = ""
+
+        threading.Thread(target=delayed_send, daemon=True).start()
+
+    def _managed_preflight_context(self, window: WeChatWindow | None) -> str:
+        if window is None:
+            return ""
         try:
-            crop, _origin = _crop_detected_chat_area_with_origin(
-                full,
-                platform_key,
-                platform_area,
-            )
-            context = self.ocr.read_image(crop)
+            # 允许屏幕截图兜底：窗口直接捕获失败（被遮挡/硬件加速黑图等）时，
+            # 若禁用兜底会导致“发送前无法复核”而永不发送、候选反复刷新。
+            # 后续仍有 turn 相似度校验兜底，不会因兜底截图而误发到其他内容。
+            image = self.ocr.capture(window, allow_screen_fallback=True)
+            if image is None:
+                return ""
+            context = self.ocr.read_image(image)
+            if context.strip():
+                visible = self.visible_analyzer.analyze(context, image)
+                return build_augmented_context(context, visible)
+            visible = self.visible_analyzer.analyze("", image)
+            if visible.summary:
+                return build_augmented_context("[对方] [图片]", visible)
+            return context
         except Exception:
-            context = ""
-        return title, chat_type, context
-
-    def _capture_runtime_observation(
-        self,
-        window: WeChatWindow,
-        chat_type: str | None = None,
-    ) -> ChatObservation | None:
-        title, detected_type, context = self._capture_runtime_source(window)
-        if detected_type not in {"personal", "group"}:
-            return None
-        self.current_chat_type = detected_type
-        if chat_type is not None and detected_type != chat_type:
-            return None
-        if not title or not context.strip():
-            return None
-        if detected_type == "group":
-            account_name = str(
-                getattr(self.settings, "wecom_account_name", "") or ""
-            ).strip()
-            if self.group_handler.latest_role_by_sender(context, account_name) != "对方":
-                return None
-            sender_name = self.group_handler.extract_sender_name(context)
-            message = self.group_handler.latest_other_message(context)
-            question = self.group_handler.extract_question(
-                message,
-                self.settings.wecom_account_name,
-            )
-            if not sender_name or not question.strip():
-                return None
-            turn = (question,)
-        else:
-            sender_name = ""
-            turn = tuple(_current_unreplied_turn(context))
-            if not turn:
-                return None
-        foreground = _same_strict_send_window(
-            window,
-            _current_foreground_chat(self.detector),
-        )
-        try:
-            identity = ChatIdentity(
-                int(getattr(window, "hwnd", 0) or 0),
-                title,
-                detected_type,
-            )
-            observation = ChatObservation(
-                identity=identity,
-                context=context,
-                customer_turn=turn,
-                sender_name=sender_name,
-                occurrence_marker=_turn_occurrence_marker(context, turn),
-                captured_at=time.time(),
-                foreground=foreground,
-            )
-        except (TypeError, ValueError):
-            return None
-        return observation
-
-    def _capture_fresh_runtime_observation(
-        self,
-        expected: ChatObservation,
-        window: WeChatWindow,
-        *,
-        require_foreground: bool = True,
-    ) -> ChatObservation | None:
-        if type(require_foreground) is not bool:
-            return None
-        if require_foreground:
-            live_window = _strict_foreground_send_window(self.detector, window)
-        else:
-            live_window = self._revalidated_send_window(window)
-        if live_window is None:
-            return None
-        return self._capture_runtime_observation(
-            live_window,
-            chat_type=expected.identity.chat_type,
-        )
-
-    def _verify_runtime_send(
-        self,
-        expected: ChatObservation,
-        outgoing_text: str,
-        window: WeChatWindow,
-    ) -> str:
-        for delay_seconds in (0.6, 0.8, 1.0, 1.0, 1.0):
-            time.sleep(delay_seconds)
-            live_window = _strict_foreground_send_window(self.detector, window)
-            if live_window is None:
-                return "uncertain"
-            title, chat_type, context = self._capture_runtime_source(live_window)
-            if not title or not context.strip():
-                return "uncertain"
-            if (
-                int(getattr(live_window, "hwnd", 0) or 0) != expected.identity.hwnd
-                or normalize_chat_title(title) != expected.identity.top_title
-                or chat_type != expected.identity.chat_type
-            ):
-                return "uncertain"
-            verification = verify_own_bubble(
-                expected.context,
-                context,
-                outgoing_text,
-            )
-            if verification != "not_sent":
-                return verification
-        return "not_sent"
+            return ""
 
     def _try_transcribe_latest_voice(self, wechat: WeChatWindow, image, context: str) -> tuple[str, object | None]:
         if pyautogui is None:
@@ -2356,7 +1238,7 @@ class WeChatStyleReplyAssistant:
         self.ui.root.withdraw()
 
         def work() -> None:
-            ok, message = self.sender.send(window, text, allow_activate=True)
+            ok, message = self.sender.send(window, text)
             if ok and _should_learn_sent_reply(source):
                 self.memory.learn_from_sent_reply(partner, self.current_context, text, source=source)
             self.queue.put(("status", message))
@@ -2366,470 +1248,25 @@ class WeChatStyleReplyAssistant:
 
     def _exit(self) -> None:
         self.running = False
-        worker = getattr(self, "managed_worker", None)
-        if worker is not None:
-            try:
-                worker.shutdown(timeout=10.0)
-            except (TimeoutError, RuntimeError):
-                self.startup_blocking_error = "托管发送工作线程未能安全停止，请勿立即重启程序。"
         self.ui.close()
-
-    def _queue_runtime_observation(
-        self,
-        observation: ChatObservation,
-        window: WeChatWindow,
-        *,
-        outgoing_text=None,
-    ) -> bool:
-        observation = self._observation_after_startup_baseline(observation)
-        if observation is None:
-            return False
-        if getattr(self, "send_ledger", None) is not None:
-            try:
-                ledger_status = self.send_ledger.status(observation.turn_key)
-            except LedgerBlockingError as error:
-                self._block_managed_for_ledger(error)
-                return False
-            if (
-                ledger_status == "uncertain"
-                and not self._reconcile_automatic_uncertain(observation)
-            ):
-                return False
-        if getattr(self, "send_ledger", None) is not None and self._ledger_is_handled(
-            observation.turn_key
-        ):
-            return False
-        transform = outgoing_text if callable(outgoing_text) else (lambda text: text)
-        live = {"window": window}
-        active: dict[str, ReplyDecision | None] = {"decision": None}
-        runtime_mode = str(getattr(self.settings, "managed_mode", "off") or "off")
-
-        def decide(question: str, context: str) -> ReplyDecision:
-            decision = self.engine.decide_managed(
-                context,
-                [question],
-            )
-            active["decision"] = decision
-            return decision
-
-        def fresh(expected: ChatObservation) -> ChatObservation | None:
-            _diag("preflight_checked")
-            current = self._capture_fresh_runtime_observation(
-                expected,
-                window,
-                require_foreground=runtime_mode != "observe",
-            )
-            if current is not None:
-                current = self._observation_after_startup_baseline(current)
-            if current is not None:
-                current_window = self._revalidated_send_window(window)
-                if current_window is not None:
-                    live["window"] = current_window
-            return current
-
-        def prepare_send_window(expected: ChatObservation) -> SendWindowPreparation:
-            preparation = self._prepare_managed_send_window(expected, window)
-            if preparation == "ready":
-                current_window = self._revalidated_send_window(window)
-                if current_window is None:
-                    return "target_window_unavailable"
-                live["window"] = current_window
-            return preparation
-
-        def send(_identity: ChatIdentity, text: str):
-            candidate = active["decision"]
-            if not isinstance(candidate, ReplyDecision) or not validate_for_send(candidate):
-                return SendAttempt(
-                    False,
-                    "live_managed_readiness_changed",
-                    retry_safe=True,
-                )
-            return self.sender.send(
-                live["window"],
-                transform(text),
-                allow_activate=False,
-            )
-
-        def verify(fresh_observation: ChatObservation, text: str):
-            return self._verify_runtime_send(
-                fresh_observation,
-                transform(text),
-                live["window"],
-            )
-
-        def validate_for_send(candidate: ReplyDecision) -> bool:
-            mode = getattr(self.settings, "managed_mode", "off")
-            if mode not in {"controlled", "full"}:
-                return False
-            if mode == "controlled":
-                allowed = {
-                    normalize_chat_title(item)
-                    for item in getattr(self.settings, "managed_allowed_chats", [])
-                    if isinstance(item, str) and item.strip()
-                }
-                if observation.identity.top_title not in allowed:
-                    return False
-            return bool(
-                self.engine.managed_decision_still_valid(candidate)
-                and self._managed_reply_readiness_allows_send()
-            )
-
-        adapters = RuntimeAdapters(
-            decide=decide,
-            validate_for_send=validate_for_send,
-            prepare_send_window=prepare_send_window,
-            fresh_observation=fresh,
-            send=send,
-            verify=verify,
-            mode=self.settings.managed_mode,
-            allowlist=frozenset(self.settings.managed_allowed_chats),
-        )
-
-        pending_lock = getattr(self, "_managed_pending_lock", None)
-        if pending_lock is None:
-            pending_lock = threading.Lock()
-            self._managed_pending_lock = pending_lock
-        with pending_lock:
-            pending_turns = set(getattr(self, "_managed_pending_turns", set()))
-            if observation.turn_key in pending_turns:
-                return False
-            pending_turns.add(observation.turn_key)
-            self._managed_pending_turns = pending_turns
-            self._managed_pending_count = int(getattr(self, "_managed_pending_count", 0)) + 1
-            self.managed_send_inflight = True
-
-        def completed(outcome: RuntimeOutcome) -> None:
-            decision = outcome.decision
-            acceptance_path = getattr(self, "acceptance_report_path", None)
-            if acceptance_path is not None:
-                try:
-                    _append_acceptance_event(
-                        acceptance_path,
-                        getattr(self.settings, "managed_mode", "off"),
-                        outcome,
-                    )
-                except (OSError, TypeError, ValueError):
-                    self.settings.managed_mode = "off"
-                    self.queue.put((
-                        "bypass_alert",
-                        "验收证据无法安全写入，已关闭托管发送。",
-                    ))
-            with pending_lock:
-                self._managed_pending_turns = set(
-                    getattr(self, "_managed_pending_turns", set())
-                )
-                self._managed_pending_turns.discard(observation.turn_key)
-                self._managed_pending_count = max(
-                    0, int(getattr(self, "_managed_pending_count", 1)) - 1
-                )
-                self.managed_send_inflight = self._managed_pending_count > 0
-            if outcome.reason == "turn_already_handled":
-                _diag("ledger_turn_already_handled")
-                if getattr(self.settings, "managed_mode", "off") == "observe":
-                    self.observed_runtime_turns = set(
-                        getattr(self, "observed_runtime_turns", set())
-                    )
-                    self.observed_runtime_turns.add(outcome.turn_key)
-            elif outcome.reason in {"technical_failure", "decision_exception"}:
-                _diag("api_failure", error_category="decision")
-            elif outcome.reason in {
-                "decision_changed_before_send",
-                "fresh_observation_failed",
-                "fresh_observation_unavailable",
-                "chat_identity_changed",
-                "customer_turn_changed",
-                "window_not_foreground",
-                "user_active_elsewhere",
-                "target_window_unavailable",
-                "activation_failed",
-            }:
-                _diag("preflight_rejected", error_category="preflight")
-            if outcome.sent or outcome.reason in {
-                "send_uncertain",
-                "not_sent_after_retry",
-            }:
-                _diag("send_result", error_category="send", score=100 if outcome.sent else 0)
-            if outcome.reason == "ledger_unavailable":
-                self.settings.managed_mode = "off"
-                self.startup_blocking_error = (
-                    "发送台账不可用，已关闭托管自动发送；请修复台账后重启。"
-                )
-                self.queue.put(("status", self.startup_blocking_error))
-            elif outcome.reason == "send_uncertain":
-                self.queue.put(("bypass_alert", "发送结果无法确认，已停止自动重试，请人工核对当前聊天。"))
-            elif outcome.sent:
-                self.queue.put(("status", "回复气泡已验证，发送台账已记录。"))
-            elif outcome.reason == "observe_only":
-                self.observed_runtime_turns = set(
-                    getattr(self, "observed_runtime_turns", set())
-                )
-                self.observed_runtime_turns.add(outcome.turn_key)
-                label = (
-                    decision.record_id
-                    if isinstance(decision, ReplyDecision) and decision.record_id
-                    else "固定未命中答复"
-                )
-                self.queue.put(("status", f"观察模式：预期决策 {label}，未实际发送。"))
-            else:
-                message = _managed_outcome_message(outcome.reason)
-                self.queue.put((
-                    "status",
-                    message or f"托管发送已阻断：{outcome.reason}",
-                ))
-            if isinstance(decision, ReplyDecision) and decision.kind in {"answer", "no_answer"}:
-                self.queue.put(("replies", [decision.text]))
-                self.queue.put(("reply_source", self._reply_source_label()))
-
-        accepted = self.managed_worker.submit(observation, adapters, completed)
-        if not accepted:
-            with pending_lock:
-                self._managed_pending_turns = set(
-                    getattr(self, "_managed_pending_turns", set())
-                )
-                self._managed_pending_turns.discard(observation.turn_key)
-                self._managed_pending_count = max(0, self._managed_pending_count - 1)
-                self.managed_send_inflight = self._managed_pending_count > 0
-        return accepted
-
-    def _reconcile_automatic_uncertain(self, observation: ChatObservation) -> bool:
-        """连续两次看到同一未回复问题后，释放一次 uncertain 安全重试。"""
-        now = time.monotonic()
-        seen = getattr(self, "_uncertain_recovery_seen", None)
-        if not isinstance(seen, dict):
-            seen = {}
-            self._uncertain_recovery_seen = seen
-        first_seen = seen.get(observation.turn_key)
-        if first_seen is None or now - float(first_seen) < 1.0:
-            seen.clear()
-            seen[observation.turn_key] = now if first_seen is None else first_seen
-            self.queue.put((
-                "status",
-                "正在复核上次发送结果；确认仍未回复后将安全重试",
-            ))
-            return False
-        seen.pop(observation.turn_key, None)
-        try:
-            reconciled = self.send_ledger.reconcile_uncertain_not_sent(
-                observation.turn_key
-            )
-        except LedgerBlockingError as error:
-            self._block_managed_for_ledger(error)
-            return False
-        if not reconciled:
-            self.queue.put((
-                "status",
-                "该问题的安全重试次数已用完，仍未确认发出，请人工发送",
-            ))
-            return False
-        self.queue.put((
-            "status",
-            "已确认上次未实际发出，正在进行唯一一次安全重试",
-        ))
-        return True
-
-    @staticmethod
-    def _startup_baseline_slot(observation: ChatObservation) -> tuple[str, str]:
-        sender = normalize_chat_title(observation.sender_name).casefold()
-        return observation.identity.key, sender
-
-    def _observation_after_startup_baseline(
-        self,
-        observation: ChatObservation,
-    ) -> ChatObservation | None:
-        baselines = getattr(self, "_startup_baseline_turns", None)
-        if not isinstance(baselines, dict):
-            return observation
-        slot = self._startup_baseline_slot(observation)
-        baseline = baselines.get(slot)
-        if not baseline:
-            return observation
-        occurrences = getattr(self, "_startup_baseline_occurrences", None)
-        baseline_evidence = (
-            occurrences.get(slot) if isinstance(occurrences, dict) else None
-        )
-        baseline_messages = list(baseline)
-        current_messages = list(observation.customer_turn)
-        if _turns_are_same_or_similar(baseline_messages, current_messages):
-            baseline_count = (
-                baseline_evidence[1]
-                if isinstance(baseline_evidence, tuple)
-                and len(baseline_evidence) == 2
-                and type(baseline_evidence[1]) is int
-                else None
-            )
-            current_count = _visible_turn_occurrence_count(
-                observation.context,
-                observation.customer_turn,
-            )
-            if baseline_count is not None and current_count > baseline_count:
-                baselines.pop(slot, None)
-                if isinstance(occurrences, dict):
-                    occurrences.pop(slot, None)
-                return observation
-            return None
-        if _turn_has_real_new_message(baseline_messages, current_messages):
-            new_tail = tuple(current_messages[len(baseline_messages) :])
-            return ChatObservation(
-                identity=observation.identity,
-                context=observation.context,
-                customer_turn=new_tail,
-                sender_name=observation.sender_name,
-                occurrence_marker=observation.occurrence_marker,
-                captured_at=observation.captured_at,
-                foreground=observation.foreground,
-            )
-        baselines.pop(slot, None)
-        if isinstance(occurrences, dict):
-            occurrences.pop(slot, None)
-        return observation
 
     def _progress(self, text: str) -> None:
         self.progress_steps.append(text)
         self.queue.put(("progress", text))
 
 
-def _ledger_identity_key(title: str, chat_type: str, *, sender_name: str = "") -> str:
-    material = "\x1f".join(
-        (str(chat_type).strip().casefold(), str(title).strip(), str(sender_name).strip())
-    )
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
-
-
-def _group_turn_fingerprint(message: str, sender_name: str) -> str:
-    material = "\x1f".join(
-        (
-            str(sender_name).strip().casefold(),
-            _normalize_turn_message(str(message)),
-        )
-    )
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
-
-
-def _ledger_turn_key(
-    title: str,
-    chat_type: str,
-    turn_messages: list[str],
-    *,
-    sender_name: str = "",
-    boundary: str = "",
-) -> str:
-    identity = _ledger_identity_key(title, chat_type, sender_name=sender_name)
-    messages = "\x1e".join(str(message).strip() for message in turn_messages if str(message).strip())
-    material = "\x1f".join((identity, str(boundary).strip(), messages))
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
-
-
-def _show_duplicate_instance_message() -> None:
-    message = "客服回复助手已在运行；本实例将退出。"
-    try:
-        if os.name == "nt":
-            import ctypes
-
-            ctypes.windll.user32.MessageBoxW(None, message, "客服回复助手", 0x40)
-            return
-    except Exception:
-        pass
-    print(message)
-
-
-def main(
-    *,
-    instance_factory=SingleInstance,
-    app_factory=WeChatStyleReplyAssistant,
-    duplicate_notifier=_show_duplicate_instance_message,
-) -> None:
-    args = _parse_main_args()
-    if _diagnostic_requested(args):
-        _run_main(app_factory, args=args)
-        return
-    instance = instance_factory()
-    if not instance.acquire():
-        duplicate_notifier()
-        return
-    try:
-        _run_main(app_factory, args=args)
-    finally:
-        instance.release()
-
-
-def _parse_main_args(argv: list[str] | None = None):
-    import argparse
-
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--self-check", action="store_true")
-    parser.add_argument("--runtime-check", action="store_true")
-    parser.add_argument("--package-check", action="store_true")
-    parser.add_argument("--api-check", action="store_true")
-    parser.add_argument("--report", type=Path)
-    parser.add_argument("--data-dir", type=Path)
-    parser.add_argument("--no-wecom", action="store_true")
-    parser.add_argument("--acceptance-report", type=Path)
-    parser.add_argument("--debug-session", action="store_true")
-    parser.add_argument(
-        "--managed-mode",
-        choices=("off", "observe", "controlled", "full"),
-    )
-    return parser.parse_args(sys.argv[1:] if argv is None else argv)
-
-
-def _diagnostic_requested(args) -> bool:
-    return bool(
-        args.package_check
-        or args.self_check
-        or args.runtime_check
-        or args.api_check
-    )
-
-
-def _run_main(app_factory=WeChatStyleReplyAssistant, *, args=None) -> None:
-    if args is None:
-        args = _parse_main_args()
-    if args.debug_session:
-        enable_session_debug()
-    if args.package_check:
-        from self_check import run_package_self_check
-
-        report = run_package_self_check(args.report)
-        if not report.ok:
-            raise SystemExit(2)
-        return
-    if args.self_check or args.runtime_check:
+def main() -> None:
+    if "--self-check" in sys.argv:
         from self_check import run_self_check
 
-        report = run_self_check(
-            args.report,
-            runtime_data_dir=args.data_dir,
-            require_wecom=not args.no_wecom,
-        )
-        if not report.ok:
-            raise SystemExit(2)
+        run_self_check()
         return
-    if args.api_check:
+    if "--api-check" in sys.argv:
         from self_check import run_api_check
 
-        report = run_api_check(args.report)
-        if not report.ok:
-            raise SystemExit(2)
+        run_api_check()
         return
-    app = app_factory()
-    app.acceptance_report_path = (
-        args.acceptance_report.resolve()
-        if args.acceptance_report is not None
-        else None
-    )
-    if args.managed_mode is not None:
-        app.settings.managed_mode = args.managed_mode
-        app.settings.auto_recognize = args.managed_mode != "off"
-        ui = getattr(app, "ui", None)
-        managed_var = getattr(ui, "managed_var", None)
-        auto_var = getattr(ui, "auto_var", None)
-        if managed_var is not None:
-            managed_var.set(managed_mode_label(args.managed_mode))
-        if auto_var is not None:
-            auto_var.set(args.managed_mode != "off")
-    if app.acceptance_report_path is not None:
-        _record_acceptance_status_once(app, "runtime_configured")
-    app.start()
+    WeChatStyleReplyAssistant().start()
 
 
 def _current_unreplied_turn(context: str) -> list[str]:
@@ -2929,7 +1366,6 @@ def _context_has_unanswered_question(context: str) -> bool:
             if later_role == "own" and _reply_is_substantive(later_text):
                 return False
         return True
-
     return False
 
 
@@ -2969,23 +1405,13 @@ def _should_skip_unchanged_context(
     return True
 
 
-def _capture_chat_image_without_overlay(
-    ocr,
-    ui_queue,
-    sender,
-    target,
-    wait_seconds: float = 1.0,
-    *,
-    allow_activate: bool = True,
-):
+def _capture_chat_image_without_overlay(ocr, ui_queue, sender, target, wait_seconds: float = 1.0):
     try:
         direct = ocr.capture(target, allow_screen_fallback=False)
     except TypeError:
         direct = None
     if direct is not None:
         return direct
-    if not allow_activate:
-        return None
 
     hidden = threading.Event()
     ui_queue.put(("hide_for_capture", hidden))
@@ -3046,22 +1472,6 @@ def _filter_sendable_replies(context: str, replies: list[str]) -> list[str]:
 
 def _managed_api_failure_blocks_send(settings: AppSettings, engine: ReplyEngine) -> bool:
     return bool(settings.api_key and engine.last_error and "API" not in engine.last_source)
-
-
-def _managed_mode_enabled(settings: object) -> bool:
-    return getattr(settings, "managed_mode", "off") in {
-        "observe",
-        "controlled",
-        "full",
-    }
-
-
-def _normalized_turn_tuple(messages: tuple[str, ...] | list[str]) -> tuple[str, ...]:
-    return tuple(
-        normalized
-        for message in messages
-        if (normalized := _normalize_turn_message(str(message)))
-    )
 
 
 def _generation_result_still_current(
@@ -3151,6 +1561,47 @@ def _managed_send_preflight_allows(
     return True, ""
 
 
+def _managed_preflight_context_or_cached(
+    expected_window: WeChatWindow | None,
+    live_window: WeChatWindow | None,
+    generated_context: str,
+    latest_context: str,
+    cached_context: str,
+) -> str:
+    if not cached_context.strip() or not _same_chat_session(expected_window, live_window):
+        return latest_context
+    generated_turn = _current_unreplied_turn(generated_context)
+    cached_turn = _current_unreplied_turn(cached_context)
+    if latest_context.strip():
+        latest_turn = _current_unreplied_turn(latest_context)
+        latest_role, _latest_text = latest_meaningful_message(latest_context)
+        if (
+            generated_turn
+            and cached_turn
+            and _turns_are_same_or_similar(generated_turn, cached_turn)
+            and _context_role_messages_are_prefix(latest_context, cached_context)
+            and (not latest_turn or latest_role == "我")
+        ):
+            return cached_context
+        return latest_context
+    if generated_turn and cached_turn and _turns_are_same_or_similar(generated_turn, cached_turn):
+        return cached_context
+    return latest_context
+
+
+def _context_role_messages_are_prefix(short_context: str, full_context: str) -> bool:
+    short_messages = [(role, text) for role, text in _context_role_messages(short_context) if role in {"own", "other"}]
+    full_messages = [(role, text) for role, text in _context_role_messages(full_context) if role in {"own", "other"}]
+    if not short_messages or len(short_messages) > len(full_messages):
+        return False
+    for (short_role, short_text), (full_role, full_text) in zip(short_messages, full_messages):
+        if short_role != full_role:
+            return False
+        if not _messages_are_similar(_normalize_turn_message(short_text), _normalize_turn_message(full_text)):
+            return False
+    return True
+
+
 def _same_chat_session(left: WeChatWindow | None, right: WeChatWindow | None) -> bool:
     if left is None or right is None:
         return False
@@ -3167,22 +1618,6 @@ def _same_chat_session(left: WeChatWindow | None, right: WeChatWindow | None) ->
     return bool(left_hwnd and left_hwnd == right_hwnd)
 
 
-def _same_strict_send_window(left: WeChatWindow | None, right: WeChatWindow | None) -> bool:
-    if left is None or right is None:
-        return False
-    left_hwnd = int(getattr(left, "hwnd", 0) or 0)
-    right_hwnd = int(getattr(right, "hwnd", 0) or 0)
-    left_platform = str(getattr(getattr(left, "platform", None), "key", "") or "")
-    right_platform = str(getattr(getattr(right, "platform", None), "key", "") or "")
-    return bool(
-        left_hwnd
-        and right_hwnd
-        and left_hwnd == right_hwnd
-        and left_platform
-        and left_platform == right_platform
-    )
-
-
 def _current_foreground_chat(detector: object) -> WeChatWindow | None:
     foreground = getattr(detector, "foreground_chat", None)
     if callable(foreground):
@@ -3193,14 +1628,32 @@ def _current_foreground_chat(detector: object) -> WeChatWindow | None:
     return None
 
 
-def _strict_foreground_send_window(
-    detector: object,
-    expected_window: WeChatWindow | None,
-) -> WeChatWindow | None:
+def _managed_live_send_window(detector: object, expected_window: WeChatWindow | None) -> WeChatWindow | None:
     foreground = _current_foreground_chat(detector)
-    if _same_strict_send_window(expected_window, foreground):
+    if foreground is not None and _same_chat_session(expected_window, foreground):
         return foreground
-    return None
+
+    discovered = None
+    any_chat = getattr(detector, "any_chat_window", None)
+    if callable(any_chat):
+        try:
+            discovered = any_chat()
+        except Exception:
+            discovered = None
+    if discovered is not None and _same_chat_session(expected_window, discovered):
+        return discovered
+
+    window_from_hwnd = getattr(detector, "window_from_hwnd", None)
+    expected_hwnd = int(getattr(expected_window, "hwnd", 0) or 0)
+    if callable(window_from_hwnd) and expected_hwnd:
+        try:
+            refreshed = window_from_hwnd(expected_hwnd)
+        except Exception:
+            refreshed = None
+        if refreshed is not None:
+            return refreshed
+
+    return expected_window
 
 
 def _managed_context_allows_generation(context: str, handled_messages: list[str] | None = None) -> bool:
@@ -3429,49 +1882,6 @@ def _latest_own_message_before_current_turn(context: str) -> str:
     return ""
 
 
-def _turn_occurrence_marker(context: str, turn_messages: tuple[str, ...]) -> str:
-    """Identify a later same-text customer turn without exposing chat text.
-
-    An empty marker preserves historical ledger keys when no own-message
-    boundary is visible.
-    Once an own-message boundary is visible, the hashed boundary plus the
-    visible occurrence count distinguishes a genuinely repeated question from
-    repeated OCR polls of the same bubble.  If older context scrolls away, the
-    marker can conservatively collapse to an earlier key and block rather than
-    risk duplicate sends.
-    """
-    if not turn_messages:
-        return ""
-    boundary = _latest_own_message_before_current_turn(context)
-    boundary_key = _normalize_turn_message(_strip_visible_summary(boundary))
-    if not boundary_key:
-        return ""
-    occurrences = _visible_turn_occurrence_count(context, turn_messages)
-    if not occurrences:
-        return ""
-    boundary_hash = hashlib.sha256(boundary_key.encode("utf-8")).hexdigest()
-    return f"{boundary_hash}:{occurrences}"
-
-
-def _visible_turn_occurrence_count(
-    context: str,
-    turn_messages: tuple[str, ...],
-) -> int:
-    if not turn_messages:
-        return 0
-    target = _normalize_turn_message(_strip_visible_summary(turn_messages[-1]))
-    if not target:
-        return 0
-    occurrences = 0
-    for role, text in _context_role_messages(context):
-        if role != "other":
-            continue
-        candidate = _normalize_turn_message(_strip_visible_summary(text))
-        if candidate == target or candidate.endswith(target):
-            occurrences += 1
-    return occurrences
-
-
 def _current_turn_has_own_boundary(context: str) -> bool:
     return bool(_latest_own_message_before_current_turn(context))
 
@@ -3523,9 +1933,14 @@ def _single_wechat_message(text: str) -> str:
 
 
 def _managed_turn_signature(title: str, unreplied_messages: list[str]) -> str:
-    """Legacy pure helper retained for diagnostics/tests, never as send authority."""
     turn_text = "\n".join(message.strip() for message in unreplied_messages if message.strip())
     return hashlib.sha1(f"{title}\n{turn_text}".encode("utf-8")).hexdigest()
+
+
+def _managed_turn_cycle_signature(title: str, context: str, unreplied_messages: list[str]) -> str:
+    boundary = _latest_own_message_before_current_turn(context)
+    turn_text = "\n".join(message.strip() for message in unreplied_messages if message.strip())
+    return hashlib.sha1(f"{title}\n{boundary}\n{turn_text}".encode("utf-8")).hexdigest()
 
 
 def _build_completion_context(context: str, sent_text: str) -> str:

@@ -11,16 +11,6 @@ __pycache__/
 build/
 develop-eggs/
 dist/
-artifacts/formal-hardening/*/staging-data/
-artifacts/formal-hardening/*/staging-migration.json
-artifacts/formal-hardening/*/rollback-rehearsal/
-# 实机验收截图和逐轮事件仅保留在本机，可能包含聊天界面或运行标识。
-artifacts/formal-hardening/*/*.png
-artifacts/formal-hardening/*/phase3-live-*.jsonl
-# 过期发布候选证据不进入最终提交；只提交当前最终版本的结构化报告。
-artifacts/formal-hardening/*/phase-04-v[0-8]-*
-artifacts/formal-hardening/*/phase-04-final-v[0-8]-*
-artifacts/formal-hardening/*/phase-04-live-fixes-tests.xml
 downloads/
 eggs/
 .eggs/

@@ -2,118 +2,23 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
+import os
 import re
+import shutil
+import sys
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app_paths import memory_path, vector_path
-from atomic_json import JsonDataError, JsonLoadResult, atomic_write_json, load_json
-from knowledge_base import (
-    KnowledgeAudit,
-    KnowledgeCandidate,
-    KnowledgeRecord,
-    KnowledgeRepository,
-    KnowledgeSchemaError,
-    audit_records,
-    record_from_example,
-)
+from settings import APP_NAME
 
 
 ENTERPRISE_ANNUAL_REPORT_SOURCE = "enterprise_annual_report_kb"
+ENTERPRISE_LOCAL_CONFIDENT_MARGIN = 8
 ENTERPRISE_LOCAL_MIN_SCORE = 8
-MEMORY_SCHEMA_VERSION = 2
-VECTOR_SCHEMA_VERSION = 1
-VECTOR_DIMENSION = 384
-
-_MEMORY_EXAMPLE_STRING_FIELDS = {
-    "partner",
-    "cue",
-    "reply",
-    "source",
-    "created_at",
-    "conversation_hash",
-    "scenario_id",
-    "scenario_title",
-    "why",
-    "question",
-    "module",
-    "subcategory",
-    "organization_type",
-    "source_sheet",
-    "source_cell",
-    "source_file",
-    "source_locator",
-    "source_excerpt",
-    "keywords",
-    "priority",
-    "org_scope",
-    "status",
-}
-_EXACT_KNOWLEDGE_METADATA_FIELDS = frozenset(
-    {
-        "question",
-        "organization_type",
-        "source_file",
-        "source_locator",
-        "keywords",
-    }
-)
-
-
-class VectorIndexError(RuntimeError):
-    """Raised when the vector index is unavailable for managed replies."""
-
-
-def _source_locator_from_example(item: dict[str, str]) -> str:
-    source_locator = str(item.get("source_locator", "")).strip()
-    if source_locator:
-        return source_locator
-    source_sheet = str(item.get("source_sheet", "")).strip()
-    source_cell = str(item.get("source_cell", "")).strip()
-    return f"{source_sheet}!{source_cell}" if source_sheet and source_cell else source_cell
-
-
-def _legacy_pending_question_can_be_model_reviewed(
-    item: dict[str, str], record: KnowledgeRecord
-) -> bool:
-    """Admit a proven legacy answer to question-only model review, never directly."""
-    return bool(
-        item.get("source") == ENTERPRISE_ANNUAL_REPORT_SOURCE
-        and record.status == "pending"
-        and record.org_scope == "unknown"
-        and Path(record.source_file).name.casefold() == "memory.json"
-        and re.fullmatch(r"examples\[\d+\]", record.source_locator) is not None
-        and record.reply.strip()
-        and record.source_excerpt.strip() == record.reply.strip()
-    )
-
-
-def _record_for_question_only_model_review(record: KnowledgeRecord) -> KnowledgeRecord:
-    return record_from_example(
-        {
-            "question": record.question,
-            "reply": record.reply,
-            "organization_type": record.organization_type,
-            "keywords": list(record.keywords),
-            "source_file": record.source_file,
-            "source_locator": record.source_locator,
-            "source_excerpt": record.source_excerpt,
-            "org_scope": "both",
-            "status": "active",
-        }
-    )
-
-
-def _managed_row_key(
-    *, question: str, reply: str, source_file: str, source_locator: str
-) -> tuple[str, str, str, str]:
-    return (question, reply, source_file.strip(), source_locator.strip())
-
-
-# 企业知识候选底线：第一名不低于 30 分；严格领先只送第一名，完全同分才送 2-3 条。
+# 企业年报"可直接发送"的可靠底线：第一名分数不低于该值且明显领先第二名（>=8 分）且无冲突。
 # 2026-08-05 用户要求低分阈值 20 -> 30：命中评分 < 30 时回复企业未命中文案。
 ENTERPRISE_LOCAL_CONFIDENT_FLOOR = 30
 
@@ -202,85 +107,12 @@ _ENTERPRISE_SCOPE_TERMS = (
 
 
 def default_memory_path() -> Path:
-    return memory_path()
-
-
-def validate_memory_document(value: object) -> None:
-    if not isinstance(value, dict):
-        raise ValueError("memory root must be an object")
-    version = value.get("schema_version", 1)
-    if type(version) is not int or version not in {1, MEMORY_SCHEMA_VERSION}:
-        raise ValueError("unsupported memory schema_version")
-    missing = {"style_summary", "examples", "common_phrases"} - value.keys()
-    if missing:
-        raise ValueError(f"memory fields missing: {', '.join(sorted(missing))}")
-    if type(value["style_summary"]) is not str:
-        raise ValueError("style_summary must be a string")
-    examples = value["examples"]
-    if type(examples) is not list:
-        raise ValueError("examples must be a list")
-    for index, item in enumerate(examples):
-        if type(item) is not dict:
-            raise ValueError(f"examples[{index}] must be an object")
-        for key in _MEMORY_EXAMPLE_STRING_FIELDS:
-            if key in item and type(item[key]) is not str:
-                raise ValueError(f"examples[{index}].{key} must be a string")
-        missing_example = {"cue", "reply", "source", "conversation_hash"} - item.keys()
-        if missing_example:
-            raise ValueError(
-                f"examples[{index}] fields missing: {', '.join(sorted(missing_example))}"
-            )
-        normalized = _normalize_example(item)
-        if not normalized or not normalized["reply"]:
-            raise ValueError(f"examples[{index}].reply must normalize to non-empty text")
-    phrases = value["common_phrases"]
-    if type(phrases) is not dict:
-        raise ValueError("common_phrases must be an object")
-    if any(
-        type(phrase) is not str
-        or type(count) is not int
-        or count < 0
-        for phrase, count in phrases.items()
-    ):
-        raise ValueError("common_phrases must map strings to non-negative integers")
-
-
-def _validate_vector_document(value: object) -> None:
-    if not isinstance(value, dict):
-        raise ValueError("vector root must be an object")
-    if type(value.get("version")) is not int or value["version"] != VECTOR_SCHEMA_VERSION:
-        raise ValueError("unsupported vector schema version")
-    if type(value.get("dim")) is not int or value["dim"] != VECTOR_DIMENSION:
-        raise ValueError("unsupported vector dimension")
-    memory_hash = value.get("memory_hash")
-    if type(memory_hash) is not str or re.fullmatch(r"[0-9a-f]{64}", memory_hash) is None:
-        raise ValueError("memory_hash must be a SHA-256 hex digest")
-    items = value.get("items")
-    if type(items) is not list:
-        raise ValueError("vector items must be a list")
-    for index, item in enumerate(items):
-        if type(item) is not dict:
-            raise ValueError(f"vector items[{index}] must be an object")
-        for key in ("conversation_hash", "source", "reply"):
-            if type(item.get(key)) is not str:
-                raise ValueError(f"vector items[{index}].{key} must be a string")
-        vector = item.get("vector")
-        if type(vector) is not dict or not vector:
-            raise ValueError(f"vector items[{index}].vector must be non-empty")
-        for token, weight in vector.items():
-            if (
-                type(token) is not str
-                or re.fullmatch(r"0|[1-9][0-9]*", token) is None
-                or not 0 <= int(token) < VECTOR_DIMENSION
-            ):
-                raise ValueError(f"vector items[{index}] has an invalid bucket")
-            if (
-                type(weight) not in {int, float}
-                or isinstance(weight, bool)
-                or not math.isfinite(float(weight))
-                or not 0 < float(weight) <= 1
-            ):
-                raise ValueError(f"vector items[{index}] has an invalid weight")
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "user_data" / "memory.json"
+    base = os.environ.get("APPDATA")
+    if base:
+        return Path(base) / APP_NAME / "memory.json"
+    return Path.home() / ".wechat_style_reply_assistant" / "memory.json"
 
 
 @dataclass
@@ -290,71 +122,48 @@ class StyleMemory:
     examples: list[dict[str, str]] = field(default_factory=list)
     common_phrases: Counter = field(default_factory=Counter)
     max_examples: int = 3000
-    load_result: JsonLoadResult | None = field(default=None, init=False, repr=False)
-    vector_ready: bool = field(default=False, init=False)
-    last_vector_error: str | None = field(default=None, init=False)
 
     @property
     def vector_path(self) -> Path:
-        return self.path.with_name(vector_path().name)
+        return self.path.with_name("vector_memory.json")
 
     @property
     def sop_library_path(self) -> Path:
         return self.path.with_name("sop_library.json")
 
     def load(self) -> "StyleMemory":
-        backups = [self.path.with_name(f"{self.path.name}.bak.{index}") for index in range(1, 6)]
-        if not self.path.exists() and not any(backup.exists() for backup in backups):
+        if not self.path.exists():
             return self
-        self.load_result = load_json(self.path, validate_memory_document)
-        data = self.load_result.data
+        data = json.loads(self.path.read_text(encoding="utf-8"))
         self.style_summary = str(data.get("style_summary", self.style_summary))
-        raw_examples = list(data.get("examples", []))
-        self.examples = []
-        for item in raw_examples:
-            normalized = _normalize_example(item)
-            if normalized:
-                self.examples.append(normalized)
+        raw_examples = list(data.get("examples", []))[-self.max_examples :]
+        self.examples = [_normalize_example(item) for item in raw_examples if _normalize_example(item)]
         self.common_phrases = Counter(data.get("common_phrases", {}))
-        self._ensure_vector_index()
         return self
 
     def save(self) -> None:
-        normalized_examples = []
-        for index, item in enumerate(self.examples):
-            if type(item) is not dict:
-                raise ValueError(f"examples[{index}] must be an object")
-            for key in _MEMORY_EXAMPLE_STRING_FIELDS:
-                if key in item and type(item[key]) is not str:
-                    raise ValueError(f"examples[{index}].{key} must be a string")
-            normalized = _normalize_example(item)
-            if not normalized:
-                raise ValueError(f"examples[{index}] must contain a non-empty reply")
-            normalized_examples.append(normalized)
-        document = {
-            "schema_version": MEMORY_SCHEMA_VERSION,
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # 数量骤减保护：磁盘已有大量知识库（≥50 条）而内存只有极少（<20 条）时，
+        # 说明程序可能 load 到了旧/空数据（常见于程序运行中数据被外部同步/替换），
+        # 先备份磁盘当前文件再覆盖，避免知识库被永久冲掉。
+        try:
+            if self.path.exists():
+                disk_examples = json.loads(self.path.read_text(encoding="utf-8")).get("examples", [])
+                if len(disk_examples) >= 50 and len(self.examples) < 20:
+                    backup_path = self.path.with_name(
+                        f"memory.json.bak-auto-{time.strftime('%Y%m%d-%H%M%S')}"
+                    )
+                    shutil.copy2(self.path, backup_path)
+        except Exception:
+            pass
+        self.examples = _dedupe_memory_examples(self.examples)[-self.max_examples :]
+        data = {
             "style_summary": self.style_summary,
-            "examples": _dedupe_memory_examples(normalized_examples),
+            "examples": self.examples,
             "common_phrases": dict(self.common_phrases.most_common(120)),
         }
-        atomic_write_json(self.path, document, validate_memory_document, backup_count=5)
-        self.examples = list(document["examples"])
-        self.rebuild_vector_index()
-
-    def content_hash(self) -> str:
-        document = {
-            "schema_version": MEMORY_SCHEMA_VERSION,
-            "style_summary": self.style_summary,
-            "examples": _dedupe_memory_examples(self.examples),
-            "common_phrases": dict(self.common_phrases.most_common(120)),
-        }
-        payload = json.dumps(
-            document,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        return hashlib.sha256(payload).hexdigest()
+        self.path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._save_vector_index()
 
     def learn_from_chat_text(self, conversation_text: str) -> None:
         lines = [line.strip() for line in conversation_text.splitlines() if line.strip()]
@@ -405,9 +214,9 @@ class StyleMemory:
 
     def learn_from_training_examples(self, examples: list[dict[str, str]]) -> None:
         for item in examples:
-            reply = str(item.get("reply", ""))
+            reply = str(item.get("reply", "")).strip()
             cue = str(item.get("cue", "")).strip()
-            if not reply.strip() or not cue:
+            if not reply or not cue:
                 continue
             source = str(item.get("source", "chat_zip_training"))
             self.examples.append(
@@ -588,8 +397,11 @@ class StyleMemory:
 
     def vector_relevant_examples(self, conversation_text: str, limit: int = 6) -> list[dict[str, str]]:
         query_vector = _text_vector(conversation_text)
-        data = self._load_vector_document()
-        if not query_vector or data is None:
+        if not query_vector or not self.vector_path.exists():
+            return []
+        try:
+            data = json.loads(self.vector_path.read_text(encoding="utf-8"))
+        except Exception:
             return []
         by_hash = {item.get("conversation_hash", ""): item for item in self.examples}
         scored: list[tuple[float, int, dict[str, str]]] = []
@@ -711,115 +523,6 @@ class StyleMemory:
             for item in self.examples
         )
 
-    def knowledge_records(self) -> tuple[KnowledgeRecord, ...]:
-        """Adapt legacy examples behind the strict managed-knowledge contract."""
-        records: list[KnowledgeRecord] = []
-        for index, item in enumerate(self.examples):
-            if not isinstance(item, dict):
-                raise KnowledgeSchemaError(
-                    f"examples[{index}] must be an object for knowledge adaptation"
-                )
-            def strict_string(field: str, default: str = "") -> str:
-                value = item.get(field, default)
-                if not isinstance(value, str):
-                    raise KnowledgeSchemaError(
-                        f"examples[{index}].{field} must be a string"
-                    )
-                return value
-
-            original_question = strict_string("question")
-            question = (
-                original_question
-                if original_question.strip()
-                else strict_string("cue")
-            )
-            reply = strict_string("reply")
-            if not question.strip() or not reply.strip():
-                raise KnowledgeSchemaError(
-                    f"examples[{index}] lacks a question or reply"
-                )
-            source_file = strict_string("source_file").strip()
-            source_sheet = strict_string("source_sheet").strip()
-            source_cell = strict_string("source_cell").strip()
-            source_locator = strict_string("source_locator").strip()
-            if not source_locator:
-                source_locator = (
-                    f"{source_sheet}!{source_cell}"
-                    if source_sheet and source_cell
-                    else source_cell
-                )
-            source_excerpt = strict_string("source_excerpt")
-            if not source_excerpt and source_file and source_locator:
-                source_excerpt = f"{question}\t{reply}"
-            raw: dict[str, object] = {
-                "question": question,
-                "reply": reply,
-                "organization_type": strict_string("organization_type"),
-                "keywords": [
-                    value
-                    for value in (
-                        *(
-                            part.strip()
-                            for part in re.split(
-                                r"[,，;；/、|]", strict_string("keywords")
-                            )
-                            if part.strip()
-                        ),
-                        strict_string("module").strip(),
-                        strict_string("subcategory").strip(),
-                    )
-                    if value
-                ],
-                "source_file": source_file,
-                "source_locator": source_locator,
-                "source_excerpt": source_excerpt,
-            }
-            org_scope = strict_string("org_scope").strip()
-            status = strict_string("status").strip()
-            if org_scope:
-                raw["org_scope"] = org_scope
-            if status:
-                raw["status"] = status
-            try:
-                records.append(record_from_example(raw))
-            except KnowledgeSchemaError as error:
-                raise KnowledgeSchemaError(
-                    f"examples[{index}] cannot become managed knowledge: {error}"
-                ) from error
-        return tuple(records)
-
-    def knowledge_repository(self) -> KnowledgeRepository:
-        return KnowledgeRepository(self.knowledge_records())
-
-    def managed_knowledge_repository(self) -> "ManagedKnowledgeRepository":
-        """Build the managed repository that shares the management-page ranking."""
-        return ManagedKnowledgeRepository(self)
-
-    def managed_scored_examples(
-        self, conversation_text: str, limit: int = 3
-    ) -> list[dict[str, object]]:
-        return self.managed_knowledge_repository().scored_examples(
-            conversation_text,
-            conversation_text,
-            limit=limit,
-        )
-
-    def replace_knowledge_audit_atomic(self, audit: KnowledgeAudit) -> None:
-        """Replace the complete knowledge snapshot with one validated memory write."""
-        if not isinstance(audit, KnowledgeAudit):
-            raise KnowledgeSchemaError("knowledge replacement requires KnowledgeAudit")
-        canonical = audit_records(audit.records)
-        replacement = [
-            _knowledge_record_to_example(record) for record in canonical.records
-        ]
-        previous = self.examples
-        self.examples = replacement
-        try:
-            self.save()
-        except BaseException:
-            self.examples = previous
-            raise
-
     def update_example(self, conversation_hash: str, cue: str | None = None, reply: str | None = None) -> bool:
         target = str(conversation_hash or "")
         if not target:
@@ -842,8 +545,11 @@ class StyleMemory:
         return False
 
     def _vector_by_hash(self) -> dict[str, dict[str, float]]:
-        data = self._load_vector_document()
-        if data is None:
+        if not self.vector_path.exists():
+            return {}
+        try:
+            data = json.loads(self.vector_path.read_text(encoding="utf-8"))
+        except Exception:
             return {}
         result: dict[str, dict[str, float]] = {}
         for item in data.get("items", []):
@@ -877,34 +583,7 @@ class StyleMemory:
         question_note = "常用反问或确认句" if question else "表达直接"
         self.style_summary = f"{length_note}、微信口语、{emoji_note}、{question_note}、少客服腔。"
 
-    def _load_vector_document(self) -> dict[str, object] | None:
-        self.vector_ready = False
-        if not self.vector_path.exists():
-            self.last_vector_error = "vector index is missing"
-            return None
-        try:
-            result = load_json(self.vector_path, _validate_vector_document)
-        except JsonDataError:
-            self.last_vector_error = "vector index is invalid"
-            return None
-        if result.recovered:
-            self.last_vector_error = "vector index primary is invalid"
-            return None
-        if result.data["memory_hash"] != self.content_hash():
-            self.last_vector_error = "vector index is stale"
-            return None
-        if result.data["items"] != self._build_vector_items():
-            self.last_vector_error = "vector index does not match memory"
-            return None
-        self.vector_ready = True
-        self.last_vector_error = None
-        return result.data
-
-    def _ensure_vector_index(self) -> None:
-        if self._load_vector_document() is None:
-            self.rebuild_vector_index()
-
-    def _build_vector_items(self) -> list[dict[str, object]]:
+    def _save_vector_index(self) -> None:
         items = []
         for item in self.examples:
             vector = _text_vector(f"{item.get('cue', '')}\n{item.get('reply', '')}")
@@ -918,177 +597,13 @@ class StyleMemory:
                     "vector": vector,
                 }
             )
-        return items
-
-    def rebuild_vector_index(self) -> None:
-        self.vector_ready = False
-        self.last_vector_error = None
-        try:
-            data = {
-                "version": VECTOR_SCHEMA_VERSION,
-                "dim": VECTOR_DIMENSION,
-                "memory_hash": self.content_hash(),
-                "items": self._build_vector_items(),
-            }
-            atomic_write_json(self.vector_path, data, _validate_vector_document, backup_count=5)
-        except Exception as error:
-            self.last_vector_error = f"{type(error).__name__}: vector index rebuild failed"
-            raise VectorIndexError(self.last_vector_error) from error
-        self.vector_ready = True
-        self.last_vector_error = None
-
-    def assert_ready_for_managed_reply(self) -> None:
-        if not self.vector_ready:
-            raise VectorIndexError(self.last_vector_error or "vector index is not ready")
+        data = {"version": 1, "dim": 384, "items": items}
+        self.vector_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     @staticmethod
     def _extract_phrases(text: str) -> list[str]:
         pieces = re.split(r"[，。！？、,.!?\s]+", text)
         return [piece for piece in pieces if 2 <= len(piece) <= 10]
-
-
-class ManagedKnowledgeRepository:
-    """Question-ranked view shared by managed runtime and management hit tests."""
-
-    def __init__(self, memory: StyleMemory) -> None:
-        self.memory = memory
-        provisional: list[tuple[tuple[str, str, str, str], KnowledgeRecord]] = []
-        for item, record in zip(memory.examples, memory.knowledge_records(), strict=True):
-            eligible = record if record.status == "active" else None
-            if eligible is None and _legacy_pending_question_can_be_model_reviewed(item, record):
-                eligible = _record_for_question_only_model_review(record)
-            if eligible is None:
-                continue
-            provisional.append(
-                (
-                    _managed_row_key(
-                        question=record.question,
-                        reply=record.reply,
-                        source_file=record.source_file,
-                        source_locator=record.source_locator,
-                    ),
-                    eligible,
-                )
-            )
-
-        self._repository = KnowledgeRepository(record for _key, record in provisional)
-        canonical = {
-            (record.semantic_duplicate_key, record.org_scope): record
-            for record in self._repository.records
-            if record.status == "active"
-        }
-        self._record_by_row: dict[tuple[str, str, str, str], KnowledgeRecord] = {}
-        for key, record in provisional:
-            active = canonical.get((record.semantic_duplicate_key, record.org_scope))
-            if active is not None:
-                self._record_by_row[key] = active
-
-    def _selected_rows(
-        self, question: str, recent_context: str, limit: int
-    ) -> list[tuple[dict[str, str], KnowledgeRecord, int, bool]]:
-        if not isinstance(question, str):
-            raise KnowledgeSchemaError("question must be a string")
-        if not isinstance(recent_context, str):
-            raise KnowledgeSchemaError("recent_context must be a string")
-        if type(limit) is not int or limit <= 0:
-            raise KnowledgeSchemaError("limit must be a positive integer")
-
-        ranked = self.memory.enterprise_candidates(
-            question,
-            limit=max(len(self.memory.examples), 3),
-        )
-        eligible: list[tuple[dict[str, str], KnowledgeRecord, int, bool]] = []
-        seen_record_ids: set[str] = set()
-        for row in ranked:
-            key = _managed_row_key(
-                question=str(row.get("question", "")),
-                reply=str(row.get("reply", "")),
-                source_file=str(row.get("source_file", "")),
-                source_locator=_source_locator_from_example(row),
-            )
-            record = self._record_by_row.get(key)
-            if record is None or record.record_id in seen_record_ids:
-                continue
-            try:
-                score = int(float(str(row.get("enterprise_local_score", "0"))))
-            except (TypeError, ValueError):
-                continue
-            if score < ENTERPRISE_LOCAL_CONFIDENT_FLOOR:
-                continue
-            seen_record_ids.add(record.record_id)
-            eligible.append(
-                (
-                    row,
-                    record,
-                    score,
-                    str(row.get("enterprise_exact_question", "")).strip() == "1",
-                )
-            )
-        if not eligible:
-            return []
-        top_score = eligible[0][2]
-        tied = [item for item in eligible if item[2] == top_score]
-        return (tied if len(tied) > 1 else eligible[:1])[: min(limit, 3)]
-
-    def candidates(
-        self, question: str, recent_context: str, limit: int = 3
-    ) -> list[KnowledgeCandidate]:
-        selected = self._selected_rows(question, recent_context, limit)
-        tied = len(selected) > 1
-        return [
-            KnowledgeCandidate(
-                record_id=record.record_id,
-                question=record.question,
-                answer_hash=record.answer_hash,
-                org_scope=record.org_scope,
-                score=score,
-                exact=exact,
-                reasons=(
-                    "question_only_model_review",
-                    "top_score_tie" if tied else "strict_top_score_leader",
-                ),
-            )
-            for _row, record, score, exact in selected
-        ]
-
-    def scored_examples(
-        self, question: str, recent_context: str, limit: int = 3
-    ) -> list[dict[str, object]]:
-        selected = self._selected_rows(question, recent_context, limit)
-        tied = len(selected) > 1
-        decision_fields = {
-            "enterprise_decision": "tie" if tied else "judge",
-            "enterprise_decision_label": "并列待裁决" if tied else "大模型待确认",
-            "enterprise_decision_reason": (
-                "最高分完全相同，送2-3条候选问题给大模型选择并判断一致性"
-                if tied
-                else "第一名达到30分且严格领先，只送最高分候选问题给大模型判断一致性"
-            ),
-        }
-        rows: list[dict[str, object]] = []
-        for row, record, score, exact in selected:
-            displayed: dict[str, object] = dict(row)
-            displayed.update(
-                {
-                    "question": record.question,
-                    "reply": record.reply,
-                    "library_key": ENTERPRISE_ANNUAL_REPORT_SOURCE,
-                    "library_name": _library_name(ENTERPRISE_ANNUAL_REPORT_SOURCE),
-                    "score": score,
-                    "enterprise_local_score": score,
-                    "enterprise_exact_question": "1" if exact else "",
-                    "reasons": [
-                        "question_only_model_review",
-                        "top_score_tie" if tied else "strict_top_score_leader",
-                    ],
-                    **decision_fields,
-                }
-            )
-            rows.append(displayed)
-        return rows
-
-    def get_active(self, record_id: str) -> KnowledgeRecord | None:
-        return self._repository.get_active(record_id)
 
 
 def _unique_replies(examples: list[dict[str, str]], limit: int) -> list[str]:
@@ -1148,18 +663,10 @@ def _with_training_metadata(example: dict[str, str], raw_item: dict[str, object]
         "source_sheet",
         "source_cell",
         "source_file",
-        "source_locator",
-        "keywords",
-        "org_scope",
-        "status",
     ):
-        raw_value = raw_item.get(key, "")
-        value = str(raw_value) if key in _EXACT_KNOWLEDGE_METADATA_FIELDS else str(raw_value).strip()
+        value = str(raw_item.get(key, "")).strip()
         if value:
-            example[key] = value if key in _EXACT_KNOWLEDGE_METADATA_FIELDS else value[:240]
-    source_excerpt = raw_item.get("source_excerpt", "")
-    if isinstance(source_excerpt, str) and source_excerpt:
-        example["source_excerpt"] = source_excerpt
+            example[key] = value[:240]
     priority = _parse_priority(raw_item.get("priority", ""))
     if priority:
         example["priority"] = str(priority)
@@ -1179,7 +686,7 @@ def _normalize_example(item: object) -> dict[str, str]:
         "cue": cue,
         "reply": reply,
         "source": source,
-        "created_at": str(item.get("created_at", "")),
+        "created_at": str(item.get("created_at", "")) or _utc_now(),
         "conversation_hash": str(item.get("conversation_hash", "")) or _conversation_hash(cue, reply),
     }
     for key in (
@@ -1193,18 +700,10 @@ def _normalize_example(item: object) -> dict[str, str]:
         "source_sheet",
         "source_cell",
         "source_file",
-        "source_locator",
-        "keywords",
-        "org_scope",
-        "status",
     ):
-        raw_value = item.get(key, "")
-        value = str(raw_value) if key in _EXACT_KNOWLEDGE_METADATA_FIELDS else str(raw_value).strip()
+        value = str(item.get(key, "")).strip()
         if value:
-            result[key] = value if key in _EXACT_KNOWLEDGE_METADATA_FIELDS else value[:240]
-    source_excerpt = item.get("source_excerpt", "")
-    if isinstance(source_excerpt, str) and source_excerpt:
-        result["source_excerpt"] = source_excerpt
+            result[key] = value[:240]
     priority = _parse_priority(item.get("priority", ""))
     if priority:
         result["priority"] = str(priority)
@@ -1261,7 +760,8 @@ def _normalize_reply(text: str) -> str:
 
 
 def _normalize_enterprise_reply(text: str) -> str:
-    return text if isinstance(text, str) and text.strip() else ""
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in (text or "").splitlines()]
+    return "\n".join(line for line in lines if line).strip()
 
 
 def _format_prompt_example(index: int, item: dict[str, str]) -> str:
@@ -1384,22 +884,26 @@ def _annotate_enterprise_decision(candidates: list[dict[str, str]]) -> None:
     except (TypeError, ValueError):
         next_score = 0
     margin = max(0, top_score - next_score)
+    has_conflict = str(top.get("enterprise_conflict_count", "")) not in {"", "0"}
     is_exact = str(top.get("enterprise_exact_question", "")).strip() == "1"
     is_confident = bool(
         top_score >= ENTERPRISE_LOCAL_CONFIDENT_FLOOR
-        and margin > 0
+        and not has_conflict
+        and (is_exact or margin >= ENTERPRISE_LOCAL_CONFIDENT_MARGIN)
     )
     top["enterprise_local_confident"] = "1" if is_confident else ""
-    # 只有最高分完全相同才是并列；只要第一名严格领先，就只送第一名给大模型。
+    # 并列待裁决：分数达到可靠底线但前三名并列/接近（margin<8），
+    # 运行时交给大模型从并列候选中裁决，测试页显示"并列待裁决"。
     is_tie = bool(
         not is_confident
+        and not has_conflict
         and top_score >= ENTERPRISE_LOCAL_CONFIDENT_FLOOR
-        and margin == 0
+        and margin < ENTERPRISE_LOCAL_CONFIDENT_MARGIN
         and len(candidates) >= 2
     )
     if is_confident:
-        top["enterprise_decision"] = "judge"
-        top["enterprise_decision_label"] = "大模型待确认"
+        top["enterprise_decision"] = "send"
+        top["enterprise_decision_label"] = "可直接发送"
     elif is_tie:
         top["enterprise_decision"] = "tie"
         top["enterprise_decision_label"] = "并列待裁决"
@@ -1409,13 +913,17 @@ def _annotate_enterprise_decision(candidates: list[dict[str, str]]) -> None:
     top["enterprise_next_score"] = str(next_score)
     top["enterprise_score_margin"] = str(margin)
     if is_confident:
-        top["enterprise_decision_reason"] = "精确问题，送大模型确认" if is_exact else "第一名严格领先，只送最高分候选问题给大模型确认"
+        top["enterprise_decision_reason"] = "精确问题" if is_exact else "第一名领先第二名且无时间/操作冲突"
     elif is_tie:
-        top["enterprise_decision_reason"] = "最高分完全相同，运行时送2-3条候选问题给大模型裁决"
+        top["enterprise_decision_reason"] = "前三名并列/接近，运行时交大模型裁决"
     else:
         reasons = []
-        if top_score < ENTERPRISE_LOCAL_CONFIDENT_FLOOR:
-            reasons.append("最高分低于30分")
+        if has_conflict:
+            reasons.append("存在时间/操作冲突")
+        if margin < ENTERPRISE_LOCAL_CONFIDENT_MARGIN:
+            reasons.append("第一名未明显领先第二名")
+        if top_score < ENTERPRISE_LOCAL_MIN_SCORE:
+            reasons.append("有效匹配信息不足")
         top["enterprise_decision_reason"] = "；".join(reasons) or "匹配不可靠"
 
 
@@ -1455,8 +963,6 @@ def _text_vector(text: str, dim: int = 384) -> dict[str, float]:
     for size in (2, 3, 4):
         for index in range(max(0, len(cleaned) - size + 1)):
             features[cleaned[index : index + size]] += 1
-    if not features and cleaned:
-        features[f"single:{cleaned}"] += 1
     if not features:
         return {}
     buckets: Counter[str] = Counter()
@@ -1487,23 +993,7 @@ def _dedupe_memory_examples(examples: list[dict[str, str]]) -> list[dict[str, st
         item = _normalize_example(raw_item)
         if not item:
             continue
-        if item.get("source_file") and item.get("source_locator"):
-            key = hashlib.sha256(
-                json.dumps(
-                    [
-                        item.get("question", ""),
-                        item.get("reply", ""),
-                        item.get("source_file", ""),
-                        item.get("source_locator", ""),
-                        item.get("source_excerpt", ""),
-                        item.get("org_scope", ""),
-                    ],
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ).hexdigest()
-        else:
-            key = f"{item.get('conversation_hash', '')}:{_compact_for_hash(item.get('reply', ''))}"
+        key = f"{item.get('conversation_hash', '')}:{_compact_for_hash(item.get('reply', ''))}"
         if not key:
             continue
         existing = seen.get(key)
@@ -1513,36 +1003,6 @@ def _dedupe_memory_examples(examples: list[dict[str, str]]) -> list[dict[str, st
             # 新条目带了来源文件名而旧条目没有（旧版本导入）→ 用新条目补充来源信息
             seen[key] = item
     return list(seen.values())
-
-
-def _knowledge_record_to_example(record: KnowledgeRecord) -> dict[str, str]:
-    payload = json.dumps(
-        [
-            record.record_id,
-            record.question,
-            record.reply,
-            record.source_file,
-            record.source_locator,
-        ],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return {
-        "partner": "知识库导入",
-        "cue": f"[对方] {record.question}",
-        "question": record.question,
-        "reply": record.reply,
-        "source": ENTERPRISE_ANNUAL_REPORT_SOURCE,
-        "created_at": _utc_now(),
-        "conversation_hash": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
-        "organization_type": record.organization_type,
-        "source_file": record.source_file,
-        "source_locator": record.source_locator,
-        "source_excerpt": record.source_excerpt,
-        "org_scope": record.org_scope,
-        "status": record.status,
-        "keywords": "、".join(record.keywords),
-    }
 
 
 def _clean_source(source: str) -> str:

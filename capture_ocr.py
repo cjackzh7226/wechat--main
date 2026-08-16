@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ctypes
-from difflib import SequenceMatcher
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -41,95 +40,6 @@ class VoiceBubble:
     left: float
     right: float
     y: float
-
-
-_CONTEXT_ROLE_LINE = re.compile(r"^\s*\[(我|对方|鎴|瀵规柟)\]\s*(.*?)\s*$")
-
-
-def _verification_text(text: str) -> str:
-    """Conservative OCR comparison: NFKC plus whitespace removal only."""
-    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(text or "")))
-
-
-def _context_role_messages(context: str) -> list[tuple[str, str]]:
-    messages: list[tuple[str, str]] = []
-    for line in str(context or "").splitlines():
-        matched = _CONTEXT_ROLE_LINE.match(line)
-        if not matched:
-            continue
-        role = "own" if matched.group(1) in {"我", "鎴"} else "other"
-        text = matched.group(2).strip()
-        if text:
-            messages.append((role, text))
-    return messages
-
-
-def verify_own_bubble(before_context: str, after_context: str, expected_text: str) -> str:
-    """Classify post-send OCR without treating an Enter keypress as success.
-
-    ``verified`` requires a newly observed latest own-message whose normalized
-    text equals the exact knowledge reply.  An unchanged readable context is
-    explicitly ``not_sent``; all changed-but-unprovable states are
-    ``uncertain`` so callers never retry automatically.
-    """
-    if type(before_context) is not str or type(after_context) is not str:
-        raise TypeError("verification contexts must be strings")
-    if type(expected_text) is not str or not expected_text.strip():
-        raise ValueError("expected_text must not be empty")
-    if before_context.strip() == after_context.strip():
-        return "not_sent"
-
-    before = _context_role_messages(before_context)
-    after = _context_role_messages(after_context)
-    if not after:
-        return "uncertain"
-    expected = _verification_text(expected_text)
-
-    def matches_expected(text: str) -> bool:
-        return _verification_text(text) == expected or _long_visible_reply_matches(
-            expected_text,
-            text,
-        )
-
-    before_matching = sum(
-        1 for role, text in before if role == "own" and matches_expected(text)
-    )
-    after_matching = sum(
-        1 for role, text in after if role == "own" and matches_expected(text)
-    )
-    latest_role, latest_text = after[-1]
-    if (
-        latest_role == "own"
-        and matches_expected(latest_text)
-        and after_matching > before_matching
-    ):
-        return "verified"
-    return "uncertain"
-
-
-def _long_visible_reply_matches(expected_text: str, visible_text: str) -> bool:
-    """Verify a clipped long bubble using substantial distinctive evidence."""
-    expected = "".join(
-        character
-        for character in unicodedata.normalize("NFKC", str(expected_text or ""))
-        if character.isalnum()
-    )
-    visible = "".join(
-        character
-        for character in unicodedata.normalize("NFKC", str(visible_text or ""))
-        if character.isalnum()
-    )
-    if len(expected) < 96 or len(visible) < 48:
-        return False
-    if visible in expected:
-        return True
-    matcher = SequenceMatcher(None, expected, visible, autojunk=False)
-    blocks = [block for block in matcher.get_matching_blocks() if block.size]
-    if not blocks:
-        return False
-    longest = max(block.size for block in blocks)
-    covered = sum(block.size for block in blocks)
-    return longest >= 48 and covered / len(visible) >= 0.82
 
 
 class ChatOCR:
@@ -189,45 +99,6 @@ class ChatOCR:
             text = re.sub(r"\s+", " ", str(item.get("text", "")).strip())
             if text and not _is_noise_text(text):
                 rows.append(text)
-            if len(rows) >= limit:
-                break
-        return "\n".join(rows)
-
-    def read_chat_title(self, image, limit: int = 3) -> str:
-        """Read only the actual chat identity from the WeCom title strip.
-
-        The far-right title action button is outside the identity region but
-        RapidOCR can render it as text such as ``Ω+``.  A one-stroke ``-``
-        nickname is restored only when the corresponding pixels are present
-        immediately before a marker-only ``@微信`` result.
-        """
-        results = self._recognize(image)
-        if not results:
-            return ""
-        try:
-            image_width = max(1.0, float(image.size[0]))
-        except (AttributeError, IndexError, TypeError, ValueError):
-            return ""
-        rows: list[str] = []
-        for item in sorted(
-            results,
-            key=lambda value: (float(value.get("y", 0)), float(value.get("x", 0))),
-        ):
-            left = float(item.get("left", item.get("x", 0)))
-            if left >= image_width * 0.90:
-                continue
-            text = re.sub(r"\s+", " ", str(item.get("text", "")).strip())
-            if not text or _is_noise_text(text):
-                continue
-            restored = _restore_visible_dash_sender(
-                item,
-                text,
-                image,
-                leading_search_px=16,
-            )
-            if restored != text and restored.startswith("-@"):
-                restored = f"- {restored[1:]}"
-            rows.append(restored)
             if len(rows) >= limit:
                 break
         return "\n".join(rows)
@@ -1009,17 +880,17 @@ def _is_group_sender_header(text: str) -> bool:
     if not compact or len(compact) > 64:
         return False
     markers = (
-        "@-@\u5fae\u4fe1",
+        "@-@微信",
         "@-@wecom",
-        "@\u4f01\u4e1a\u5fae\u4fe1",
-        "@\u5fae\u4fe1",
+        "@企业微信",
+        "@微信",
         "@wecom",
-        "(\u5fae\u4fe1)",
-        "(\u4f01\u4e1a\u5fae\u4fe1)",
+        "(微信)",
+        "(企业微信)",
         "(wechat)",
         "(wecom)",
-        "\u00b7\u5fae\u4fe1",
-        "\u00b7\u4f01\u4e1a\u5fae\u4fe1",
+        "·微信",
+        "·企业微信",
     )
     return compact.casefold().endswith(markers)
 
@@ -1031,13 +902,7 @@ def _restore_visible_dash_sender(
     *,
     leading_search_px: int = 2,
 ) -> str:
-    """Restore a one-stroke ``-`` nickname only when its pixels are visible.
-
-    RapidOCR intermittently returns the external-contact header ``- @微信`` as
-    just ``@微信``.  A marker-only header remains unknown unless a tiny,
-    isolated neutral-dark horizontal component is present at the OCR box's
-    leading edge.  This avoids guessing a sender name from text alone.
-    """
+    """仅在 OCR 框前沿确有短横线像素时恢复昵称 ``-``。"""
     compact = re.sub(r"\s+", "", unicodedata.normalize("NFKC", text or ""))
     if compact.casefold() not in {"@微信", "@wecom"} or image is None:
         return text

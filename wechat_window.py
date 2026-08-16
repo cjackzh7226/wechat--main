@@ -104,25 +104,11 @@ class ChatWindow:
 
 
 class ChatWindowDetector:
-    def foreground_hwnd(self) -> int:
-        if win32gui is None:
-            return 0
-        try:
-            return int(win32gui.GetForegroundWindow() or 0)
-        except Exception:
-            return 0
-
-    @staticmethod
-    def root_hwnd(hwnd: int) -> int:
-        if win32gui is None or type(hwnd) is not int or hwnd <= 0:
-            return 0
-        try:
-            return int(win32gui.GetAncestor(hwnd, 2) or hwnd)
-        except Exception:
-            return 0
-
     def foreground_chat(self) -> ChatWindow | None:
-        return self._window_from_hwnd(self.foreground_hwnd())
+        if win32gui is None:
+            return None
+        hwnd = win32gui.GetForegroundWindow()
+        return self._window_from_hwnd(hwnd)
 
     def window_from_hwnd(self, hwnd: int) -> ChatWindow | None:
         return self._window_from_hwnd(hwnd)
@@ -147,16 +133,7 @@ class ChatWindowDetector:
     def _window_from_hwnd(self, hwnd: int) -> ChatWindow | None:
         if win32gui is None:
             return None
-        try:
-            usable = bool(
-                hwnd
-                and win32gui.IsWindow(hwnd)
-                and win32gui.IsWindowVisible(hwnd)
-                and not win32gui.IsIconic(hwnd)
-            )
-        except Exception:
-            return None
-        if not usable:
+        if not hwnd or not win32gui.IsWindowVisible(hwnd):
             return None
         title = win32gui.GetWindowText(hwnd).strip()
         if not title:

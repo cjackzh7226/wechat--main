@@ -23,13 +23,6 @@ from enterprise_kb import (
     parse_enterprise_annual_report_workbook,
 )
 from llm_clients import build_text_generation_request, extract_text_from_response
-from knowledge_base import KnowledgeAudit
-from knowledge_import import (
-    ImportModelError,
-    ImportReport,
-    activate_import,
-    stage_import,
-)
 from memory import StyleMemory
 
 
@@ -37,92 +30,6 @@ from memory import StyleMemory
 class ChatTurn:
     speaker: str
     text: str
-
-
-class KnowledgeImportModelClient:
-    """Extract source-linked rows without splitting or accepting generated answers."""
-
-    def __init__(self, settings, post=None) -> None:
-        self.settings = settings
-        self.poster = post or (requests.post if requests is not None else None)
-
-    def extract(self, text: str, *, source_file: str) -> list[dict[str, object]]:
-        if not getattr(self.settings, "api_key", ""):
-            raise ImportModelError("未配置文本模型 API Key，无法提取非结构化知识文档")
-        if self.poster is None:
-            raise ImportModelError("requests 组件不可用，无法调用文本模型")
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "你只做来源定位，不生成、不改写答案。输出必须是严格 JSON 数组，"
-                    "不得使用 Markdown 或解释文字。"
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"从文件 {source_file} 的完整原文中识别问答。每项只允许字段："
-                    "question、reply、source_excerpt、keywords。"
-                    "reply 必须逐字来自 source_excerpt；source_excerpt 必须是下方原文中连续存在的原文；"
-                    "机构类型由程序根据来源原文判定，模型不要填写。无法逐字定位的内容不要补写。\n"
-                    f"完整原文：\n{text}"
-                ),
-            },
-        ]
-        request = build_text_generation_request(self.settings, messages)
-        request.payload["temperature"] = 0
-        request.payload["max_tokens"] = 4000
-        try:
-            response = self.poster(
-                request.url,
-                headers=request.headers,
-                json=request.payload,
-                timeout=180,
-            )
-            if int(getattr(response, "status_code", 200) or 200) >= 400:
-                raise RuntimeError(f"HTTP {getattr(response, 'status_code', '')}")
-            response.raise_for_status()
-            content = extract_text_from_response(response.json(), self.settings)
-            rows = json.loads((content or "").strip())
-        except Exception as error:
-            raise ImportModelError(
-                f"非结构化知识提取失败（{type(error).__name__}）"
-            ) from error
-        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-            raise ImportModelError("非结构化知识提取结果必须是 JSON 对象数组")
-        return rows
-
-
-class _MemoryKnowledgeImportRepository:
-    def __init__(self, memory: StyleMemory) -> None:
-        self.memory = memory
-
-    def current_records(self):
-        return self.memory.knowledge_records()
-
-    def replace_records_atomic(self, audit: KnowledgeAudit) -> None:
-        self.memory.replace_knowledge_audit_atomic(audit)
-
-
-def stage_training_import(
-    path: Path | str,
-    settings,
-    *,
-    post=None,
-    progress=None,
-) -> ImportReport:
-    """Stage a whole-document import; structured files never call the model."""
-    report = stage_import(Path(path), KnowledgeImportModelClient(settings, post=post))
-    if progress:
-        progress(len(report.completed_files), len(report.completed_files))
-    return report
-
-
-def activate_training_import(
-    report: ImportReport, memory: StyleMemory
-) -> KnowledgeAudit:
-    return activate_import(report, _MemoryKnowledgeImportRepository(memory))
 
 
 def parse_ab_chat_text(text: str) -> list[ChatTurn]:
@@ -427,21 +334,104 @@ def import_chat_zip_to_memory_with_llm(
     post=None,
     progress=None,
 ) -> dict[str, int]:
-    """Compatibility wrapper around the whole-document transactional importer.
+    """大模型识别导入（正式入口）：把任意格式的知识库文档交给大模型提取问答对。
 
-    ``max_examples`` is intentionally ignored: formal imports have no 3,000-record
-    truncation boundary.
+    - 所有识别出的问答统一归入企业年报总库（source=enterprise_annual_report_kb），
+      与已有条目**叠加**（不清空旧库），重复条目由 memory.save 全局去重兜底。
+    - 无 API Key 或模型识别失败时直接抛错（不做规则兜底），由 UI 提示用户。
+    - ``progress(done, total)``：按"识别分块"上报进度（总块数=所有文档分块之和）。
     """
-    del max_examples
-    report = stage_training_import(
-        Path(zip_path), settings, post=post, progress=progress
-    )
-    activate_training_import(report, memory)
+    if settings is None or not getattr(settings, "api_key", ""):
+        raise RuntimeError("未配置文本模型 API Key，无法使用大模型识别知识库")
+    poster = post or (requests.post if requests is not None else None)
+    if poster is None:
+        raise RuntimeError("requests 组件不可用，无法调用文本模型")
+
+    # 第一步：提取所有文件的纯文本并分块（进度不在这里走，块总数用于总进度）
+    plan: list[tuple[str, bytes, list[str]]] = []
+    files = 0
+    for name, raw in _iter_export_files(Path(zip_path)):
+        files += 1
+        text = _file_to_plain_text(name, raw)
+        if not text.strip():
+            continue
+        chunks = _chunk_text(text)
+        if chunks:
+            plan.append((name, raw, chunks))
+
+    if not plan:
+        if files == 0:
+            raise RuntimeError(
+                "没有找到支持的文档。支持格式：PDF、Word(docx)、Excel(xlsx/xls)、TXT/MD/CSV/TSV/JSON、HTML"
+            )
+        raise RuntimeError("未能从文件中提取出文字，请检查文件内容（PDF 若为扫描件需先转文字版）")
+
+    total_chunks = sum(len(chunks) for _name, _raw, chunks in plan)
+    done_chunks = 0
+    all_examples: list[dict[str, str]] = []
+    for name, raw, chunks in plan:
+        is_enterprise = bool(
+            detect_enterprise_annual_report_workbook(name, raw)
+            or _looks_like_enterprise_knowledge(name, _file_to_plain_text(name, raw))
+        )
+        for chunk in chunks:
+            items = _extract_qa_chunk_with_llm(name, chunk, settings, poster, is_enterprise)
+            for item in items:
+                item["source"] = ENTERPRISE_ANNUAL_REPORT_SOURCE
+                item["source_file"] = name
+                item["cue"] = f"[对方] {item.get('question', '')}"
+                _apply_org_type_tags(item)
+            all_examples.extend(items)
+            done_chunks += 1
+            if progress:
+                progress(done_chunks, total_chunks)
+
+    if not all_examples:
+        raise RuntimeError("未能从文件中识别出问答对，请检查文件内容是否包含问题与答案")
+
+    selected = _dedupe_examples(all_examples)[:max_examples]
+    # 叠加：不清空已有同源条目；重复问答由 memory.save 的全局去重兜底
+    memory.load()
+    memory.learn_from_training_examples(selected)
     return {
-        "files": len(report.completed_files),
-        "turns": len(report.records),
-        "examples": len(report.records),
+        "files": files,
+        "turns": len(selected),
+        "examples": len(selected),
     }
+
+
+def _apply_org_type_tags(item: dict[str, str]) -> None:
+    """底层规则：给知识库条目的"匹配上下文/客户说法"（cue）追加机构类型标签，提高命中率。
+
+    - cue（含问题）里提到"民办非企业单位" → 末尾追加 " / 民非"
+    - cue 里提到"社会团体" → 末尾追加 " / 社团"
+    - 两者都提到 → 依次追加 " / 民非 / 社团"
+    - 回答里出现明确条例关键词也判定：社会团体登记管理条例/社会团体年度检查暂行办法 → 社团；
+      民办非企业单位登记管理暂行条例/民办非企业单位年度检查办法 → 民非（只认明确条例全名，
+      不根据"常务理事会/理事会"之类推断）。
+    - 已有相同标签时不重复追加。
+    该函数在导入话术库的必经流程中调用（import_chat_zip_to_memory_with_llm）。
+    """
+    cue = str(item.get("cue", "")).strip()
+    text = str(item.get("question", "")) + cue
+    reply = str(item.get("reply", ""))
+    tags: list[str] = []
+    if "民办非企业单位" in text or "民非" in text:
+        tags.append("民非")
+    if "社会团体" in text or "社团" in text:
+        tags.append("社团")
+    # 明确条例关键词（独立判定，与 cue 文本互不干扰）：
+    if "民办非企业单位登记管理暂行条例" in reply or "民办非企业单位年度检查办法" in reply:
+        if "民非" not in tags:
+            tags.append("民非")
+    if "社会团体登记管理条例" in reply or "社会团体年度检查暂行办法" in reply:
+        if "社团" not in tags:
+            tags.append("社团")
+    for tag in tags:
+        if f"/ {tag}" in cue or cue.endswith(tag):
+            continue
+        cue = f"{cue} / {tag}"
+    item["cue"] = cue
 
 
 def _file_to_plain_text(name: str, raw: bytes) -> str:
@@ -477,6 +467,149 @@ def _pdf_text(raw: bytes) -> str:
         return "\n".join(pages).strip()
     except Exception as exc:
         raise RuntimeError(f"PDF 文本提取失败：{exc}") from exc
+
+
+def _chunk_text(text: str, max_chars: int = 5000) -> list[str]:
+    """按段落边界切块，避免单次调用超出模型上下文。
+
+    分块越小，单块问答对越少，模型输出 JSON 越不容易被 max_tokens 截断。
+    """
+    text = text.strip()
+    if not text:
+        return []
+    if len(text) <= max_chars:
+        return [text]
+    chunks: list[str] = []
+    current = ""
+    for line in text.splitlines():
+        if current and len(current) + len(line) + 1 > max_chars:
+            chunks.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    if current.strip():
+        chunks.append(current)
+    return chunks
+
+
+def _looks_like_enterprise_knowledge(file_name: str, text: str) -> bool:
+    """宽松的企业年报知识库判定：文件名或内容出现年报/年检特征即视为企业知识库。
+
+    大模型导入场景下用户文档格式多样（txt/docx/xls 等），不能只依赖 .xlsx 结构检测。
+    """
+    name_l = file_name.lower()
+    if any(keyword in name_l for keyword in ("年报", "年检", "年审", "annual", "年度报告")):
+        return True
+    sample = text[:2000]
+    return ("机构类型" in sample or "模块" in sample) and "问题" in sample and "答" in sample
+
+
+def _extract_qa_with_llm(
+    file_name: str,
+    text: str,
+    raw: bytes,
+    settings,
+    poster,
+) -> list[dict[str, str]]:
+    is_enterprise = bool(
+        detect_enterprise_annual_report_workbook(file_name, raw)
+        or _looks_like_enterprise_knowledge(file_name, text)
+    )
+    items: list[dict[str, str]] = []
+    for chunk in _chunk_text(text):
+        items.extend(_extract_qa_chunk_with_llm(file_name, chunk, settings, poster, is_enterprise))
+    source = "enterprise_annual_report_kb" if is_enterprise else "chat_zip_training"
+    for item in items:
+        item["source"] = source
+        item["cue"] = f"[对方] {item.get('question', '')}"
+    return items
+
+
+def _extract_qa_chunk_with_llm(
+    file_name: str,
+    chunk: str,
+    settings,
+    poster,
+    is_enterprise: bool,
+) -> list[dict[str, str]]:
+    extra_rule = (
+        "5. 这份文档是企业年报问答表，请额外识别 organization_type（机构类型，如：社会团体/民办非企业单位，"
+        "没有则填空字符串）。\n"
+        if is_enterprise
+        else ""
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是企业知识库整理助手。只根据用户提供的文档内容提取问答对，不要编造文档中没有的内容。"
+                "输出必须是严格 JSON 数组，不要 Markdown。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"请从下面的文档（文件名：{file_name}）中识别出所有“客户问题-标准回答”对，整理成 JSON 数组。\n"
+                "每项格式：{\"question\": \"客户会问的问题（保留原文问法）\", "
+                "\"reply\": \"标准回答（保留原文完整答案，不要省略、不要改写）\", "
+                "\"module\": \"所属分类（如：年检/填报/登录，没有则填空字符串）\"}\n"
+                "要求：\n"
+                "1. question 用客户角度的自然问法，覆盖文档中的原问题或原说法；\n"
+                "2. reply 必须是文档中的完整标准答案，不要缩写；\n"
+                "3. 文档里没有明确问答关系的表头、说明文字不要收录；\n"
+                "4. 只输出 JSON 数组，不要任何多余文字。\n"
+                f"{extra_rule}"
+                f"文档内容：\n{chunk}"
+            ),
+        },
+    ]
+    request = build_text_generation_request(settings, messages)
+    # 输出配额要够大：单块问答对可能十几条，2000 token 会被截断导致 JSON 不完整
+    request.payload["max_tokens"] = 4000
+    # 超时放宽到 180 秒：长文档 + 长 JSON 输出，智谱 glm 等模型可能超过 60 秒
+    try:
+        response = poster(request.url, headers=request.headers, json=request.payload, timeout=180)
+    except Exception as exc:
+        raise RuntimeError(f"大模型识别失败（调用异常）：{exc}") from exc
+    if int(getattr(response, "status_code", 200) or 200) >= 400:
+        raise RuntimeError(f"大模型识别失败：HTTP {getattr(response, 'status_code', '')}")
+    try:
+        response.raise_for_status()
+        content = extract_text_from_response(response.json(), settings)
+    except Exception as exc:
+        raise RuntimeError(f"大模型识别失败（响应解析异常）：{exc}") from exc
+    parsed = _parse_qa_json(content)
+    return parsed
+
+
+def _parse_qa_json(content: str) -> list[dict[str, str]]:
+    text = (content or "").strip()
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text).strip()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"大模型输出不是有效 JSON：{str(exc)[:120]}") from exc
+    if not isinstance(data, list):
+        raise RuntimeError("大模型输出不是 JSON 数组")
+    items: list[dict[str, str]] = []
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        question = str(row.get("question", "")).strip()
+        reply = str(row.get("reply", "")).strip()
+        if not question or not reply:
+            continue
+        item: dict[str, str] = {"question": question, "reply": reply}
+        module = str(row.get("module", "")).strip()
+        if module:
+            item["module"] = module
+        org_type = str(row.get("organization_type", "")).strip()
+        if org_type:
+            item["organization_type"] = org_type
+        items.append(item)
+    if not items:
+        raise RuntimeError("大模型识别结果为空（未找到问答对）")
+    return items
 
 
 def _decode_chat_bytes(raw: bytes) -> str:

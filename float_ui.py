@@ -3,44 +3,11 @@ from __future__ import annotations
 import threading
 import tkinter as tk
 import webbrowser
-import re
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from pathlib import Path
 
 from llm_clients import provider_defaults, provider_labels, supported_provider_help
 from settings import AppSettings
-
-
-SOURCE_MODE_OPTIONS = (("knowledge_only", "\u4ec5\u4f7f\u7528\u77e5\u8bc6\u5e93"),)
-MANAGED_MODE_OPTIONS = (
-    ("off", "\u5173\u95ed"),
-    ("observe", "\u89c2\u5bdf"),
-    ("controlled", "\u53d7\u63a7"),
-    ("full", "\u5168\u6258\u7ba1"),
-)
-
-
-def managed_mode_label(value: str) -> str:
-    labels = {mode: label for mode, label in MANAGED_MODE_OPTIONS}
-    return labels.get(str(value), labels["off"])
-
-
-def managed_mode_value(value: str) -> str:
-    text = str(value)
-    modes = {mode for mode, _label in MANAGED_MODE_OPTIONS}
-    if text in modes:
-        return text
-    labels = {label: mode for mode, label in MANAGED_MODE_OPTIONS}
-    return labels.get(text, "off")
-
-
-def parse_managed_allowed_chats(value: str) -> list[str]:
-    chats: list[str] = []
-    for item in re.split(r"[,;\n\uff0c\uff1b]+", value):
-        chat = item.strip()
-        if chat and chat not in chats:
-            chats.append(chat)
-    return chats
 
 TEXT = {
     "title": "聊小智",
@@ -49,13 +16,13 @@ TEXT = {
     "settings": "\u8bbe\u7f6e",
     "context": "\u5f53\u524d\u804a\u5929\u4e0a\u4e0b\u6587",
     "progress": "\u8bc6\u522b\u8fdb\u5ea6",
-    "recognize": "识别并处理当前聊天",
+    "recognize": "\u8bc6\u522b\u5f53\u524d\u804a\u5929",
     "training": "\u8bad\u7ec3\u6a21\u5f0f  i",
     "training_tip": "\u8bad\u7ec3\u6a21\u5f0f\uff1a\u6301\u7eed\u8bc6\u522b\u5f53\u524d\u804a\u5929\uff0c\u53ea\u5b66\u4e60\u4e0a\u4e0b\u6587\u548c\u4f60\u5b9e\u9645\u53d1\u51fa\u7684\u56de\u590d\uff0c\u7528\u6765\u589e\u52a0\u573a\u666f\u8bdd\u672f\u5e93\u3002\u4e0d\u4f1a\u81ea\u52a8\u53d1\u9001\u6d88\u606f\u3002",
     "auto": "\u81ea\u52a8  i",
     "managed": "\u5168\u6258\u7ba1  i",
     "auto_tip": "自动识别：当你切换微信、企业微信或 QQ 聊天时，程序会自动截图 OCR 并生成候选回复。适合 OCR 稳定后再开。",
-    "managed_tip": "\u5168\u6258\u7ba1\uff1a\u4ec5\u4f7f\u7528\u77e5\u8bc6\u5e93\u4e2d\u5df2\u6279\u51c6\u7684\u7b54\u6848\uff0c\u6a21\u578b\u4ec5\u7528\u4e8e\u5019\u9009\u6392\u5e8f\u4e0e\u4e00\u81f4\u6027\u5224\u65ad\uff0c\u4e0d\u4f1a\u751f\u6210\u6216\u6539\u5199\u7b54\u6848\u3002\u65e0\u53ef\u9760\u547d\u4e2d\u65f6\u56fa\u5b9a\u56de\u590d\uff1a\u6682\u672a\u67e5\u5230\u5bf9\u5e94\u7b54\u6848\u3002\u5168\u6258\u7ba1\u53d1\u9001\u4e0d\u5199\u5165\u8bb0\u5fc6\uff0c\u5efa\u8bae OCR \u7a33\u5b9a\u540e\u518d\u5f00\u3002",
+    "managed_tip": "\u5168\u6258\u7ba1\uff1a\u81ea\u52a8\u8bc6\u522b\u5f53\u524d\u804a\u5929\uff0c\u751f\u62103\u6761\u5019\u9009\u540e\u5148\u5ba1\u6838\u4e0a\u4e0b\u6587\u548c\u8bed\u5883\uff0c\u518d\u53d1\u9001\u6700\u5408\u9002\u7684\u4e00\u6761\u3002\u5168\u6258\u7ba1\u53d1\u9001\u4e0d\u5199\u5165\u8bb0\u5fc6\uff0c\u5efa\u8bae OCR \u7a33\u5b9a\u540e\u518d\u5f00\u3002",
     "replies": "\u5019\u9009\u56de\u590d",
     "reply_source_empty": "来源：未生成",
     "regen": "\u91cd\u65b0\u751f\u6210\u56de\u590d",
@@ -77,9 +44,9 @@ TEXT = {
     "supported_api": supported_provider_help(),
     "reply_source_mode": "回复来源",
     "reply_source_tip": (
-        "仅使用知识库：回复只能来自已批准的知识记录。\n"
-        "模型仅用于候选排序与一致性判断，不会生成或改写答案。\n"
-        "无可靠命中时固定回复：暂未查到对应答案"
+        "大模型：只用智谱/DeepSeek 等接口根据当前上下文生成。\n"
+        "话术库：优先用你导入或发送后积累的长期记忆；没有相似数据时自动用大模型兜底。\n"
+        "大模型+话术库：先检索相似历史样例，再交给大模型生成，默认推荐。"
     ),
     "source_model": "大模型",
     "source_memory": "话术库",
@@ -143,9 +110,9 @@ TEXT["usage_body"] = (
     "5. 可以点候选右侧“发”直接发送，或点“改”后在下方编辑再发送。\n"
     "6. 只有手动确认发送的候选/手动输入内容，才会写入长期记忆；全托管发送不会写入记忆。\n\n"
     "回复来源：\n"
-    "1. 仅使用知识库：回复只能来自已批准的知识记录。\n"
-    "2. 模型仅用于候选排序与一致性判断，不会生成或改写答案。\n"
-    "3. 无可靠命中时固定回复：暂未查到对应答案。\n\n"
+    "1. 大模型：只根据当前聊天上下文调用你填写的模型接口生成。\n"
+    "2. 话术库：优先从你导入或发送后积累的长期记忆中找相似回复；没有可用数据时会用大模型兜底。\n"
+    "3. 大模型+话术库：先检索相似历史片段，再交给大模型理解当前语境生成。\n\n"
     "本地语料库 / 检索说明：\n"
     "1. 导入训练包后，程序会在本机生成长期记忆语料库，保存完整上下文、真实回复、来源和去重标识。\n"
     "2. 当前版本的语料库保存在 memory.json，主要用于本地相似历史检索和大模型提示词参考。\n"
@@ -216,7 +183,7 @@ class ReplyAssistantUI:
         self.progress_var = tk.StringVar(value="")
         self.training_var = tk.BooleanVar(value=self.settings.training_mode)
         self.auto_var = tk.BooleanVar(value=self.settings.auto_recognize)
-        self.managed_var = tk.StringVar(value=managed_mode_label(self.settings.managed_mode))
+        self.managed_var = tk.BooleanVar(value=self.settings.managed_auto_reply)
         self.source_mode_var = tk.StringVar(value=self.settings.reply_source_mode)
         self.source_mode_label_var = tk.StringVar(value=self._source_mode_short_label(self.settings.reply_source_mode))
         self.selected_reply = ""
@@ -341,20 +308,17 @@ class ReplyAssistantUI:
         Tooltip(auto, TEXT["auto_tip"])
         managed_group = tk.Frame(mode_row, bg=COLORS["page"])
         managed_group.pack(side="right", padx=(4, 0))
-        managed = tk.OptionMenu(
+        managed = tk.Checkbutton(
             managed_group,
-            self.managed_var,
-            *[label for _mode, label in MANAGED_MODE_OPTIONS],
-            command=self._set_managed_mode,
-        )
-        managed.configure(
-            bg=COLORS["panel"],
+            text=TEXT["managed"],
+            variable=self.managed_var,
+            command=self._toggle_managed,
+            bg=COLORS["page"],
             fg=COLORS["muted"],
             activebackground=COLORS["page"],
+            selectcolor=COLORS["panel"],
             font=("Microsoft YaHei UI", 10),
-            relief="flat",
-            borderwidth=0,
-            highlightthickness=0,
+            padx=4,
         )
         managed.pack(side="left")
         Tooltip(managed, TEXT["managed_tip"])
@@ -582,57 +546,65 @@ class ReplyAssistantUI:
         self.callbacks["training_changed"](enabled)
 
     def _toggle_managed(self) -> None:
-        value = self.managed_var.get()
-        self._set_managed_mode("full" if value is True else "off" if value is False else str(value))
-
-    def _set_managed_mode(self, mode: str, *, persist: bool = True) -> None:
-        selected = managed_mode_value(mode)
-        self.managed_var.set(managed_mode_label(selected))
-        self.settings.managed_mode = selected
-        if selected != "off":
+        enabled = bool(self.managed_var.get())
+        self.settings.managed_auto_reply = enabled
+        if enabled:
             self.settings.auto_recognize = True
             self.auto_var.set(True)
-        if "managed_mode_changed" in self.callbacks:
-            self.callbacks["managed_mode_changed"](selected)
-        elif "managed_changed" in self.callbacks:
-            self.callbacks["managed_changed"](selected == "full")
-        self.settings.managed_mode = selected
-        if selected != "off":
-            self.settings.auto_recognize = True
-            self.auto_var.set(True)
-        if persist:
-            self.settings.save()
+        self.settings.save()
+        self.callbacks["managed_changed"](enabled)
 
     def _toggle_source_mode(self) -> None:
         mode = self._source_mode_value(self.source_mode_label_var.get())
         self._set_source_mode(mode)
 
     def _set_source_mode(self, mode: str) -> None:
-        del mode
-        self.source_mode_var.set("knowledge_only")
-        self.source_mode_label_var.set(self._source_mode_short_label("knowledge_only"))
-        self.settings.reply_source_mode = "knowledge_only"
+        self.source_mode_var.set(mode)
+        self.source_mode_label_var.set(self._source_mode_short_label(mode))
+        self.settings.reply_source_mode = mode if mode in {"model", "memory", "model_memory"} else "model_memory"
         self.settings.save()
         self._refresh_source_menu()
+        if "source_mode_changed" in self.callbacks:
+            self.callbacks["source_mode_changed"](self.settings.reply_source_mode)
 
     def _refresh_source_menu(self) -> None:
         if not hasattr(self, "source_menu"):
             return
-        current = "knowledge_only"
-        items = SOURCE_MODE_OPTIONS
+        current = self.settings.reply_source_mode if self.settings.reply_source_mode in {"model", "memory", "model_memory"} else "model_memory"
+        # 用户要求：移除"大模型"（model）选项，只保留"话术库"与"大模型+话术库"；
+        # model 分支代码保留不影响主程序。
+        items = [
+            ("memory", TEXT["source_memory"]),
+            ("model_memory", TEXT["source_model_memory"]),
+        ]
         self.source_menu.delete(0, "end")
         for value, label in items:
             prefix = "✓ " if value == current else "   "
             self.source_menu.add_command(label=f"{prefix}{label}", command=lambda selected=value: self._set_source_mode(selected))
 
     def _source_mode_label(self, value: str) -> str:
-        return dict(SOURCE_MODE_OPTIONS).get(value, dict(SOURCE_MODE_OPTIONS)["knowledge_only"])
+        return {
+            "model": TEXT["source_model"],
+            "memory": TEXT["source_memory"],
+            "model_memory": TEXT["source_model_memory"],
+        }.get(value, TEXT["source_model_memory"])
 
     def _source_mode_short_label(self, value: str) -> str:
-        return self._source_mode_label(value)
+        return {
+            "model": TEXT["source_model_short"],
+            "memory": TEXT["source_memory_short"],
+            "model_memory": TEXT["source_model_memory_short"],
+        }.get(value, TEXT["source_model_memory_short"])
 
     def _source_mode_value(self, label: str) -> str:
-        return {option_label: value for value, option_label in SOURCE_MODE_OPTIONS}.get(label, "knowledge_only")
+        return {
+            TEXT["source_model"]: "model",
+            TEXT["source_memory"]: "memory",
+            TEXT["source_model_memory"]: "model_memory",
+            TEXT["source_model_short"]: "model",
+            TEXT["source_memory_short"]: "memory",
+            TEXT["source_model_memory_short"]: "model_memory",
+        }.get(label, "model_memory")
 
     def set_status(self, text: str) -> None:
         self.status_var.set(text)
@@ -650,16 +622,16 @@ class ReplyAssistantUI:
             pass
 
     def _run_llm_import_with_progress(self, zip_path: str, parent_window: tk.Toplevel, on_success=None) -> None:
-        """导入知识库：结构化直读，非结构化整篇提取，后台完成暂存校验。
+        """导入话术库：选择文件后弹过渡窗口显示大模型拆解进度，后台线程执行。
 
-        进度条按已完成文件推进，到达 100% 时暂存和激活完成；
+        进度条按"大模型识别分块"推进，到达 100% 时拆解完成；
         成功显示"训练包已导入：..."，失败弹错误提示。
         """
         win = tk.Toplevel(parent_window)
         win.title(TEXT["import_training"])
         win.resizable(False, False)
         win.attributes("-topmost", True)
-        tk.Label(win, text="正在校验并暂存知识文档，请稍候...").pack(padx=24, pady=(16, 4))
+        tk.Label(win, text="大模型正在分解知识文档，请稍候...").pack(padx=24, pady=(16, 4))
         bar = ttk.Progressbar(win, length=320, mode="determinate", maximum=100)
         bar.pack(padx=24, pady=8)
         pct_label = tk.Label(win, text="0%")
@@ -1149,59 +1121,28 @@ class ReplyAssistantUI:
         body_editor.insert("1.0", self.settings.custom_body)
         body_editor.pack(fill="x", pady=(3, 10))
 
-        web_search_var = tk.BooleanVar(value=False)
+        web_search_var = tk.BooleanVar(value=bool(getattr(self.settings, "enable_web_search", True)))
+        web_search_check = tk.Checkbutton(
+            api_detail_frame,
+            text=TEXT["web_search"],
+            variable=web_search_var,
+            bg=COLORS["page"],
+            fg=COLORS["text"],
+            selectcolor=COLORS["page"],
+            activebackground=COLORS["page"],
+            activeforeground=COLORS["text"],
+            font=("Microsoft YaHei UI", 10),
+        )
+        web_search_check.pack(anchor="w", pady=(0, 2))
         tk.Label(
             api_detail_frame,
-            text="\u6b63\u5f0f\u6a21\u5f0f\u7981\u7528\u8054\u7f51\u641c\u7d22\uff0c\u56de\u590d\u4ec5\u6765\u81ea\u672c\u5730\u77e5\u8bc6\u5e93\u3002",
+            text=TEXT["web_search_tip"],
             bg=COLORS["page"],
             fg=COLORS["muted"],
             justify="left",
             wraplength=560,
             anchor="w",
         ).pack(fill="x", pady=(0, 10))
-
-        managed_mode_var = tk.StringVar(value=managed_mode_label(self.settings.managed_mode))
-        tk.Label(
-            frame,
-            text="\u6258\u7ba1\u6a21\u5f0f",
-            bg=COLORS["page"],
-            fg=COLORS["muted"],
-            anchor="w",
-        ).pack(fill="x")
-        managed_mode_menu = tk.OptionMenu(
-            frame,
-            managed_mode_var,
-            *[label for _mode, label in MANAGED_MODE_OPTIONS],
-        )
-        managed_mode_menu.configure(
-            bg=COLORS["panel"],
-            fg=COLORS["text"],
-            relief="flat",
-            borderwidth=0,
-            highlightthickness=0,
-        )
-        managed_mode_menu.pack(fill="x", ipady=3, pady=(3, 8))
-        tk.Label(
-            frame,
-            text="\u53d7\u63a7\u6a21\u5f0f\u5141\u8bb8\u7684\u804a\u5929\uff08\u6bcf\u884c\u6216\u9017\u53f7\u5206\u9694\uff09",
-            bg=COLORS["page"],
-            fg=COLORS["muted"],
-            anchor="w",
-        ).pack(fill="x")
-        managed_allowlist_editor = scrolledtext.ScrolledText(
-            frame,
-            height=3,
-            wrap="word",
-            relief="flat",
-            borderwidth=0,
-            bg=COLORS["panel"],
-            fg=COLORS["text"],
-            font=("Microsoft YaHei UI", 9),
-            padx=8,
-            pady=6,
-        )
-        managed_allowlist_editor.insert("1.0", "\n".join(self.settings.managed_allowed_chats))
-        managed_allowlist_editor.pack(fill="x", pady=(3, 10))
 
         vision_detail_visible = tk.BooleanVar(value=False)
         vision_detail_frame = tk.Frame(frame, bg=COLORS["page"])
@@ -1424,7 +1365,7 @@ class ReplyAssistantUI:
                 self.settings.custom_headers = headers_var.get().strip()
                 self.settings.custom_body = body_editor.get("1.0", "end").strip()
                 self.settings.custom_response_path = response_path_var.get().strip()
-                self.settings.enable_web_search = False
+                self.settings.enable_web_search = web_search_var.get()
                 self.settings.save()
                 result = self.callbacks["analyze_sop_training"](source_path)
             except Exception as exc:
@@ -1491,11 +1432,7 @@ class ReplyAssistantUI:
             self.settings.custom_headers = headers_var.get().strip()
             self.settings.custom_body = body_editor.get("1.0", "end").strip()
             self.settings.custom_response_path = response_path_var.get().strip()
-            self.settings.enable_web_search = False
-            self.settings.managed_allowed_chats = parse_managed_allowed_chats(
-                managed_allowlist_editor.get("1.0", "end")
-            )
-            self._set_managed_mode(managed_mode_var.get(), persist=False)
+            self.settings.enable_web_search = web_search_var.get()
             self.settings.save()
             self.set_status(TEXT["saved"])
             dialog.destroy()

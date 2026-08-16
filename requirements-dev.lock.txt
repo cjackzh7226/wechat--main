@@ -1,3 +1,0 @@
--r requirements-runtime.lock.txt
-pytest==9.1.1
-pyinstaller==6.21.0
