@@ -18,7 +18,6 @@ from knowledge_base import (
     KnowledgeSchemaError,
     audit_records,
     record_from_example,
-    resolve_query_scope,
 )
 
 
@@ -66,42 +65,6 @@ _EXACT_KNOWLEDGE_METADATA_FIELDS = frozenset(
 
 class VectorIndexError(RuntimeError):
     """Raised when the vector index is unavailable for managed replies."""
-
-
-def _legacy_enterprise_provenance_scope(
-    *,
-    source: str,
-    source_file: str,
-    source_locator: str,
-    source_excerpt: str,
-    reply: str,
-    org_scope: str,
-    status: str,
-) -> str:
-    """Recover only the strongly evidenced scope of the legacy v4 knowledge rows.
-
-    The migration deliberately left unscoped rows pending.  A subset came from
-    the old enterprise knowledge snapshot and retained the complete approved
-    answer as its source excerpt.  Those rows can be made sendable without
-    guessing only when the immutable legacy locator matches, the excerpt is the
-    exact answer, and that answer itself names exactly one organization scope.
-    Chat-learned rows, arbitrary pending imports, conflicting scope text and
-    incomplete provenance remain pending.
-    """
-    if (
-        source != ENTERPRISE_ANNUAL_REPORT_SOURCE
-        or org_scope != "unknown"
-        or status != "pending"
-        or Path(source_file).name.casefold() != "memory.json"
-        or re.fullmatch(r"examples\[\d+\]", source_locator) is None
-        or not reply.strip()
-        or source_excerpt.strip() != reply.strip()
-    ):
-        return "unknown"
-    inferred = resolve_query_scope(source_excerpt, "")
-    return inferred if inferred in {"social", "mfei"} else "unknown"
-
-
 # 企业年报"可直接发送"的可靠底线：第一名分数不低于该值且明显领先第二名（>=8 分）且无冲突。
 # 2026-08-05 用户要求低分阈值 20 -> 30：命中评分 < 30 时回复企业未命中文案。
 ENTERPRISE_LOCAL_CONFIDENT_FLOOR = 30
@@ -567,89 +530,6 @@ class StyleMemory:
             rows.append(row)
         return rows
 
-    def managed_scored_examples(
-        self, conversation_text: str, limit: int = 3
-    ) -> list[dict[str, object]]:
-        """Return exactly the scoped, sendable candidates used by managed replies.
-
-        The management screen used to expose the legacy fuzzy ranking, which could
-        display pending or wrong-scope rows that runtime would never send.  Keep the
-        screen honest by adapting the strict repository result instead.  Candidate
-        answers are still shown locally for review; the model receives questions
-        only through :class:`CandidateJudge`.
-        """
-        if type(limit) is not int or limit <= 0:
-            raise ValueError("limit must be a positive integer")
-        query = _last_other_text(conversation_text) or conversation_text
-        repository = self.knowledge_repository()
-        candidates = repository.candidates(query, conversation_text, min(limit, 3))
-        if not candidates:
-            return []
-
-        originals: dict[tuple[str, str, str, str], dict[str, str]] = {}
-        for item in self.examples:
-            source_locator = str(item.get("source_locator", "")).strip()
-            if not source_locator:
-                source_sheet = str(item.get("source_sheet", "")).strip()
-                source_cell = str(item.get("source_cell", "")).strip()
-                source_locator = (
-                    f"{source_sheet}!{source_cell}"
-                    if source_sheet and source_cell
-                    else source_cell
-                )
-            key = (
-                str(item.get("question", "")) or str(item.get("cue", "")),
-                str(item.get("reply", "")),
-                str(item.get("source_file", "")).strip(),
-                source_locator,
-            )
-            originals.setdefault(key, item)
-
-        is_tie = len(candidates) > 1
-        decision_fields = {
-            "enterprise_decision": "tie" if is_tie else "judge",
-            "enterprise_decision_label": "并列待裁决" if is_tie else "大模型待确认",
-            "enterprise_decision_reason": (
-                "候选分差小于8分，送2-3条给大模型选择并判断一致性"
-                if is_tie
-                else "第一名达到30分且领先，仅送最高分候选给大模型判断一致性"
-            ),
-        }
-        rows: list[dict[str, object]] = []
-        for candidate in candidates:
-            record = repository.get_active(candidate.record_id)
-            if record is None:
-                continue
-            key = (
-                record.question,
-                record.reply,
-                record.source_file,
-                record.source_locator,
-            )
-            original = originals.get(key)
-            row: dict[str, object] = dict(
-                original if original is not None else _knowledge_record_to_example(record)
-            )
-            row.update(
-                {
-                    "question": record.question,
-                    "reply": record.reply,
-                    "source_file": record.source_file,
-                    "source_locator": record.source_locator,
-                    "org_scope": record.org_scope,
-                    "status": record.status,
-                    "library_key": ENTERPRISE_ANNUAL_REPORT_SOURCE,
-                    "library_name": _library_name(ENTERPRISE_ANNUAL_REPORT_SOURCE),
-                    "score": candidate.score,
-                    "enterprise_local_score": candidate.score,
-                    "enterprise_exact_question": "1" if candidate.exact else "",
-                    "reasons": list(candidate.reasons),
-                    **decision_fields,
-                }
-            )
-            rows.append(row)
-        return rows
-
     def has_enterprise_annual_report_knowledge(self) -> bool:
         return any(item.get("source") == ENTERPRISE_ANNUAL_REPORT_SOURCE for item in self.examples)
 
@@ -848,18 +728,6 @@ class StyleMemory:
             }
             org_scope = strict_string("org_scope").strip()
             status = strict_string("status").strip()
-            recovered_scope = _legacy_enterprise_provenance_scope(
-                source=strict_string("source").strip(),
-                source_file=source_file,
-                source_locator=source_locator,
-                source_excerpt=source_excerpt,
-                reply=reply,
-                org_scope=org_scope,
-                status=status,
-            )
-            if recovered_scope != "unknown":
-                org_scope = recovered_scope
-                status = "active"
             if org_scope:
                 raw["org_scope"] = org_scope
             if status:

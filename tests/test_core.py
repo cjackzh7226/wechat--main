@@ -88,11 +88,6 @@ def _enterprise_history_lookup_examples(history_reply: str) -> list[dict[str, st
             "module": "年检",
             "subcategory": "填报",
             "source_cell": "C11:D11",
-            "source_file": "年度报告知识库.xlsx",
-            "source_locator": "年报问答!C11:D11",
-            "source_excerpt": history_reply,
-            "org_scope": "both",
-            "status": "active",
         },
         {
             "source": "enterprise_annual_report_kb",
@@ -102,11 +97,6 @@ def _enterprise_history_lookup_examples(history_reply: str) -> list[dict[str, st
             "module": "年检",
             "subcategory": "填报",
             "source_cell": "C15:D15",
-            "source_file": "年度报告知识库.xlsx",
-            "source_locator": "年报问答!C15:D15",
-            "source_excerpt": "在已生成本年度年度工作报告的操作栏点“修改”填写。",
-            "org_scope": "both",
-            "status": "active",
         },
         {
             "source": "enterprise_annual_report_kb",
@@ -116,11 +106,6 @@ def _enterprise_history_lookup_examples(history_reply: str) -> list[dict[str, st
             "module": "年检",
             "subcategory": "填报",
             "source_cell": "C10:D10",
-            "source_file": "年度报告知识库.xlsx",
-            "source_locator": "年报问答!C10:D10",
-            "source_excerpt": "导出 PDF 后再打印。",
-            "org_scope": "both",
-            "status": "active",
         },
     ]
 
@@ -308,13 +293,12 @@ class MemoryTests(unittest.TestCase):
             app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
             app.memory = memory
 
-            query = "往年年度工作报告怎么看"
-            runtime = memory.knowledge_repository().candidates(query, query, limit=3)
-            display = app._get_phrasebook_examples("enterprise_annual_report_kb", query)
+            runtime = memory.enterprise_candidates("怎么查以前的年度报告", limit=1)
+            display = app._get_phrasebook_examples("enterprise_annual_report_kb", "怎么查以前的年度报告")
 
-            self.assertEqual(runtime[0].question, "往年年度工作报告如何查看？")
-            self.assertEqual(display[0]["question"], runtime[0].question)
-            self.assertEqual(display[0]["score"], runtime[0].score)
+            self.assertEqual(runtime[0]["source_cell"], "C11:D11")
+            self.assertEqual(display[0]["source_cell"], runtime[0]["source_cell"])
+            self.assertEqual(display[0]["score"], runtime[0]["enterprise_local_score"])
 
     def test_enterprise_decision_accepts_clear_margin_below_legacy_76_gate(self):
         import main
@@ -322,18 +306,18 @@ class MemoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             memory = StyleMemory(Path(tmp) / "memory.json")
             memory.learn_from_training_examples(_enterprise_history_lookup_examples("历史报告请到公示页面查询。"))
-            query = "往年年度工作报告怎么看"
-            candidates = memory.knowledge_repository().candidates(query, query, limit=3)
+            candidates = memory.enterprise_candidates("想查一下之前的年报", limit=3)
             app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
             app.memory = memory
 
-            self.assertLess(candidates[0].score, 76)
-            self.assertGreaterEqual(candidates[0].score, 30)
+            self.assertLess(int(candidates[0]["enterprise_local_score"]), 76)
+            self.assertEqual(candidates[0]["enterprise_local_confident"], "1")
+            self.assertEqual(candidates[0]["enterprise_decision_label"], "可直接发送")
 
-            display = app._get_phrasebook_examples("enterprise_annual_report_kb", query)
+            display = app._get_phrasebook_examples("enterprise_annual_report_kb", "想查一下之前的年报")
 
-            self.assertEqual(display[0]["enterprise_decision_label"], "大模型待确认")
-            self.assertEqual(display[0]["enterprise_decision"], "judge")
+            self.assertEqual(display[0]["enterprise_decision_label"], "可直接发送")
+            self.assertEqual(display[0]["enterprise_decision"], "send")
 
     def test_enterprise_semantic_scope_without_annual_report_word_returns_official_answer(self):
         settings = AppSettings(api_key="configured", reply_source_mode="model")
@@ -412,12 +396,12 @@ class MemoryTests(unittest.TestCase):
         app.memory = memory
         display = app._get_phrasebook_examples("enterprise_annual_report_kb", "年度工作报告在哪里找")
 
-        # 管理页只展示严格托管候选；运行时交大模型先选再判，
-        # 一致 → 发送被选中候选（不再显示 pending/错机构范围的旧候选）。
+        # 测试页与运行时共用 tie 决策（显示"并列待裁决"）；运行时交大模型先选再判，
+        # 一致 → 发送被选中候选（不再是直接返回并列候选列表）。
         self.assertEqual(len(result), 1)
         self.assertIn("大模型确认一致", engine.last_source)
-        self.assertIn(display[0]["enterprise_decision_label"], {"并列待裁决", "大模型待确认"})
-        self.assertIn(display[0]["enterprise_decision"], {"tie", "judge"})
+        self.assertEqual(display[0]["enterprise_decision_label"], "并列待裁决")
+        self.assertEqual(display[0]["enterprise_decision"], "tie")
 
     def test_enterprise_imperative_request_ambiguous_returns_no_answer_without_api(self):
         settings = AppSettings(api_key="configured", reply_source_mode="model_memory")

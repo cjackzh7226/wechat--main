@@ -87,8 +87,7 @@ class CandidateJudge:
             {
                 "role": "system",
                 "content": (
-                    "你只能选择候选编号：先选出与客户问题最匹配的候选编号，再判断所选候选问题与"
-                    "客户问题是否属于同一事项和同一机构范围。"
+                    "你只能选择候选编号并判断候选问题是否与客户问题一致。"
                     "不得生成、补写或改写任何答案。"
                     "只输出严格 JSON，且键只能是 chosen 和 consistent："
                     '{"chosen":1,"consistent":true}'
