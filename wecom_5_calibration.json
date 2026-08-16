@@ -41,7 +41,7 @@
   },
   "timing": {
     "self_stable_seconds": 2.0,
-    "scan_interval_seconds": 2.0,
+    "scan_interval_seconds": 0.8,
     "switch_wait_seconds": 1.2,
     "user_typing_seconds": 1.5,
     "fail_pause_seconds": 300,
@@ -50,11 +50,14 @@
   },
   "system_whitelist": [
     "客户联系",
+    "学习园地",
+    "腾讯云客服",
     "邮件提醒",
     "行业资讯",
     "企业微信团队",
     "腾讯云企业服务",
-    "管理企业"
+    "管理企业",
+    "程明现的机器人"
   ],
   "system_keywords": ["团队", "客服", "服务", "提醒", "管理", "联系"]
 }

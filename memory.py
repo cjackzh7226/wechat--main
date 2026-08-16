@@ -425,14 +425,28 @@ class StyleMemory:
             grouped.setdefault(key, []).append(item)
         summaries = []
         for key, items in grouped.items():
-            summaries.append(
-                {
-                    "key": key,
-                    "name": _library_name(key),
-                    "count": len(items),
-                    "latest": max((str(item.get("created_at", "")) for item in items), default=""),
-                }
-            )
+            summary: dict[str, object] = {
+                "key": key,
+                "name": _library_name(key),
+                "count": len(items),
+                "latest": max((str(item.get("created_at", "")) for item in items), default=""),
+            }
+            if key == ENTERPRISE_ANNUAL_REPORT_SOURCE:
+                source_counts: Counter[str] = Counter(
+                    str(item.get("source_file", "")).strip() for item in items
+                )
+                summary["source_files"] = [
+                    {
+                        "key": source_file,
+                        "name": source_file or "未标注来源",
+                        "count": count,
+                    }
+                    for source_file, count in sorted(
+                        source_counts.items(),
+                        key=lambda row: (-row[1], row[0] == "", row[0].casefold()),
+                    )
+                ]
+            summaries.append(summary)
         summaries.sort(key=lambda item: (int(item["count"]), str(item["latest"])), reverse=True)
         return summaries
 

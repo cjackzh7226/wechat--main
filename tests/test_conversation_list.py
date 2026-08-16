@@ -4,6 +4,9 @@
 import sys
 import unittest
 from pathlib import Path
+from queue import Queue
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -12,6 +15,7 @@ from conversation_list import (
     ChatStateGuard,
     ConversationListMonitor,
     ConversationTypeDetector,
+    RedDotHit,
 )
 
 try:
@@ -28,14 +32,17 @@ CAL = {
     "click_target": {"avatar_x_ratio": 0.18},
     "timing": {
         "self_stable_seconds": 2.0,
-        "scan_interval_seconds": 2.0,
+        "scan_interval_seconds": 0.8,
         "switch_wait_seconds": 1.2,
         "user_typing_seconds": 1.5,
         "fail_pause_seconds": 300,
         "max_consecutive_failures": 3,
         "retry_per_failure": 1,
     },
-    "system_whitelist": ["客户联系", "邮件提醒", "行业资讯", "企业微信团队", "腾讯云企业服务", "管理企业"],
+    "system_whitelist": [
+        "客户联系", "学习园地", "行业资讯", "邮件提醒", "管理企业",
+        "腾讯云客服", "企业微信团队", "腾讯云企业服务", "程明现的机器人",
+    ],
     "system_keywords": ["团队", "客服", "服务", "提醒", "管理", "联系"],
 }
 
@@ -141,6 +148,9 @@ class TypeDetectorTests(unittest.TestCase):
     def setUp(self):
         self.detector = ConversationTypeDetector(CAL)
 
+    def test_keeps_calibration_for_title_crop(self):
+        self.assertEqual(self.detector.cal["top_title_area"], CAL["top_title_area"])
+
     def test_system_whitelist_exact(self):
         self.assertEqual(self.detector.detect("客户联系"), "system")
         self.assertEqual(self.detector.detect("邮件提醒"), "system")
@@ -149,9 +159,9 @@ class TypeDetectorTests(unittest.TestCase):
     def test_system_prefix_match(self):
         self.assertEqual(self.detector.detect("腾讯云客服@abc"), "system")
 
-    def test_system_keyword_fallback(self):
-        self.assertEqual(self.detector.detect("某某服务"), "system")
-        self.assertEqual(self.detector.detect("xx团队"), "system")
+    def test_system_detection_does_not_use_broad_keyword_fallback(self):
+        self.assertNotEqual(self.detector.detect("某某服务"), "system")
+        self.assertNotEqual(self.detector.detect("客户服务项目交流群"), "system")
 
     @unittest.skipIf(Image is None, "PIL 不可用")
     def test_group_grid_avatar(self):
@@ -201,6 +211,21 @@ class TypeDetectorTests(unittest.TestCase):
         self.assertEqual(self.detector.detect("阳光", img, list_avatar_type="personal"), "personal")
         self.assertEqual(self.detector.detect("客户联系", img, list_avatar_type="personal"), "system")
 
+    @unittest.skipIf(Image is None, "PIL 不可用")
+    def test_wechat_contact_marker_overrides_colorful_avatar_false_group(self):
+        img = make_full_window(avatar=make_grid_avatar())
+        self.assertEqual(self.detector.detect("- @微信", img, list_avatar_type="group"), "personal")
+
+    @unittest.skipIf(Image is None, "PIL 不可用")
+    def test_multiple_member_names_override_avatar_false_personal(self):
+        img = make_full_window(avatar=make_single_avatar())
+        self.assertEqual(self.detector.detect("张三、李四、王五", img, list_avatar_type="personal"), "group")
+
+    @unittest.skipIf(Image is None, "PIL 不可用")
+    def test_empty_title_never_promotes_avatar_guess_to_group(self):
+        img = make_full_window(avatar=make_grid_avatar())
+        self.assertEqual(self.detector.detect("", img, list_avatar_type="group"), "unknown")
+
     def test_unknown_when_no_signal(self):
         self.assertEqual(self.detector.detect(""), "unknown")
 
@@ -223,6 +248,12 @@ class StateGuardTests(unittest.TestCase):
         self.assertFalse(self.guard.should_start_scan(True, "我", 5.0, 0, now, now + 10))
         # 全部满足
         self.assertTrue(self.guard.should_start_scan(True, "我", 5.0, now - 5.0, now, 0))
+
+    def test_red_dot_scan_interval_is_eight_hundred_milliseconds(self):
+        now = 1000.0
+        self.assertEqual(self.guard.scan_interval_seconds, 0.8)
+        self.assertFalse(self.guard.should_start_scan(True, "我", 5.0, now - 0.79, now, 0))
+        self.assertTrue(self.guard.should_start_scan(True, "我", 5.0, now - 0.80, now, 0))
 
     def test_interrupted_conditions(self):
         # 对方又发消息
@@ -273,6 +304,158 @@ class IdentityTrackerTests(unittest.TestCase):
         tracker = ChatIdentityTracker()
         tracker.update_from_top_title("   ")
         self.assertEqual(tracker.current_chat_key, "")
+
+
+@unittest.skipIf(Image is None, "PIL 不可用")
+class MainConversationRoutingTests(unittest.TestCase):
+    def test_monitor_refreshes_conversation_type_before_personal_processing(self):
+        import main
+
+        app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+        window = SimpleNamespace(hwnd=9, title="企业微信")
+        app.running = True
+        app.detector = MagicMock()
+        app.detector.foreground_chat.return_value = window
+        app.settings = SimpleNamespace(
+            auto_recognize=True,
+            training_mode=False,
+            managed_auto_reply=True,
+            capture_cooldown_seconds=0.0,
+        )
+        app.queue = Queue()
+        app.current_window = None
+        app.last_window_key = ""
+        app.current_hash = ""
+        app.last_capture = 0.0
+        app.force_refresh = False
+        app.managed_send_inflight = False
+        order = []
+
+        def refresh_type(_window):
+            order.append("refresh_type")
+            app.current_chat_type = "group"
+
+        def process(_window, force=False):
+            order.append("process")
+            app.running = False
+
+        app._conversation_list_bypass = MagicMock(side_effect=refresh_type)
+        app._process_window = MagicMock(side_effect=process)
+        app._poll_interval = MagicMock(return_value=800.0)
+
+        with patch("main.time.time", return_value=100.0), patch("main.time.sleep"):
+            app._monitor_loop()
+
+        self.assertEqual(order, ["refresh_type", "process"])
+
+    def test_manual_switch_from_group_to_wechat_contact_refreshes_personal_type(self):
+        import main
+
+        app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+        app.chat_type_detector = ConversationTypeDetector(CAL)
+        app.current_chat_type = "group"
+        app.current_hash = "old-hash"
+        app.current_context = "old-context"
+        app.force_refresh = False
+        app.queue = Queue()
+
+        app._refresh_current_chat_type("- @微信")
+
+        self.assertEqual(app.current_chat_type, "personal")
+        self.assertEqual(app.current_hash, "")
+        self.assertEqual(app.current_context, "")
+        self.assertTrue(app.force_refresh)
+        self.assertIn("个人会话", app.queue.get_nowait()[1])
+
+    def test_idle_group_accumulates_stability_and_triggers_unread_scan(self):
+        import main
+
+        app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+        app.settings = SimpleNamespace(
+            managed_auto_reply=True,
+            chat_area=SimpleNamespace(),
+            wecom_account_name="程正恒",
+        )
+        app.current_chat_type = "group"
+        app.chat_type_detector = ConversationTypeDetector(CAL)
+        app.chat_state_guard = ChatStateGuard(CAL)
+        app.group_handler = MagicMock()
+        app.group_handler.latest_role_by_sender.return_value = "对方"
+        app.group_handler.detect_at_mention.return_value = False
+        app.group_handler.is_chat_idle.return_value = True
+        app.ocr = MagicMock()
+        app.ocr.read_image.return_value = "[发送者] 张三@微信\n[对方] 普通群消息"
+        app._read_top_title = MagicMock(return_value="张三、李四、王五")
+        app._user_typing_detected = MagicMock(return_value=False)
+        app._bypass_try_switch = MagicMock()
+        app.bypass_switch_in_progress = False
+        app.bypass_self_since = 0.0
+        app.bypass_last_scan_at = 0.0
+        app.bypass_paused_until = 0.0
+        app.bypass_retrying = False
+        app.managed_send_inflight = False
+        app.processing = False
+        app.current_hash = ""
+        app.current_context = ""
+        app.force_refresh = False
+        app.queue = Queue()
+        window = SimpleNamespace()
+        full = make_full_window()
+
+        with (
+            patch("capture_ocr._capture_window_bitmap", return_value=full),
+            patch("capture_ocr._crop_detected_chat_area_with_origin", return_value=(full, (0, 0))),
+            patch("main.WeChatSender._is_target_foreground", return_value=True),
+            patch("main.time.time", side_effect=[100.0, 103.0]),
+        ):
+            app._conversation_list_bypass(window)
+            app._conversation_list_bypass(window)
+
+        app._bypass_try_switch.assert_called_once_with(window, full)
+
+    def test_unread_switch_skips_system_entry_and_uses_group_row_title(self):
+        import main
+
+        app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+        app.chat_type_detector = ConversationTypeDetector(CAL)
+        app.chat_state_guard = ChatStateGuard(CAL)
+        app.chat_list_monitor = MagicMock()
+        system_hit = RedDotHit(y=120, x_center=200)
+        group_hit = RedDotHit(y=220, x_center=200)
+        app.chat_list_monitor.scan.side_effect = [[system_hit, group_hit], []]
+        system_crop = object()
+        group_crop = object()
+        app.chat_list_monitor.extract_row_title.side_effect = [system_crop, group_crop]
+        app.chat_list_monitor.extract_row_avatar.return_value = make_grid_avatar().resize((45, 44))
+        app.chat_list_monitor.click_point_for.return_value = (180, 220)
+        app.ocr = MagicMock()
+        app.ocr.read_chat_title.side_effect = lambda crop, limit=1: (
+            "客户联系" if crop is system_crop else "张三、李四、王五"
+        )
+        app._read_top_title = MagicMock(side_effect=["旧会话", ""])
+        app._user_typing_detected = MagicMock(return_value=False)
+        app._after_switch = MagicMock()
+        app.chat_identity = MagicMock()
+        app.managed_send_inflight = False
+        app.processing = False
+        app.bypass_retrying = False
+        app.bypass_fail_count = 0
+        app.bypass_paused_until = 0.0
+        app.queue = Queue()
+        window = SimpleNamespace(rect=SimpleNamespace(left=10, top=20))
+        full = make_full_window()
+        full_after = make_full_window()
+
+        with (
+            patch("capture_ocr._capture_window_bitmap", return_value=full_after),
+            patch("main.WeChatSender._is_target_foreground", return_value=True),
+            patch("pyautogui.click") as click,
+            patch("main.time.sleep"),
+        ):
+            app._bypass_try_switch(window, full)
+
+        click.assert_called_once_with(190, 240)
+        app._after_switch.assert_called_once_with(window, "张三、李四、王五", "group")
 
 
 if __name__ == "__main__":

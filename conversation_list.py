@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Literal
@@ -34,14 +35,17 @@ _DEFAULT_CALIBRATION: dict = {
     "click_target": {"avatar_x_ratio": 0.18},
     "timing": {
         "self_stable_seconds": 2.0,
-        "scan_interval_seconds": 2.0,
+        "scan_interval_seconds": 0.8,
         "switch_wait_seconds": 1.2,
         "user_typing_seconds": 1.5,
         "fail_pause_seconds": 300,
         "max_consecutive_failures": 3,
         "retry_per_failure": 1,
     },
-    "system_whitelist": ["客户联系", "邮件提醒", "行业资讯", "企业微信团队", "腾讯云企业服务", "管理企业"],
+    "system_whitelist": [
+        "客户联系", "学习园地", "行业资讯", "邮件提醒", "管理企业",
+        "腾讯云客服", "企业微信团队", "腾讯云企业服务", "程明现的机器人",
+    ],
     "system_keywords": ["团队", "客服", "服务", "提醒", "管理", "联系"],
 }
 
@@ -183,6 +187,19 @@ class ConversationListMonitor:
             return None
         return full_window_image.crop((avatar_left, top, avatar_right, bottom))
 
+    def extract_row_title(self, full_window_image, hit: RedDotHit):
+        """提取红点所在会话行的标题，排除头像和下一行消息摘要。"""
+        if Image is None or full_window_image is None:
+            return None
+        width, height = full_window_image.size
+        left = max(0, int(width * 0.12))
+        right = min(width, int(width * 0.295))
+        top = max(0, int(hit.y) - 15)
+        bottom = min(height, int(hit.y) + 15)
+        if right <= left or bottom <= top:
+            return None
+        return full_window_image.crop((left, top, right, bottom))
+
 
 class ChatIdentityTracker:
     """当前会话标识：顶部标题文字（切换会话 hwnd 不变，必须用标题文字）。"""
@@ -218,7 +235,7 @@ class ChatStateGuard:
         self.cal = cal
         timing = cal.get("timing", {})
         self.self_stable_seconds = float(timing.get("self_stable_seconds", 2.0))
-        self.scan_interval_seconds = float(timing.get("scan_interval_seconds", 2.0))
+        self.scan_interval_seconds = float(timing.get("scan_interval_seconds", 0.8))
         self.user_typing_seconds = float(timing.get("user_typing_seconds", 1.5))
 
     def should_start_scan(
@@ -250,7 +267,7 @@ class ChatStateGuard:
                 return False
         else:
             return False
-        if now - last_scan_at < self.scan_interval_seconds:
+        if now - last_scan_at + 1e-9 < self.scan_interval_seconds:
             return False
         return True
 
@@ -283,6 +300,7 @@ class ConversationTypeDetector:
 
     def __init__(self, calibration: dict | None = None) -> None:
         cal = calibration or load_calibration()
+        self.cal = cal
         self.system_whitelist = [str(item) for item in cal.get("system_whitelist", [])]
         self.system_keywords = [str(item) for item in cal.get("system_keywords", [])]
         avatar = cal.get("avatar_area", {})
@@ -303,8 +321,11 @@ class ConversationTypeDetector:
         list_avatar_type：切换前从左侧列表行头像判定的类型（"group"/"personal"/""），
         比顶部标题栏头像更可靠（5.0.9 顶部无大头像，列表行头像始终存在）。
         """
-        if self._is_system(top_title_text):
-            return "system"
+        title_type = self.detect_title(top_title_text)
+        if title_type != "unknown":
+            return title_type
+        if not str(top_title_text or "").strip():
+            return "unknown"
         if list_avatar_type == "group":
             return "group"
         if list_avatar_type == "personal":
@@ -317,6 +338,16 @@ class ConversationTypeDetector:
                 if self._is_single_avatar(avatar):
                     return "personal"
         # 标题无文字且头像无法判定 → unknown（绝不猜成 personal）
+        return "unknown"
+
+    def detect_title(self, top_title_text: str) -> ChatType:
+        """只使用标题的强证据分类，不让易误判的头像覆盖明确标题。"""
+        if self._is_system(top_title_text):
+            return "system"
+        if self._is_explicit_group_title(top_title_text):
+            return "group"
+        if self._is_explicit_personal_title(top_title_text):
+            return "personal"
         return "unknown"
 
     def detect_row_avatar(self, avatar_image) -> str:
@@ -339,16 +370,28 @@ class ConversationTypeDetector:
         return colorful >= 4
 
     def _is_system(self, top_title_text: str) -> bool:
-        text = (top_title_text or "").strip()
+        text = re.sub(r"\s+", "", str(top_title_text or "")).casefold()
         if not text:
             return False
         for name in self.system_whitelist:
-            if text == name or text.startswith(name) or name in text:
-                return True
-        for keyword in self.system_keywords:
-            if keyword in text:
+            normalized_name = re.sub(r"\s+", "", str(name)).casefold()
+            if text == normalized_name or text.startswith(f"{normalized_name}@"):
                 return True
         return False
+
+    @staticmethod
+    def _is_explicit_personal_title(top_title_text: str) -> bool:
+        text = re.sub(r"\s+", "", str(top_title_text or "")).casefold()
+        return "@微信" in text or "@wecom" in text
+
+    @staticmethod
+    def _is_explicit_group_title(top_title_text: str) -> bool:
+        text = re.sub(r"\s+", "", str(top_title_text or "")).casefold()
+        if not text:
+            return False
+        if any(marker in text for marker in ("外部群", "群聊", "交流群", "群主")):
+            return True
+        return sum(text.count(separator) for separator in ("、", "，", ",")) >= 2
 
     def _crop_avatar(self, full_window_image):
         if Image is None or full_window_image is None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import re
 from dataclasses import dataclass
 from io import BytesIO
@@ -61,22 +62,35 @@ class VisibleContentAnalyzer:
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
         self.last_error = ""
+        self._cache_key = ""
+        self._cache_result: VisibleContent | None = None
+        self._cache_error = ""
 
     def analyze(self, context: str, image=None) -> VisibleContent:
         self.last_error = ""
+        cache_key = _visible_analysis_cache_key(context, image, self.settings)
+        if cache_key and cache_key == self._cache_key and self._cache_result is not None:
+            self.last_error = self._cache_error
+            return self._cache_result
         visible = infer_visible_content_from_context(context)
         if visible.message_type in {"card", "link"}:
-            return visible
+            return self._remember(cache_key, visible)
         if visible.message_type == "sticker":
-            return visible
+            return self._remember(cache_key, visible)
         if image is None or self.settings.vision_provider != "zhipu" or not _vision_api_key(self.settings):
-            return visible
+            return self._remember(cache_key, visible)
         if not _should_call_vision(context, visible, image):
-            return visible
+            return self._remember(cache_key, visible)
         vision = self._analyze_image_with_zhipu(image, context)
         if vision.summary:
-            return vision
-        return visible
+            return self._remember(cache_key, vision)
+        return self._remember(cache_key, visible)
+
+    def _remember(self, cache_key: str, result: VisibleContent) -> VisibleContent:
+        self._cache_key = cache_key
+        self._cache_result = result
+        self._cache_error = self.last_error
+        return result
 
     def _analyze_image_with_zhipu(self, image, context: str) -> VisibleContent:
         if requests is None:
@@ -117,7 +131,7 @@ class VisibleContentAnalyzer:
                     "Content-Type": "application/json",
                 },
                 json=payload,
-                timeout=20,
+                timeout=12,
             )
             if int(getattr(response, "status_code", 200) or 200) >= 400:
                 self.last_error = f"视觉模型 HTTP {response.status_code}: {str(getattr(response, 'text', ''))[:200]}"
@@ -137,6 +151,29 @@ def _vision_api_key(settings: AppSettings) -> str:
     if settings.vision_provider == "zhipu" and settings.api_provider == "zhipu":
         return (settings.api_key or "").strip()
     return ""
+
+
+def _visible_analysis_cache_key(context: str, image, settings: AppSettings) -> str:
+    """缓存同一屏幕的视觉结果，避免未变化聊天反复等待网络接口。"""
+    try:
+        image_fingerprint = "none"
+        if image is not None:
+            sample = image.convert("RGB").resize((16, 16))
+            image_fingerprint = hashlib.sha1(sample.tobytes()).hexdigest()
+        key_fingerprint = hashlib.sha1(_vision_api_key(settings).encode("utf-8")).hexdigest()[:12]
+        raw = "\n".join(
+            (
+                str(context or ""),
+                image_fingerprint,
+                str(settings.vision_provider or ""),
+                str(settings.vision_base_url or ""),
+                str(settings.vision_model or ""),
+                key_fingerprint,
+            )
+        )
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+    except Exception:
+        return ""
 
 
 def build_augmented_context(context: str, visible: VisibleContent) -> str:
@@ -229,7 +266,12 @@ def _should_call_vision(context: str, visible: VisibleContent, image=None) -> bo
     text = _last_other_text(context)
     if len(text) <= 4 and not _has_url(text):
         return True
-    if image is not None and _has_large_visible_image_region(image) and _effective_context_line_count(context) <= 3:
+    if (
+        image is not None
+        and _effective_context_line_count(context) <= 3
+        and _has_large_visible_image_region(image)
+        and _has_photo_like_visible_region(image)
+    ):
         return True
     return any(marker in context for marker in ["[图片]", "[动画表情]", "公众号", "小程序", "卡片"])
 
@@ -252,6 +294,40 @@ def _has_large_visible_image_region(image) -> bool:
             if max(r, g, b) - min(r, g, b) > 18 or max(r, g, b) < 215:
                 non_background += 1
     return non_background / max(width * height, 1) >= 0.08
+
+
+def _has_photo_like_visible_region(image) -> bool:
+    """排除大块纯色聊天气泡，只保留暗色或色彩丰富的可见图像区域。"""
+    try:
+        small = image.convert("RGB").resize((64, 64))
+    except Exception:
+        return False
+    colors: dict[tuple[int, int, int], int] = {}
+    strong_visual = 0
+    non_background = 0
+    pixels = small.get_flattened_data() if hasattr(small, "get_flattened_data") else small.getdata()
+    for r, g, b in pixels:
+        spread = max(r, g, b) - min(r, g, b)
+        if max(r, g, b) >= 245 and spread <= 12:
+            continue
+        non_background += 1
+        if max(r, g, b) < 170 or spread > 80:
+            strong_visual += 1
+        bucket = (r // 24, g // 24, b // 24)
+        colors[bucket] = colors.get(bucket, 0) + 1
+    total = 64 * 64
+    if strong_visual / total < 0.06 or not non_background:
+        return False
+    dominant_bucket, dominant_count = max(colors.items(), key=lambda item: item[1])
+    dominant_rgb = tuple(value * 24 + 12 for value in dominant_bucket)
+    dominant_spread = max(dominant_rgb) - min(dominant_rgb)
+    if (
+        dominant_count / non_background >= 0.55
+        and min(dominant_rgb) >= 175
+        and dominant_spread <= 72
+    ):
+        return False
+    return True
 
 
 def _last_other_text(context: str) -> str:

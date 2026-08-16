@@ -1528,6 +1528,7 @@ class ReplyAssistantUI:
         library_var = tk.StringVar(value="")
         query_var = tk.StringVar(value="")
         summary_var = tk.StringVar(value="")
+        selected_library = {"key": "", "source_file": None}
 
         top = tk.Frame(dialog, bg=COLORS["page"], padx=14, pady=12)
         top.pack(fill="x")
@@ -1561,7 +1562,7 @@ class ReplyAssistantUI:
             relief="flat",
             highlightthickness=0,
             activebackground=COLORS["green_soft"],
-            width=18,
+            width=32,
         )
         library_menu.pack(side="left", padx=(8, 16))
         tk.Label(top, text="测试客户说法", bg=COLORS["page"], fg=COLORS["muted"]).pack(side="left")
@@ -1608,11 +1609,11 @@ class ReplyAssistantUI:
         bottom.pack(fill="x")
 
         def selected_library_key() -> str:
-            label = library_var.get()
-            for library in libraries:
-                if str(library.get("label", "")) == label:
-                    return str(library.get("key", ""))
-            return ""
+            return str(selected_library["key"] or "")
+
+        def selected_source_file() -> str | None:
+            value = selected_library["source_file"]
+            return None if value is None else str(value)
 
         def display_text(item: dict[str, object]) -> str:
             score = int(item.get("score", 0) or 0)
@@ -1651,7 +1652,13 @@ class ReplyAssistantUI:
         def refresh_examples() -> None:
             nonlocal examples
             try:
-                examples = list(example_getter(selected_library_key(), query_var.get()))
+                examples = list(
+                    example_getter(
+                        selected_library_key(),
+                        query_var.get(),
+                        selected_source_file(),
+                    )
+                )
             except Exception as exc:
                 messagebox.showerror(TEXT["phrasebook_manager"], str(exc), parent=dialog)
                 return
@@ -1668,6 +1675,13 @@ class ReplyAssistantUI:
             else:
                 clear_editor("当前话术库没有可显示的话术。")
 
+        def select_library_option(library_key: str, source_file: str | None, label: str) -> None:
+            selected_library["key"] = library_key
+            selected_library["source_file"] = source_file
+            library_var.set(label)
+            checked_indices.clear()
+            refresh_examples()
+
         def refresh_libraries() -> None:
             nonlocal libraries
             try:
@@ -1677,16 +1691,46 @@ class ReplyAssistantUI:
                 return
             menu = library_menu["menu"]
             menu.delete(0, "end")
+            checked_indices.clear()
             if not libraries:
                 library_var.set(TEXT["phrasebook_empty"])
                 clear_editor(TEXT["phrasebook_empty"])
                 return
+            first_option: tuple[str, str | None, str] | None = None
             for library in libraries:
-                label = f"{library.get('name', library.get('key', '话术库'))} ({library.get('count', 0)})"
-                library["label"] = label
-                menu.add_command(label=label, command=lambda value=label: (library_var.set(value), refresh_examples()))
-            library_var.set(str(libraries[0].get("label", "")))
-            refresh_examples()
+                key = str(library.get("key", ""))
+                name = str(library.get("name", key or "话术库"))
+                count = int(library.get("count", 0) or 0)
+                source_files = list(library.get("source_files", []) or [])
+                if key == "enterprise_annual_report_kb" and source_files:
+                    submenu = tk.Menu(menu, tearoff=False)
+                    all_display = f"{name} / 全部 ({count})"
+                    submenu.add_command(
+                        label=f"全部 ({count})",
+                        command=lambda k=key, label=all_display: select_library_option(k, None, label),
+                    )
+                    if first_option is None:
+                        first_option = (key, None, all_display)
+                    for source in source_files:
+                        source_key = str(source.get("key", ""))
+                        source_name = str(source.get("name", source_key or "未标注来源"))
+                        source_count = int(source.get("count", 0) or 0)
+                        display = f"{name} / {source_name} ({source_count})"
+                        submenu.add_command(
+                            label=f"{source_name} ({source_count})",
+                            command=lambda k=key, s=source_key, label=display: select_library_option(k, s, label),
+                        )
+                    menu.add_cascade(label=f"{name} ({count})", menu=submenu)
+                    continue
+                label = f"{name} ({count})"
+                menu.add_command(
+                    label=label,
+                    command=lambda k=key, value=label: select_library_option(k, None, value),
+                )
+                if first_option is None:
+                    first_option = (key, None, label)
+            if first_option is not None:
+                select_library_option(*first_option)
 
         def on_select(_event: object = None) -> None:
             selection = item_list.curselection()
@@ -1722,8 +1766,12 @@ class ReplyAssistantUI:
             refresh_libraries()
 
         item_list.bind("<<ListboxSelect>>", on_select)
-        query_entry.bind("<Return>", lambda _event: refresh_examples())
-        self._ghost_button(top, "测试命中", refresh_examples, width=10).pack(side="left")
+        def refresh_query() -> None:
+            checked_indices.clear()
+            refresh_examples()
+
+        query_entry.bind("<Return>", lambda _event: refresh_query())
+        self._ghost_button(top, "测试命中", refresh_query, width=10).pack(side="left")
 
         # 编辑模式：点"编辑"启用（按钮变绿显示"取消编辑"），列表项前出现方形勾选框 ☐/☑ 多选
         edit_state = {"on": False}
@@ -1757,6 +1805,7 @@ class ReplyAssistantUI:
                 )
                 edit_button.unbind("<Enter>")
                 edit_button.unbind("<Leave>")
+                select_all_button.pack(side="left", padx=(8, 0), before=delete_button)
             else:
                 edit_button.configure(
                     bg=COLORS["panel"],
@@ -1767,6 +1816,14 @@ class ReplyAssistantUI:
                 )
                 edit_button.bind("<Enter>", lambda _e: edit_button.configure(bg=COLORS["bubble"]))
                 edit_button.bind("<Leave>", lambda _e: edit_button.configure(bg=COLORS["panel"]))
+                select_all_button.pack_forget()
+            refresh_examples()
+
+        def select_all_visible() -> None:
+            if not edit_state["on"]:
+                return
+            checked_indices.clear()
+            checked_indices.update(range(len(examples)))
             refresh_examples()
 
         def delete_checked() -> None:
@@ -1794,8 +1851,11 @@ class ReplyAssistantUI:
 
         edit_button = self._ghost_button(toolbar, "编辑", toggle_edit, width=10)
         edit_button.pack(side="left", padx=(8, 0))
-        self._ghost_button(bottom, "刷新", refresh_libraries, width=10).pack(side="left")
-        self._primary_button(bottom, "删除", delete_checked, width=10).pack(side="left", padx=(8, 0))
+        refresh_button = self._ghost_button(bottom, "刷新", refresh_libraries, width=10)
+        refresh_button.pack(side="left")
+        select_all_button = self._ghost_button(bottom, "全选", select_all_visible, width=10)
+        delete_button = self._primary_button(bottom, "删除", delete_checked, width=10)
+        delete_button.pack(side="left", padx=(8, 0))
         self._primary_button(bottom, "保存当前话术", save_current, width=14).pack(side="right")
         refresh_libraries()
 

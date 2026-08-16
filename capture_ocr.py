@@ -103,6 +103,39 @@ class ChatOCR:
                 break
         return "\n".join(rows)
 
+    def read_chat_title(self, image, limit: int = 3) -> str:
+        """读取会话身份标题，排除最右侧操作按钮并恢复可见的 ``- @微信``。"""
+        results = self._recognize(image)
+        if not results:
+            return ""
+        try:
+            image_width = max(1.0, float(image.size[0]))
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return ""
+        rows: list[str] = []
+        for item in sorted(
+            results,
+            key=lambda value: (float(value.get("y", 0)), float(value.get("x", 0))),
+        ):
+            left = float(item.get("left", item.get("x", 0)))
+            if left >= image_width * 0.90:
+                continue
+            text = re.sub(r"\s+", " ", str(item.get("text", "")).strip())
+            if not text or _is_noise_text(text):
+                continue
+            restored = _restore_visible_dash_sender(
+                item,
+                text,
+                image,
+                leading_search_px=16,
+            )
+            if restored != text and restored.startswith("-@"):
+                restored = f"- {restored[1:]}"
+            rows.append(restored)
+            if len(rows) >= limit:
+                break
+        return "\n".join(rows)
+
     def latest_voice_bubble(self, image) -> VoiceBubble | None:
         results = self._recognize(image, keep_voice=True)
         voices: list[VoiceBubble] = []

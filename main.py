@@ -261,17 +261,18 @@ class WeChatStyleReplyAssistant:
                 if self.settings.managed_auto_reply and self.managed_send_inflight:
                     time.sleep(self._poll_interval() / 1000)
                     continue
+                # 先刷新群聊/个人类型，再进入主识别流程。否则手动切进群聊的
+                # 第一轮仍会按旧的个人会话执行图片理解，最长阻塞一次视觉请求。
+                try:
+                    self._conversation_list_bypass(wechat)
+                except Exception as exc:
+                    self.queue.put(("status", f"会话切换旁路异常：{exc}"))
                 if self.settings.auto_recognize or self.settings.training_mode:
                     now = time.time()
                     if now - self.last_capture >= self.settings.capture_cooldown_seconds:
                         self.last_capture = now
                         self._process_window(wechat, force=self.force_refresh)
                         self.force_refresh = False
-                # ---- 会话列表自动切换旁路（不阻塞主路）----
-                try:
-                    self._conversation_list_bypass(wechat)
-                except Exception as exc:
-                    self.queue.put(("status", f"会话切换旁路异常：{exc}"))
             except Exception as exc:
                 self.queue.put(("status", MSG["monitor_error"].format(error=exc)))
             time.sleep(self._poll_interval() / 1000)
@@ -279,7 +280,7 @@ class WeChatStyleReplyAssistant:
     def _conversation_list_bypass(self, wechat: WeChatWindow) -> None:
         """会话列表自动切换旁路（托管模式）。
 
-        触发：当前会话最新消息为我方发出且持续 2 秒稳定 → 每 2 秒扫描左侧列表红点 →
+        触发：当前会话最新消息为我方发出且持续 2 秒稳定 → 最短每 0.8 秒扫描左侧列表红点 →
         点击 y 最小且非当前会话的红点行 → 确认切换（顶部标题变化 + 红点消失）→
         判定会话类型分流。6 种打断条件任一命中即跳过。连续 3 次失败 UI 提示 + 暂停 5 分钟。
 
@@ -305,16 +306,11 @@ class WeChatStyleReplyAssistant:
                 context = self.ocr.read_image(chat_crop)
             except Exception:
                 context = ""
+        self._refresh_current_chat_type(self._read_top_title(full))
         latest_role = "对方"
         if context:
             latest_role, _latest_text = latest_meaningful_message(context)
         now = time.time()
-        if latest_role == "我":
-            if self.bypass_self_since == 0:
-                self.bypass_self_since = now
-        else:
-            self.bypass_self_since = 0.0
-        seconds_as_self = (now - self.bypass_self_since) if self.bypass_self_since else 0.0
         # 群聊：最新消息没 @ 我 = 聊天内容无变化 → 等同"我方发出"，也能触发扫描
         chat_type = getattr(self, "current_chat_type", "personal")
         group_idle = False
@@ -325,13 +321,6 @@ class WeChatStyleReplyAssistant:
             )
             if role_by_sender:
                 latest_role = role_by_sender
-                if latest_role == "我":
-                    if self.bypass_self_since == 0:
-                        self.bypass_self_since = now
-                    seconds_as_self = now - self.bypass_self_since
-                else:
-                    self.bypass_self_since = 0.0
-                    seconds_as_self = 0.0
             # 群聊里最新消息 @ 我 → 直接走群聊回复（不扫描列表）
             account_name = self.settings.wecom_account_name.strip()
             if latest_role == "对方" and account_name and self.group_handler.detect_at_mention(
@@ -340,6 +329,15 @@ class WeChatStyleReplyAssistant:
                 self._handle_group_chat(wechat, context, full)
                 return
             group_idle = self.group_handler.is_chat_idle(context, self.settings.wecom_account_name)
+        stable_for_scan = latest_role == "我" or (
+            chat_type == "group" and latest_role == "对方" and group_idle
+        )
+        if stable_for_scan:
+            if self.bypass_self_since == 0:
+                self.bypass_self_since = now
+        else:
+            self.bypass_self_since = 0.0
+        seconds_as_self = (now - self.bypass_self_since) if self.bypass_self_since else 0.0
         if not self.chat_state_guard.should_start_scan(
             True,
             latest_role,
@@ -351,13 +349,15 @@ class WeChatStyleReplyAssistant:
             group_idle=group_idle,
         ):
             return
-        self.bypass_last_scan_at = now
         # 企业微信必须在最前台（不抢焦点，不在前台就等下一轮）
         if not WeChatSender._is_target_foreground(wechat):
             return
         user_typing = self._user_typing_detected()
+        interrupt_role = "我" if (
+            chat_type == "group" and latest_role == "对方" and group_idle
+        ) else latest_role
         if self.chat_state_guard.is_interrupted(
-            latest_role,
+            interrupt_role,
             user_typing,
             self.managed_send_inflight,
             self.processing,
@@ -365,6 +365,7 @@ class WeChatStyleReplyAssistant:
             self.bypass_retrying,
         ):
             return
+        self.bypass_last_scan_at = now
         self._bypass_try_switch(wechat, full)
 
     def _bypass_try_switch(self, wechat: WeChatWindow, full=None) -> None:
@@ -381,10 +382,26 @@ class WeChatStyleReplyAssistant:
         title_before = self._read_top_title(full)
         attempts = 1 + int(self.chat_state_guard.cal.get("timing", {}).get("retry_per_failure", 1))
         success = False
-        for attempt in range(attempts):
-            if attempt >= len(hits):
+        attempted_switches = 0
+        actionable_seen = False
+        title_after = ""
+        row_avatar_type = ""
+        row_title = ""
+        for hit in hits:
+            try:
+                row_title_crop = self.chat_list_monitor.extract_row_title(full, hit)
+                row_title = self.ocr.read_chat_title(row_title_crop, limit=1)
+            except Exception:
+                row_title = ""
+            if not str(row_title or "").strip():
+                continue
+            if self.chat_type_detector.detect_title(row_title) == "system":
+                continue
+            actionable_seen = True
+            if attempted_switches >= attempts:
                 break
-            self.bypass_retrying = attempt > 0
+            self.bypass_retrying = attempted_switches > 0
+            attempted_switches += 1
             if self.chat_state_guard.is_interrupted(
                 "我",
                 self._user_typing_detected(),
@@ -395,7 +412,6 @@ class WeChatStyleReplyAssistant:
             ):
                 self.bypass_retrying = False
                 return
-            hit = hits[attempt]
             # 切换前：用列表行头像预判会话类型（群聊九宫格 vs 个人单块）
             row_avatar_type = ""
             try:
@@ -418,9 +434,14 @@ class WeChatStyleReplyAssistant:
             # 切换确认：原红点消失（强信号——切到该会话后红点自动消失）+ 标题变化或已预判类型
             red_dots_after = self.chat_list_monitor.scan(full_after)
             same_row_still = any(abs(item.y - hit.y) <= 6 for item in red_dots_after)
+            effective_title = title_after or row_title
             title_changed = bool(title_after) and title_after != title_before
-            if (not same_row_still) and (title_changed or row_avatar_type):
+            title_type = self.chat_type_detector.detect_title(effective_title)
+            if (not same_row_still) and (
+                title_changed or title_type in {"personal", "group"} or row_avatar_type
+            ):
                 success = True
+                title_after = effective_title
                 break
             # 红点还在/标题没变 → 点的是当前会话/未生效，换下一个红点重试
         self.bypass_retrying = False
@@ -428,6 +449,8 @@ class WeChatStyleReplyAssistant:
             self.bypass_fail_count = 0
             self.chat_identity.update_from_top_title(title_after)
             self._after_switch(wechat, title_after, row_avatar_type)
+            return
+        if not actionable_seen:
             return
         # 切换失败
         self.bypass_fail_count += 1
@@ -468,6 +491,20 @@ class WeChatStyleReplyAssistant:
             return
         # personal：下一轮主路 force 重识别并处理
         self.queue.put(("status", f"会话切换：个人会话「{top_title}」，开始处理"))
+
+    def _refresh_current_chat_type(self, top_title: str) -> None:
+        """用户手动切换会话时，用标题强证据刷新旧的群聊/个人状态。"""
+        detected = self.chat_type_detector.detect_title(top_title)
+        if detected not in {"personal", "group", "system"}:
+            return
+        if detected == getattr(self, "current_chat_type", "personal"):
+            return
+        self.current_chat_type = detected
+        self.current_hash = ""
+        self.current_context = ""
+        self.force_refresh = detected == "personal"
+        labels = {"personal": "个人会话", "group": "群聊", "system": "系统会话"}
+        self.queue.put(("status", f"当前会话已识别为{labels[detected]}「{top_title}」"))
 
     def _handle_group_chat(self, wechat: WeChatWindow, context: str = "", full=None) -> None:
         """群聊客服处理：@ 我 → 提取问题 → 生成回复 → @ 回发送者；没 @ → 不回复。
@@ -554,7 +591,7 @@ class WeChatStyleReplyAssistant:
             top = int(height * float(area.get("y_top", 0.0)))
             bottom = int(height * float(area.get("y_bottom", 0.10)))
             crop = full_window_image.crop((left, top, right, bottom))
-            return self.ocr.read_visible_text(crop, limit=3)
+            return self.ocr.read_chat_title(crop, limit=3)
         except Exception:
             return ""
 
@@ -952,14 +989,33 @@ class WeChatStyleReplyAssistant:
         self.memory.load()
         return self.memory.library_summaries()
 
-    def _get_phrasebook_examples(self, library_key: str = "", query: str = "") -> list[dict[str, object]]:
+    def _get_phrasebook_examples(
+        self,
+        library_key: str = "",
+        query: str = "",
+        source_file: str | None = None,
+    ) -> list[dict[str, object]]:
         self.memory.load()
         if query.strip():
             if library_key == ENTERPRISE_ANNUAL_REPORT_SOURCE:
-                return self.memory.enterprise_scored_examples(query, limit=200)
-            return self.memory.scored_examples(query, library_key=library_key, limit=200)
+                rows = self.memory.enterprise_scored_examples(query, limit=self.memory.max_examples)
+            else:
+                rows = self.memory.scored_examples(
+                    query,
+                    library_key=library_key,
+                    limit=self.memory.max_examples,
+                )
+            if source_file is not None:
+                rows = [
+                    row
+                    for row in rows
+                    if str(row.get("source_file", "")).strip() == source_file
+                ]
+            return rows
         rows: list[dict[str, object]] = []
-        for item in self.memory.examples_for_library(library_key, limit=200):
+        for item in self.memory.examples_for_library(library_key, limit=self.memory.max_examples):
+            if source_file is not None and str(item.get("source_file", "")).strip() != source_file:
+                continue
             rows.append(
                 {
                     **item,

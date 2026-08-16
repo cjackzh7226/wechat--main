@@ -1258,6 +1258,185 @@ class MemoryTests(unittest.TestCase):
             self.assertEqual(tiantian["count"], 1)
             self.assertEqual(tiantian["name"], "甜甜话术库")
 
+    def test_enterprise_library_summary_groups_every_record_by_source_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memory.json"
+            memory = StyleMemory(path)
+            memory.learn_from_training_examples(
+                [
+                    {
+                        "cue": "[对方] 来源甲问题一",
+                        "reply": "来源甲答案一",
+                        "source": "enterprise_annual_report_kb",
+                        "source_file": "来源甲.xlsx",
+                    },
+                    {
+                        "cue": "[对方] 来源甲问题二",
+                        "reply": "来源甲答案二",
+                        "source": "enterprise_annual_report_kb",
+                        "source_file": "来源甲.xlsx",
+                    },
+                    {
+                        "cue": "[对方] 来源乙问题",
+                        "reply": "来源乙答案",
+                        "source": "enterprise_annual_report_kb",
+                        "source_file": "来源乙.docx",
+                    },
+                    {
+                        "cue": "[对方] 旧记录没有来源",
+                        "reply": "旧记录答案",
+                        "source": "enterprise_annual_report_kb",
+                    },
+                ]
+            )
+
+            enterprise = next(
+                item
+                for item in StyleMemory(path).load().library_summaries()
+                if item["key"] == "enterprise_annual_report_kb"
+            )
+
+            self.assertEqual(enterprise["count"], 4)
+            self.assertEqual(
+                enterprise["source_files"],
+                [
+                    {"key": "来源甲.xlsx", "name": "来源甲.xlsx", "count": 2},
+                    {"key": "来源乙.docx", "name": "来源乙.docx", "count": 1},
+                    {"key": "", "name": "未标注来源", "count": 1},
+                ],
+            )
+
+    def test_phrasebook_manager_source_filter_returns_all_matching_records(self):
+        import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = StyleMemory(Path(tmp) / "memory.json")
+            records = [
+                {
+                    "cue": f"[对方] 甲类问题{i}",
+                    "reply": f"甲类答案{i}",
+                    "source": "enterprise_annual_report_kb",
+                    "source_file": "来源甲.xlsx",
+                }
+                for i in range(205)
+            ]
+            records.extend(
+                [
+                    {
+                        "cue": "[对方] 乙类问题",
+                        "reply": "乙类答案",
+                        "source": "enterprise_annual_report_kb",
+                        "source_file": "来源乙.xlsx",
+                    },
+                    {
+                        "cue": "[对方] 未标注问题",
+                        "reply": "未标注答案",
+                        "source": "enterprise_annual_report_kb",
+                    },
+                ]
+            )
+            memory.learn_from_training_examples(records)
+            app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+            app.memory = memory
+
+            all_rows = app._get_phrasebook_examples("enterprise_annual_report_kb", "", None)
+            source_rows = app._get_phrasebook_examples("enterprise_annual_report_kb", "", "来源甲.xlsx")
+            unlabelled_rows = app._get_phrasebook_examples("enterprise_annual_report_kb", "", "")
+
+            self.assertEqual(len(all_rows), 207)
+            self.assertEqual(len(source_rows), 205)
+            self.assertTrue(all(row.get("source_file") == "来源甲.xlsx" for row in source_rows))
+            self.assertEqual(len(unlabelled_rows), 1)
+            self.assertFalse(unlabelled_rows[0].get("source_file"))
+
+    def test_phrasebook_manager_shows_select_all_only_while_editing(self):
+        import tkinter as tk
+        from float_ui import ReplyAssistantUI
+
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk unavailable: {exc}")
+        root.withdraw()
+        self.addCleanup(root.destroy)
+
+        examples = [
+            {
+                "conversation_hash": "one",
+                "cue": "[对方] 问题一",
+                "reply": "答案一",
+                "source": "enterprise_annual_report_kb",
+                "source_file": "来源甲.xlsx",
+            },
+            {
+                "conversation_hash": "two",
+                "cue": "[对方] 问题二",
+                "reply": "答案二",
+                "source": "enterprise_annual_report_kb",
+                "source_file": "来源乙.xlsx",
+            },
+        ]
+
+        def get_examples(_library: str, _query: str, source_file=None):
+            if source_file is None:
+                return list(examples)
+            return [item for item in examples if str(item.get("source_file", "")) == source_file]
+
+        ui = ReplyAssistantUI.__new__(ReplyAssistantUI)
+        ui.callbacks = {
+            "get_phrasebook_libraries": lambda: [
+                {
+                    "key": "enterprise_annual_report_kb",
+                    "name": "企业年报知识库",
+                    "count": 2,
+                    "source_files": [
+                        {"key": "来源甲.xlsx", "name": "来源甲.xlsx", "count": 1},
+                        {"key": "来源乙.xlsx", "name": "来源乙.xlsx", "count": 1},
+                    ],
+                }
+            ],
+            "get_phrasebook_examples": get_examples,
+            "save_phrasebook_example": lambda *_args: "saved",
+            "delete_phrasebook_examples": lambda *_args: "deleted",
+        }
+        ui.set_status = lambda _text: None
+        ui._open_phrasebook_manager(root)
+        root.update_idletasks()
+
+        dialog = next(widget for widget in root.winfo_children() if isinstance(widget, tk.Toplevel))
+
+        def descendants(widget):
+            for child in widget.winfo_children():
+                yield child
+                yield from descendants(child)
+
+        widgets = list(descendants(dialog))
+        buttons = {
+            str(widget.cget("text")): widget
+            for widget in widgets
+            if isinstance(widget, tk.Button)
+        }
+        self.assertIn("全选", buttons)
+        self.assertEqual(buttons["全选"].winfo_manager(), "")
+
+        menu_button = next(widget for widget in widgets if widget.winfo_class() == "Menubutton")
+        menu = menu_button.nametowidget(menu_button.cget("menu"))
+        self.assertEqual(menu.type(0), "cascade")
+        submenu = menu.nametowidget(menu.entrycget(0, "menu"))
+        self.assertEqual(submenu.entrycget(0, "label"), "全部 (2)")
+
+        buttons["编辑"].invoke()
+        root.update_idletasks()
+        self.assertEqual(buttons["全选"].winfo_manager(), "pack")
+        buttons["全选"].invoke()
+        root.update_idletasks()
+        item_list = next(widget for widget in widgets if isinstance(widget, tk.Listbox))
+        self.assertEqual([item_list.get(i)[:2] for i in range(item_list.size())], ["☑ ", "☑ "])
+
+        buttons["编辑"].invoke()
+        root.update_idletasks()
+        self.assertEqual(buttons["全选"].winfo_manager(), "")
+
     def test_phrasebook_scored_examples_include_match_score_and_reasons(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "memory.json"
@@ -3038,6 +3217,64 @@ class VisibleContentTests(unittest.TestCase):
         self.assertIn("最后一句文字和图片同时出现", prompt_text)
         self.assertIn("把它们当成同一轮消息", prompt_text)
         self.assertIn("图片与最后一句文字的关系", prompt_text)
+
+    def test_long_blue_text_bubble_does_not_call_vision_model(self):
+        from PIL import Image, ImageDraw
+
+        settings = AppSettings()
+        settings.vision_provider = "zhipu"
+        settings.vision_api_key = "vision-key"
+        image = Image.new("RGB", (420, 420), "white")
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle((70, 90, 370, 330), radius=12, fill=(198, 231, 250))
+
+        with patch("visible_content.requests.post") as post:
+            visible = VisibleContentAnalyzer(settings).analyze(
+                "[对方] 社团如何吸收个人会员，整改需要哪些材料？",
+                image=image,
+            )
+
+        post.assert_not_called()
+        self.assertEqual(visible.message_type, "text")
+
+    def test_same_visible_image_is_analyzed_only_once(self):
+        from PIL import Image
+
+        settings = AppSettings()
+        settings.vision_provider = "zhipu"
+        settings.vision_api_key = "vision-key"
+        image = Image.new("RGB", (40, 40), (80, 90, 100))
+        analyzer = VisibleContentAnalyzer(settings)
+
+        with patch("visible_content.requests.post") as post:
+            post.return_value.status_code = 200
+            post.return_value.raise_for_status.return_value = None
+            post.return_value.json.return_value = {
+                "choices": [{"message": {"content": '{"message_type":"image","summary":"图片里是一张表格","confidence":"high","should_skip_reply":false}'}}]
+            }
+            first = analyzer.analyze("[对方] [图片]", image=image)
+            second = analyzer.analyze("[对方] [图片]", image=image.copy())
+
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(second, first)
+
+    def test_vision_request_timeout_is_twelve_seconds(self):
+        from PIL import Image
+
+        settings = AppSettings()
+        settings.vision_provider = "zhipu"
+        settings.vision_api_key = "vision-key"
+        image = Image.new("RGB", (20, 20), "white")
+
+        with patch("visible_content.requests.post") as post:
+            post.return_value.status_code = 200
+            post.return_value.raise_for_status.return_value = None
+            post.return_value.json.return_value = {
+                "choices": [{"message": {"content": '{"message_type":"image","summary":"图片内容","confidence":"high","should_skip_reply":false}'}}]
+            }
+            VisibleContentAnalyzer(settings).analyze("[对方] [图片]", image=image)
+
+        self.assertEqual(post.call_args.kwargs["timeout"], 12)
 
     def test_vision_analyzer_rejects_unsupported_customer_said_summary_for_image_placeholder(self):
         from PIL import Image
