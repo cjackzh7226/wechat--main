@@ -262,10 +262,12 @@ def test_ledger_allows_only_one_retry_after_explicit_failure(tmp_path: Path) -> 
     assert ledger.prepare("turn", "chat", "record", "answer") is True
     ledger.mark_failed("turn", "not_sent")
     assert ledger.may_retry("turn") is True
+    assert ledger.contains("turn") is False
     assert ledger.prepare("turn", "chat", "record", "answer") is True
     ledger.mark_failed("turn", "not_sent_again")
 
     assert ledger.may_retry("turn") is False
+    assert ledger.contains("turn") is True
     assert ledger.prepare("turn", "chat", "record", "answer") is False
     assert ledger.status("turn") == "failed"
 
@@ -1095,6 +1097,62 @@ def test_startup_baselines_only_the_detected_chat_type(tmp_path: Path) -> None:
     assert app.send_ledger.status(personal.turn_key) is None
 
 
+def test_startup_does_not_hide_an_existing_uncertain_turn_from_reconciliation(
+    tmp_path: Path,
+) -> None:
+    import main
+
+    observation = _personal_observation(question="重启后仍未回复的问题")
+    window = SimpleNamespace(hwnd=100, title="WeCom", platform=SimpleNamespace(key="wecom"))
+    ledger = SendLedger(tmp_path / "startup-uncertain-ledger.json").load()
+    assert ledger.prepare(observation.turn_key, observation.identity.key, "record", "answer")
+    ledger.mark_keypress(observation.turn_key)
+    ledger.mark_uncertain(observation.turn_key, "bubble_verifier_unavailable")
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.detector = SimpleNamespace(foreground_chat=lambda: window)
+    app.send_ledger = ledger
+    app._capture_runtime_observation = lambda _window, chat_type=None: observation
+    app.stable_identity_tracker = SimpleNamespace(observe=lambda *_args, **_kwargs: False)
+    app.current_window = None
+    app.current_context = ""
+    app._startup_baseline_turns = {}
+
+    assert app._establish_startup_baseline() is True
+    assert ledger.status(observation.turn_key) == "uncertain"
+    assert app._startup_baseline_turns == {}
+    assert app._observation_after_startup_baseline(observation) is observation
+
+
+def test_startup_does_not_hide_a_reconciled_failed_turn_waiting_for_its_retry(
+    tmp_path: Path,
+) -> None:
+    import main
+
+    observation = _personal_observation(question="自愈释放后重启仍需重试的问题")
+    window = SimpleNamespace(hwnd=100, title="WeCom", platform=SimpleNamespace(key="wecom"))
+    ledger = SendLedger(tmp_path / "startup-reconciled-ledger.json").load()
+    assert ledger.prepare(observation.turn_key, observation.identity.key, "record", "answer")
+    ledger.mark_keypress(observation.turn_key)
+    ledger.mark_uncertain(observation.turn_key, "bubble_verifier_unavailable")
+    assert ledger.reconcile_uncertain_not_sent(observation.turn_key) is True
+    assert ledger.status(observation.turn_key) == "failed"
+    assert ledger.may_retry(observation.turn_key) is True
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.detector = SimpleNamespace(foreground_chat=lambda: window)
+    app.send_ledger = ledger
+    app._capture_runtime_observation = lambda _window, chat_type=None: observation
+    app.stable_identity_tracker = SimpleNamespace(observe=lambda *_args, **_kwargs: False)
+    app.current_window = None
+    app.current_context = ""
+    app._startup_baseline_turns = {}
+
+    assert app._establish_startup_baseline() is True
+    assert ledger.status(observation.turn_key) == "failed"
+    assert ledger.may_retry(observation.turn_key) is True
+    assert app._startup_baseline_turns == {}
+    assert app._observation_after_startup_baseline(observation) is observation
+
+
 def test_explicit_manual_trigger_can_release_a_baseline_but_not_a_terminal_send(
     tmp_path: Path,
 ) -> None:
@@ -1109,6 +1167,136 @@ def test_explicit_manual_trigger_can_release_a_baseline_but_not_a_terminal_send(
 
     assert ledger.release_baseline("baseline-turn") is False
     assert ledger.status("baseline-turn") == "verified"
+
+
+def test_uncertain_ledger_entry_can_only_be_reconciled_to_one_safe_retry(
+    tmp_path: Path,
+) -> None:
+    ledger = SendLedger(tmp_path / "uncertain-reconcile-ledger.json").load()
+    assert ledger.prepare("visible-turn", "chat", "record", "answer") is True
+    ledger.mark_keypress("visible-turn")
+    ledger.mark_uncertain("visible-turn", "bubble_verifier_unavailable")
+
+    assert ledger.reconcile_uncertain_not_sent("visible-turn") is True
+    assert ledger.status("visible-turn") == "failed"
+    assert ledger.prepare("visible-turn", "chat", "record", "answer") is True
+    assert ledger.status("visible-turn") == "prepared"
+    ledger.mark_keypress("visible-turn")
+    ledger.mark_uncertain("visible-turn", "second_uncertain")
+
+    assert ledger.reconcile_uncertain_not_sent("visible-turn") is False
+    assert ledger.status("visible-turn") == "uncertain"
+
+
+def test_manual_recognition_reconciles_visible_unreplied_uncertain_turn_and_queues_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main
+
+    observation = _personal_observation(question="明明还没有回复的问题")
+    window = SimpleNamespace(hwnd=observation.identity.hwnd, title="企业微信")
+    ledger = SendLedger(tmp_path / "manual-uncertain-ledger.json").load()
+    assert ledger.prepare(observation.turn_key, observation.identity.key, "record", "answer")
+    ledger.mark_keypress(observation.turn_key)
+    ledger.mark_uncertain(observation.turn_key, "bubble_verifier_unavailable")
+    queued = []
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.settings = SimpleNamespace(
+        managed_mode="full",
+        auto_reply_delay_seconds=1.2,
+        wecom_account_name="程正恒",
+    )
+    app.queue = Queue()
+    app.current_context = ""
+    app.current_chat_type = "personal"
+    app.send_ledger = ledger
+    app._startup_baseline_turns = {}
+    app._managed_reply_readiness_allows_send = lambda: True
+    app._capture_runtime_observation = lambda _window: observation
+    app.stable_identity_tracker = SimpleNamespace(observe=lambda *_args, **_kwargs: True)
+    app._queue_runtime_observation = lambda current, selected, **kwargs: queued.append(
+        (current, selected, kwargs)
+    ) or True
+    sleeps = []
+    monkeypatch.setattr(main.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    app._managed_recognize_current(window)
+
+    assert ledger.status(observation.turn_key) == "failed"
+    assert queued == [(observation, window, {})]
+    assert sleeps and sleeps[-1] >= 1.0
+    events = []
+    while not app.queue.empty():
+        events.append(app.queue.get_nowait())
+    assert ("status", "已确认上次未实际发出，正在进行唯一一次安全重试") in events
+    assert not any("已经处理" in str(value) for _kind, value in events)
+
+
+def test_manual_recognition_reports_verified_without_claiming_uncertain_is_processed(
+    tmp_path: Path,
+) -> None:
+    import main
+
+    observation = _personal_observation(question="已验证回复的问题")
+    window = SimpleNamespace(hwnd=observation.identity.hwnd, title="企业微信")
+    ledger = SendLedger(tmp_path / "manual-verified-ledger.json").load()
+    assert ledger.prepare(observation.turn_key, observation.identity.key, "record", "answer")
+    ledger.mark_keypress(observation.turn_key)
+    ledger.mark_verified(observation.turn_key)
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.settings = SimpleNamespace(
+        managed_mode="full",
+        auto_reply_delay_seconds=1.2,
+        wecom_account_name="程正恒",
+    )
+    app.queue = Queue()
+    app.current_context = ""
+    app.current_chat_type = "personal"
+    app.send_ledger = ledger
+    app._startup_baseline_turns = {}
+    app._managed_reply_readiness_allows_send = lambda: True
+    app._capture_runtime_observation = lambda _window: observation
+    app.stable_identity_tracker = SimpleNamespace(observe=lambda *_args, **_kwargs: True)
+    app._queue_runtime_observation = lambda *_args, **_kwargs: pytest.fail("verified must not queue")
+
+    app._managed_recognize_current(window)
+
+    events = []
+    while not app.queue.empty():
+        events.append(app.queue.get_nowait())
+    assert events[-1] == ("status", "发送台账显示该问题已验证回复，不会重复发送")
+
+
+def test_automatic_observation_rechecks_uncertain_turn_before_single_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main
+
+    observation = _personal_observation(question="自动流程仍可见且未回复的问题")
+    ledger = SendLedger(tmp_path / "automatic-uncertain-ledger.json").load()
+    assert ledger.prepare(observation.turn_key, observation.identity.key, "record", "answer")
+    ledger.mark_keypress(observation.turn_key)
+    ledger.mark_uncertain(observation.turn_key, "bubble_verifier_unavailable")
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.send_ledger = ledger
+    app.queue = Queue()
+    times = iter((10.0, 11.1))
+    monkeypatch.setattr(main.time, "monotonic", lambda: next(times))
+
+    assert app._reconcile_automatic_uncertain(observation) is False
+    assert ledger.status(observation.turn_key) == "uncertain"
+    assert app._reconcile_automatic_uncertain(observation) is True
+    assert ledger.status(observation.turn_key) == "failed"
+
+    events = []
+    while not app.queue.empty():
+        events.append(app.queue.get_nowait())
+    assert events == [
+        ("status", "正在复核上次发送结果；确认仍未回复后将安全重试"),
+        ("status", "已确认上次未实际发出，正在进行唯一一次安全重试"),
+    ]
 
 
 def test_startup_baseline_retries_one_transient_unreadable_capture(
@@ -1389,6 +1577,181 @@ def test_mainloop_return_always_stops_the_non_daemon_runtime_worker(
     ]
 
 
+def test_managed_start_enters_mainloop_without_running_slow_baseline_inline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main
+
+    calls = []
+    deferred_targets = []
+
+    class DeferredThread:
+        def __init__(self, *, target, daemon, **kwargs):
+            self.target = target
+            self.daemon = daemon
+            self.kwargs = kwargs
+
+        def start(self):
+            calls.append(("thread_started", self.daemon, self.kwargs.get("name", "")))
+            deferred_targets.append(self.target)
+
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.startup_blocking_error = ""
+    app.settings = SimpleNamespace(
+        managed_mode="full",
+        api_key="configured",
+        wecom_account_name="客服",
+    )
+    app.managed_worker = SimpleNamespace(
+        start=lambda: calls.append(("worker_start",)),
+        shutdown=lambda timeout=0: calls.append(("worker_shutdown", timeout)),
+    )
+    app.ui = SimpleNamespace(
+        set_status=lambda text: calls.append(("status", text)),
+        root=SimpleNamespace(after=lambda *_args: None),
+        mainloop=lambda: calls.append(("mainloop",)),
+    )
+    app.queue = Queue()
+    app.running = True
+    app._establish_startup_baseline = lambda: pytest.fail(
+        "slow baseline must not run on the Tk startup thread"
+    )
+    app._monitor_loop = lambda: None
+    app._ui_loop = lambda: None
+    monkeypatch.setattr(main.threading, "Thread", DeferredThread)
+
+    app.start()
+
+    assert any(call[0] == "thread_started" for call in calls)
+    assert ("mainloop",) in calls
+    assert ("worker_start",) not in calls
+    assert len(deferred_targets) == 1
+    assert calls.index(("mainloop",)) < calls.index(("worker_shutdown", 10.0))
+
+
+def test_managed_send_readiness_stays_closed_while_startup_baseline_is_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main
+
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.startup_blocking_error = ""
+    app._startup_baseline_pending = True
+    app.settings = SimpleNamespace(managed_mode="full")
+    app.memory = SimpleNamespace(assert_ready_for_managed_reply=lambda: None)
+    app.queue = Queue()
+    monkeypatch.setattr(main, "_ensure_diag_logger", lambda: None)
+
+    assert app._managed_reply_readiness_allows_send() is False
+    assert app.settings.managed_mode == "full"
+    assert app.queue.get_nowait() == (
+        "status",
+        "正在初始化文字识别并建立启动防重复基线，请稍候",
+    )
+
+
+def test_successful_startup_baseline_event_starts_runtime_components_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main
+
+    calls = []
+
+    class InlineThread:
+        def __init__(self, *, target, daemon, **_kwargs):
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            calls.append(("monitor", self.daemon))
+
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.startup_blocking_error = ""
+    app._startup_baseline_pending = True
+    app._runtime_components_started = False
+    app.settings = SimpleNamespace(api_key="configured")
+    app.managed_worker = SimpleNamespace(start=lambda: calls.append(("worker",)))
+    app.ui = SimpleNamespace(
+        set_status=lambda text: calls.append(("status", text)),
+        root=SimpleNamespace(after=lambda *_args: None),
+    )
+    app.queue = Queue()
+    app.queue.put(("startup_baseline_complete", True))
+    app.running = True
+    app.acceptance_report_path = None
+    app._monitor_loop = lambda: None
+    monkeypatch.setattr(main.threading, "Thread", InlineThread)
+
+    app._ui_loop()
+    app._complete_startup_baseline(True)
+
+    assert app._startup_baseline_pending is False
+    assert calls.count(("worker",)) == 1
+    assert calls.count(("monitor", True)) == 1
+
+
+@pytest.mark.parametrize("callback_name", ("_auto_changed", "_training_changed"))
+def test_startup_baseline_pending_does_not_start_a_second_ocr_processing_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    callback_name: str,
+) -> None:
+    import main
+
+    statuses = []
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.startup_blocking_error = ""
+    app._startup_baseline_pending = True
+    app.settings = SimpleNamespace(
+        auto_recognize=True,
+        training_mode=callback_name == "_training_changed",
+        save=lambda: None,
+    )
+    app.ui = SimpleNamespace(set_status=statuses.append)
+    app._target_wechat_window = lambda: pytest.fail(
+        "pending startup baseline must remain the only OCR initialization"
+    )
+    monkeypatch.setattr(
+        main.threading,
+        "Thread",
+        lambda *_args, **_kwargs: pytest.fail("a second OCR thread was started"),
+    )
+
+    getattr(app, callback_name)(True)
+
+    assert statuses == ["正在初始化文字识别并建立启动防重复基线，请稍候"]
+
+
+def test_enabling_managed_mode_while_startup_baseline_is_pending_stays_async() -> None:
+    import main
+
+    statuses = []
+    saves = []
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.startup_blocking_error = ""
+    app._startup_baseline_pending = True
+    app.settings = SimpleNamespace(
+        managed_mode="off",
+        auto_recognize=False,
+        save=lambda: saves.append(True),
+    )
+    app.ui = SimpleNamespace(set_status=statuses.append)
+    app.observed_runtime_turns = {"old"}
+    app._establish_startup_baseline = lambda: pytest.fail(
+        "pending startup baseline must not be repeated on the UI thread"
+    )
+    app._target_wechat_window = lambda: pytest.fail(
+        "processing must wait for the startup baseline completion event"
+    )
+
+    app._managed_mode_changed("full")
+
+    assert app.settings.managed_mode == "full"
+    assert app.settings.auto_recognize is True
+    assert app.observed_runtime_turns == set()
+    assert saves == [True]
+    assert statuses == ["正在初始化文字识别并建立启动防重复基线，请稍候"]
+
+
 @pytest.mark.parametrize("mode", ("observe", "controlled", "full"))
 def test_personal_managed_modes_submit_to_runtime_worker_instead_of_sender(
     mode: str,
@@ -1476,6 +1839,59 @@ def test_group_managed_reply_submits_same_runtime_path_without_sender_thread() -
     )
 
     assert queued == [(observation, "@张三 暂未查到对应答案")]
+
+
+def test_group_stability_tracks_exact_turn_instead_of_noisy_full_ocr_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main
+
+    ChatIdentity, ChatObservation, StableIdentityTracker, _normalize, _fingerprint = (
+        _identity_api()
+    )
+    identity = ChatIdentity(100, "测试群", "group")
+    first = ChatObservation(
+        identity=identity,
+        context="[对方] 张三@WeChat\n[对方] @客服 群问题",
+        customer_turn=("群问题",),
+        sender_name="张三",
+        captured_at=1.0,
+        foreground=True,
+    )
+    noisy_second = ChatObservation(
+        identity=identity,
+        context="[对方] 张三 @WeChat\n[对方] @客服  群问题\n上午10:30",
+        customer_turn=("群问题",),
+        sender_name="张三",
+        captured_at=2.3,
+        foreground=True,
+    )
+    observations = iter((first, noisy_second))
+    queued = []
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.settings = SimpleNamespace(managed_mode="full", managed_allowed_chats=[])
+    app.queue = Queue()
+    app.group_handler = SimpleNamespace(build_reply=lambda sender, answer: f"@{sender} {answer}")
+    app.stable_identity_tracker = StableIdentityTracker(required_seconds=1.2)
+    app._managed_reply_readiness_allows_send = lambda: True
+    app._capture_runtime_observation = lambda _window, chat_type=None: next(observations)
+    app._queue_runtime_observation = (
+        lambda submitted, _window, **_kwargs: queued.append(submitted) or True
+    )
+    monkeypatch.setattr(main.time, "monotonic", iter((100.0, 101.3)).__next__)
+    window = SimpleNamespace(hwnd=100)
+
+    for _ in range(2):
+        app._send_group_reply(
+            window,
+            "群问题",
+            sender_name="张三",
+            chat_identity="测试群",
+        )
+
+    assert first.turn_key == noisy_second.turn_key
+    assert first.context_hash != noisy_second.context_hash
+    assert queued == [noisy_second]
 
 
 @pytest.mark.parametrize("transition", ("off", "memory_unavailable"))
@@ -1759,12 +2175,12 @@ def test_managed_monitor_uses_visible_wecom_while_assistant_has_focus(
     (
         (100, True, True, "ready", 0),
         (50, True, True, "ready", 1),
-        (700, True, True, "user_active_elsewhere", 0),
+        (700, True, True, "ready", 1),
         (50, True, False, "activation_failed", 1),
         (50, False, True, "target_window_unavailable", 0),
     ),
 )
-def test_prepare_managed_send_window_only_activates_from_assistant_focus(
+def test_prepare_managed_send_window_activates_exact_wecom_even_when_user_is_elsewhere(
     foreground_hwnd: int,
     target_available: bool,
     activation_succeeds: bool,

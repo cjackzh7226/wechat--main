@@ -35,6 +35,7 @@ from knowledge_base import (
     audit_records,
     normalize_answer,
     normalize_question,
+    question_match_key,
     record_from_example,
     resolve_query_scope,
 )
@@ -852,6 +853,126 @@ def test_exact_active_candidate_is_returned_without_model_judgement():
 
 
 @pytest.mark.parametrize(
+    "query",
+    (
+        "民非单位未按规定换届怎么整改",
+        "民办非企业单位未按规定换届需要如何处理",
+        "社会服务机构未按规定换届该怎样解决",
+        "民非未按规定换届应当如何改正",
+        "民办非企业未按规定换届整改方式是什么",
+    ),
+)
+def test_mfei_scope_and_common_remediation_wordings_are_exact_without_model_judgement(
+    query: str,
+):
+    record = _record(
+        "20-mfei-remediation",
+        question="未按规定换届怎么办？",
+        reply="民非换届整改原始答案",
+        scope="mfei",
+    )
+    judge = _FixedJudge(None)
+
+    decision = ManagedReplyService(KnowledgeRepository([record]), judge).decide(
+        query,
+        f"[对方] {query}",
+    )
+
+    assert decision.kind == "answer"
+    assert decision.text == "民非换届整改原始答案"
+    assert decision.reason == "approved_exact_candidate_reloaded"
+    assert decision.score == 100
+    assert judge.calls == []
+
+
+@pytest.mark.parametrize(
+    "different_intent",
+    (
+        "民非单位未按规定换届后如何办理备案",
+        "民非单位未按规定换届整改期限是什么",
+        "民非单位未按规定换届整改材料有哪些",
+        "民非单位为什么需要整改未按规定换届",
+        "民非单位未按规定换届还是延期换届怎么办",
+    ),
+)
+def test_remediation_normalization_does_not_collapse_different_intents(
+    different_intent: str,
+):
+    assert question_match_key(different_intent) != question_match_key(
+        "未按规定换届怎么办"
+    )
+
+
+@pytest.mark.parametrize(
+    "explicit_problem_wording",
+    (
+        "社会服务机构存在“未按规定换届”的问题如何整改",
+        "民非单位对于存在未按规定换届的问题应如何处理",
+    ),
+)
+def test_remediation_normalization_preserves_explicit_problem_wording(
+    explicit_problem_wording: str,
+):
+    assert question_match_key(explicit_problem_wording) != question_match_key(
+        "未按规定换届怎么办"
+    )
+
+
+def test_equivalent_exact_candidates_with_identical_answers_deduplicate_and_bypass_model():
+    first = _record(
+        "20-equivalent-first",
+        question="未按规定换届怎么办？",
+        reply="相同且已批准的整改答案",
+        scope="mfei",
+    )
+    second = _record(
+        "20-equivalent-second",
+        question="未按规定换届需要如何处理？",
+        reply="相同且已批准的整改答案",
+        scope="mfei",
+    )
+    judge = _FixedJudge(None)
+
+    decision = ManagedReplyService(
+        KnowledgeRepository([second, first]),
+        judge,
+    ).decide("民非单位未按规定换届需要如何处理", "")
+
+    assert decision.kind == "answer"
+    assert decision.text == "相同且已批准的整改答案"
+    assert decision.answer_hash == first.answer_hash == second.answer_hash
+    assert decision.reason == "approved_exact_candidate_reloaded"
+    assert judge.calls == []
+
+
+def test_equivalent_exact_candidates_with_different_answers_become_conflicts():
+    first = _record(
+        "20-conflicting-first",
+        question="未按规定换届怎么办？",
+        reply="答案甲",
+        scope="mfei",
+    )
+    second = _record(
+        "20-conflicting-second",
+        question="未按规定换届需要如何处理？",
+        reply="答案乙",
+        scope="mfei",
+    )
+    judge = _FixedJudge(None)
+
+    repository = KnowledgeRepository([second, first])
+    decision = ManagedReplyService(repository, judge).decide(
+        "民非单位未按规定换届需要如何处理",
+        "",
+    )
+
+    assert decision.kind == "no_answer"
+    assert decision.text == NO_MATCH_REPLY
+    assert {record.status for record in repository.records} == {"conflict"}
+    assert judge.calls == []
+
+
+@pytest.mark.parametrize(
     "judge_result",
     [None, Judgement(chosen_index=0, consistent=False), Judgement(chosen_index=99, consistent=True)],
 )
@@ -859,7 +980,7 @@ def test_judge_failure_inconsistency_or_bad_index_returns_exact_no_match(judge_r
     record = _record("21")
     service = ManagedReplyService(KnowledgeRepository([record]), _FixedJudge(judge_result))
 
-    decision = service.decide("社会团体住所不一致需要如何整改？", "")
+    decision = service.decide("社会团体住所不一致时需要如何整改？", "")
 
     assert decision.kind == "no_answer"
     assert decision.text == "暂未查到对应答案" == NO_MATCH_REPLY

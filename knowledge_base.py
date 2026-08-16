@@ -16,7 +16,7 @@ _ORG_SCOPES = frozenset({"social", "mfei", "both", "unknown"})
 _RECORD_STATUSES = frozenset({"active", "conflict", "pending", "inactive"})
 _HASH_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _SOCIAL_MARKERS = ("社会团体", "社团", "协会", "商会")
-_MFEI_MARKERS = ("民办非企业", "民非", "社会服务机构")
+_MFEI_MARKERS = ("民办非企业", "民非单位", "民非", "社会服务机构")
 _EXPLICIT_BOTH_LABELS = frozenset(
     {
         "both",
@@ -42,7 +42,7 @@ _SOCIAL_LABEL_PATTERN = re.compile(
     r"^.{0,16}(?:社会团体|社团|协会|商会)(?:单位|组织)?$"
 )
 _MFEI_LABEL_PATTERN = re.compile(
-    r"^.{0,16}(?:民办非企业(?:单位)?|民非|社会服务机构)$"
+    r"^.{0,16}(?:民办非企业(?:单位)?|民非(?:单位)?|社会服务机构)$"
 )
 _NON_LABEL_SCOPE_PATTERN = re.compile(
     r"(?:并非|不是|不属于|不适用|不均适用|是否|是不是|还是|或者|"
@@ -53,13 +53,24 @@ _QUERY_RELATION_OR_AMBIGUITY_PATTERN = re.compile(
     r"(?:是否|是不是|还是|或者|合作|服务的|服务于|改制|转为|变更为)"
 )
 _NEGATED_SCOPE_MARKER_PATTERN = re.compile(
-    r"(?:并非|不是|不属于|非)(?:社会团体|社团|协会|商会|民办非企业(?:单位)?|民非|社会服务机构)"
+    r"(?:并非|不是|不属于|非)(?:社会团体|社团|协会|商会|民办非企业(?:单位)?|民非(?:单位)?|社会服务机构)"
 )
 _SCOPE_MARKER_PATTERN = re.compile(
-    r"社会团体|社团|协会|商会|民办非企业(?:单位)?|民非|社会服务机构"
+    r"社会团体|社团|协会|商会|民办非企业(?:单位)?|民非(?:单位)?|社会服务机构"
 )
 _MATCH_SCOPE_MARKER_PATTERN = re.compile(
-    r"社会团体|社团|协会|商会|民办非企业(?:单位)?|民非|社会服务机构"
+    r"社会团体|社团|协会|商会|民办非企业(?:单位)?|民非(?:单位)?|社会服务机构"
+)
+_MATCH_ACTION_END_PATTERN = re.compile(
+    r"(?:"
+    r"(?:需要|应该|应当|应|该|要|需|可以|可)?"
+    r"(?:怎么|如何|怎样|咋)(?:进行|开展)?"
+    r"(?:办|做|整改|处理|解决|改正|纠正|办理|操作|应对)"
+    r"|(?:整改|处理|解决)(?:办法|方案|方式|方法|措施)(?:是什么|有哪些|是啥)"
+    r"|(?:有什么|有哪些)(?:整改|处理|解决)(?:办法|方案|方式|方法|措施)"
+    r"|(?:应该|应当|应|需要|需|要)?采取什么"
+    r"(?:整改|处理|解决)?(?:办法|方案|方式|方法|措施)"
+    r")$"
 )
 _MIN_CANDIDATE_SCORE = 30
 _CANDIDATE_MARGIN = 8
@@ -482,7 +493,8 @@ def audit_records(records: Iterable[KnowledgeRecord]) -> KnowledgeAudit:
 def _match_text(text: str) -> str:
     normalized = unicodedata.normalize("NFKC", text).casefold()
     normalized = _MATCH_SCOPE_MARKER_PATTERN.sub("", normalized)
-    return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", normalized)
+    compact = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", normalized)
+    return _MATCH_ACTION_END_PATTERN.sub("怎么办", compact)
 
 
 def question_match_key(question: str) -> str:

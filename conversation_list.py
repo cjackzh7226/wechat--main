@@ -42,7 +42,10 @@ _DEFAULT_CALIBRATION: dict = {
         "max_consecutive_failures": 3,
         "retry_per_failure": 1,
     },
-    "system_whitelist": ["客户联系", "邮件提醒", "行业资讯", "企业微信团队", "腾讯云企业服务", "管理企业"],
+    "system_whitelist": [
+        "客户联系", "学习园地", "行业资讯", "邮件提醒", "管理企业",
+        "腾讯云客服", "企业微信团队", "腾讯云企业服务", "程明现的机器人",
+    ],
     "system_keywords": ["团队", "客服", "服务", "提醒", "管理", "联系"],
 }
 
@@ -188,6 +191,19 @@ class ConversationListMonitor:
         if avatar_right <= avatar_left or bottom <= top:
             return None
         return full_window_image.crop((avatar_left, top, avatar_right, bottom))
+
+    def extract_row_title(self, full_window_image, hit: RedDotHit):
+        """提取红点所在行的标题，不包含头像及下一行消息摘要。"""
+        if Image is None or full_window_image is None:
+            return None
+        width, height = full_window_image.size
+        left = max(0, int(width * 0.12))
+        right = min(width, int(width * 0.295))
+        top = max(0, int(hit.y) - 15)
+        bottom = min(height, int(hit.y) + 15)
+        if right <= left or bottom <= top:
+            return None
+        return full_window_image.crop((left, top, right, bottom))
 
 
 class ChatIdentityTracker:
@@ -348,11 +364,12 @@ class ConversationTypeDetector:
         return colorful >= 4
 
     def _is_system(self, top_title_text: str) -> bool:
-        text = (top_title_text or "").strip().casefold()
+        text = re.sub(r"\s+", "", str(top_title_text or "")).casefold()
         if not text:
             return False
         for name in self.system_whitelist:
-            if text == str(name).strip().casefold():
+            normalized_name = re.sub(r"\s+", "", str(name)).casefold()
+            if text == normalized_name or text.startswith(f"{normalized_name}@"):
                 return True
         return False
 

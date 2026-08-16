@@ -125,6 +125,19 @@ class GroupChatHandler:
         """
         name = _clean_name(account_name)
         lines = (context or "").splitlines()
+        meaningful = [index for index, line in enumerate(lines) if _line_text(line)]
+        if meaningful:
+            latest_index = meaningful[-1]
+            latest_line = lines[latest_index]
+            latest_text = _line_text(latest_line)
+            if latest_line.startswith(("[我]", "[鎴]")) and not _has_platform_marker(
+                latest_text
+            ):
+                previous_index = meaningful[-2] if len(meaningful) >= 2 else -1
+                # 我方群聊气泡通常没有“发送者”头。若它不是紧跟在
+                # 对方发送者头后的首行，就不能继续向上倒找并借用旧昵称。
+                if previous_index < 0 or not _is_sender_header_line(lines[previous_index]):
+                    return "我"
         for line in reversed(lines):
             text = _line_text(line)
             if not text:

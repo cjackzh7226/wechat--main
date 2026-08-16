@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import json
+from queue import Queue
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -319,7 +320,7 @@ def test_spec_and_dependency_locks_are_release_exact() -> None:
     assert "copy_metadata" in spec
     assert "requests" in spec
     assert "pywin32" in spec
-    assert __version__ == "2026.08.16.4"
+    assert __version__ == "2026.08.16.8"
     for distribution, expected in RUNTIME_DEPENDENCIES.items():
         assert f"{distribution}=={expected}" in runtime_lock
     assert "pytest==9.1.1" in dev_lock
@@ -573,6 +574,7 @@ def test_successful_managed_start_records_runtime_ready_before_monitoring(
     import main
 
     events: list[str] = []
+    scheduled_callbacks = []
 
     class Worker:
         def start(self):
@@ -583,8 +585,9 @@ def test_successful_managed_start_records_runtime_ready_before_monitoring(
             events.append("worker_stopped")
 
     class Root:
-        def after(self, _delay, _callback):
+        def after(self, _delay, callback):
             events.append("ui_scheduled")
+            scheduled_callbacks.append(callback)
 
     class UI:
         root = Root()
@@ -594,6 +597,19 @@ def test_successful_managed_start_records_runtime_ready_before_monitoring(
 
         def mainloop(self):
             events.append("mainloop")
+            scheduled_callbacks.pop(0)()
+
+    class Thread:
+        def __init__(self, *, target, name="", **_kwargs):
+            self.target = target
+            self.name = name
+
+        def start(self):
+            if self.name == "startup-baseline":
+                events.append("baseline_thread_started")
+                self.target()
+            else:
+                events.append("monitor_started")
 
     app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
     app.startup_blocking_error = ""
@@ -605,14 +621,17 @@ def test_successful_managed_start_records_runtime_ready_before_monitoring(
     app.acceptance_report_path = tmp_path / "acceptance.jsonl"
     app.managed_worker = Worker()
     app.ui = UI()
+    app.queue = Queue()
     app.running = True
+    app._startup_baseline_pending = False
+    app._runtime_components_started = False
     app._establish_startup_baseline = lambda: True
     app._monitor_loop = lambda: None
-    app._ui_loop = lambda: None
-    monkeypatch.setattr(main.threading, "Thread", lambda **_kwargs: SimpleNamespace(start=lambda: events.append("monitor_started")))
+    monkeypatch.setattr(main.threading, "Thread", Thread)
 
     app.start()
 
     lines = (tmp_path / "acceptance.jsonl").read_text(encoding="utf-8").splitlines()
     assert [json.loads(line)["reason"] for line in lines] == ["runtime_ready"]
+    assert events.index("mainloop") < events.index("worker_started")
     assert events.index("worker_started") < events.index("monitor_started")

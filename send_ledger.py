@@ -132,7 +132,16 @@ class SendLedger:
         with self._lock:
             self._ensure_loaded()
             entry = self._entries.get(_sha256(turn_key))
-            return bool(entry and entry["status"] in HANDLED_STATUSES)
+            return bool(
+                entry
+                and (
+                    entry["status"] in HANDLED_STATUSES
+                    or (
+                        entry["status"] == "failed"
+                        and int(entry["retry_count"]) >= 1
+                    )
+                )
+            )
 
     def status(self, turn_key: str) -> LedgerStatus | None:
         with self._lock:
@@ -196,7 +205,9 @@ class SendLedger:
             self._ensure_loaded()
             turn_hash = _sha256(turn_key)
             previous = self._entries.get(turn_hash)
-            if previous and previous["status"] in HANDLED_STATUSES:
+            # 启动基线只能抑制从未进入过台账的旧可见消息。任何已有状态都
+            # 携带恢复语义；尤其 failed 可能是 uncertain 自愈后尚未提交的唯一重试。
+            if previous:
                 return False
             entry: dict[str, object] = {
                 "turn_hash": turn_hash,
@@ -252,6 +263,25 @@ class SendLedger:
 
     def mark_uncertain(self, turn_key: str, reason: str) -> None:
         self._transition(turn_key, {"prepared", "keypress"}, "uncertain", reason)
+
+    def reconcile_uncertain_not_sent(self, turn_key: str) -> bool:
+        """把可见且确认未回复的首次 uncertain 释放为唯一一次安全重试。"""
+        with self._lock:
+            self._ensure_loaded()
+            turn_hash = _sha256(turn_key)
+            previous = self._entries.get(turn_hash)
+            if (
+                previous is None
+                or previous["status"] != "uncertain"
+                or int(previous["retry_count"]) >= 1
+            ):
+                return False
+            entry = dict(previous)
+            entry["status"] = "failed"
+            entry["updated_at"] = _utc_now()
+            entry["reason"] = "visible_not_sent"
+            self._replace_entry(turn_hash, entry)
+            return True
 
     def mark_failed(self, turn_key: str, reason: str) -> None:
         self._transition(turn_key, {"prepared", "keypress"}, "failed", reason)
