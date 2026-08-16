@@ -233,6 +233,116 @@ def test_group_turn_fingerprint_includes_sender_and_chat_type() -> None:
     assert replace(observation, sender_name="李四").turn_key == li
 
 
+def test_turn_fingerprint_distinguishes_a_later_identical_question_occurrence(
+    tmp_path: Path,
+) -> None:
+    ChatIdentity, ChatObservation, _Tracker, _normalize, _fingerprint = _identity_api()
+    identity = ChatIdentity(100, "重复提问测试", "personal")
+    first = ChatObservation(
+        identity=identity,
+        context="[对方] 民非单位未按规定换届怎么整改",
+        customer_turn=("民非单位未按规定换届怎么整改",),
+    )
+    repeated = ChatObservation(
+        identity=identity,
+        context=(
+            "[对方] 民非单位未按规定换届怎么整改\n"
+            "[我] 请按知识库答案整改\n"
+            "[对方] 民非单位未按规定换届怎么整改"
+        ),
+        customer_turn=("民非单位未按规定换届怎么整改",),
+        occurrence_marker="verified-boundary:2",
+    )
+    ledger = SendLedger(tmp_path / "repeat-question-ledger.json").load()
+    assert ledger.prepare(first.turn_key, identity.key, "record", "answer")
+    ledger.mark_keypress(first.turn_key)
+    ledger.mark_verified(first.turn_key)
+
+    assert first.turn_key != repeated.turn_key
+    assert ledger.contains(first.turn_key) is True
+    assert ledger.contains(repeated.turn_key) is False
+    assert replace(repeated, captured_at=999.0).turn_key == repeated.turn_key
+
+
+def test_capture_assigns_a_new_occurrence_to_same_question_after_own_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main
+
+    question = "民非单位未按规定换届怎么整改"
+    contexts = iter(
+        (
+            f"[对方] {question}",
+            f"[对方] {question}\n[我] 请按知识库答案整改\n[对方] {question}",
+            (
+                f"[对方] {question}\n[我] 请按知识库答案整改\n"
+                f"[对方] {question}\n[我] 请按知识库答案整改\n[对方] {question}"
+            ),
+        )
+    )
+    window = SimpleNamespace(hwnd=100)
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.settings = SimpleNamespace(wecom_account_name="客服")
+    app._capture_runtime_source = lambda _window: (
+        "重复提问测试",
+        "personal",
+        next(contexts),
+    )
+    monkeypatch.setattr(main, "_current_foreground_chat", lambda _detector: window)
+    monkeypatch.setattr(main, "_same_strict_send_window", lambda *_args: True)
+    app.detector = SimpleNamespace()
+
+    first = app._capture_runtime_observation(window)
+    second = app._capture_runtime_observation(window)
+    third = app._capture_runtime_observation(window)
+
+    assert first is not None and second is not None and third is not None
+    assert first.customer_turn == second.customer_turn == third.customer_turn == (question,)
+    assert len({first.turn_key, second.turn_key, third.turn_key}) == 3
+    assert first.occurrence_marker == ""
+    assert second.occurrence_marker
+    assert third.occurrence_marker
+
+
+def test_startup_baseline_does_not_hide_a_later_identical_question_occurrence() -> None:
+    import main
+
+    ChatIdentity, ChatObservation, _Tracker, _normalize, _fingerprint = _identity_api()
+    question = "民非单位未按规定换届怎么整改"
+    identity = ChatIdentity(100, "重复提问测试", "personal")
+    baseline_context = f"[我] 之前的其他回复\n[对方] {question}"
+    repeated_context = (
+        f"[我] 之前的其他回复\n[对方] {question}\n"
+        f"[我] 请按知识库答案整改\n[对方] {question}"
+    )
+    baseline = ChatObservation(
+        identity=identity,
+        context=baseline_context,
+        customer_turn=(question,),
+        occurrence_marker=main._turn_occurrence_marker(baseline_context, (question,)),
+    )
+    repeated = ChatObservation(
+        identity=identity,
+        context=repeated_context,
+        customer_turn=(question,),
+        occurrence_marker=main._turn_occurrence_marker(repeated_context, (question,)),
+    )
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    slot = app._startup_baseline_slot(baseline)
+    app._startup_baseline_turns = {slot: baseline.customer_turn}
+    app._startup_baseline_occurrences = {
+        slot: (
+            baseline.occurrence_marker,
+            main._visible_turn_occurrence_count(baseline.context, baseline.customer_turn),
+        )
+    }
+
+    assert repeated.turn_key != baseline.turn_key
+    assert app._observation_after_startup_baseline(repeated) == repeated
+    assert app._startup_baseline_turns == {}
+    assert app._startup_baseline_occurrences == {}
+
+
 def test_stability_requires_matching_identity_and_context_after_delay() -> None:
     ChatIdentity, _Observation, StableIdentityTracker, _normalize, _fingerprint = _identity_api()
     tracker = StableIdentityTracker(required_seconds=1.2)
@@ -1265,7 +1375,7 @@ def test_manual_recognition_reports_verified_without_claiming_uncertain_is_proce
     events = []
     while not app.queue.empty():
         events.append(app.queue.get_nowait())
-    assert events[-1] == ("status", "发送台账显示该问题已验证回复，不会重复发送")
+    assert events[-1] == ("status", "当前这条消息已回复；对方重新提问时会再次处理")
 
 
 def test_automatic_observation_rechecks_uncertain_turn_before_single_retry(

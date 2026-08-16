@@ -377,6 +377,9 @@ class WeChatStyleReplyAssistant:
         self._managed_pending_lock = threading.Lock()
         self.observed_runtime_turns: set[str] = set()
         self._startup_baseline_turns: dict[tuple[str, str], tuple[str, ...]] = {}
+        self._startup_baseline_occurrences: dict[
+            tuple[str, str], tuple[str, int]
+        ] = {}
         self._startup_baseline_pending = False
         self._runtime_components_started = False
         self.queue: Queue[tuple[str, object]] = Queue()
@@ -1503,11 +1506,21 @@ class WeChatStyleReplyAssistant:
             baselines = getattr(self, "_startup_baseline_turns", None)
             slot = self._startup_baseline_slot(observation)
             baseline_turn = baselines.get(slot) if isinstance(baselines, dict) else None
+            occurrences = getattr(self, "_startup_baseline_occurrences", None)
+            baseline_evidence = (
+                occurrences.get(slot) if isinstance(occurrences, dict) else None
+            )
+            baseline_marker = (
+                baseline_evidence[0]
+                if isinstance(baseline_evidence, tuple) and len(baseline_evidence) == 2
+                else observation.occurrence_marker
+            )
             baseline_key = (
                 turn_fingerprint(
                     observation.identity,
                     baseline_turn,
                     sender_name=observation.sender_name,
+                    occurrence_marker=baseline_marker,
                 )
                 if baseline_turn
                 else ""
@@ -1525,7 +1538,7 @@ class WeChatStyleReplyAssistant:
                     self.queue.put(("status", "当前消息正在发送复核中，请稍候"))
                     return
                 elif ledger_status == "verified":
-                    self.queue.put(("status", "发送台账显示该问题已验证回复，不会重复发送"))
+                    self.queue.put(("status", "当前这条消息已回复；对方重新提问时会再次处理"))
                     return
                 elif ledger_status == "uncertain":
                     # 即使稳定跟踪器已被后台轮询预热，手动自愈也必须独立
@@ -1556,6 +1569,8 @@ class WeChatStyleReplyAssistant:
                     ))
             if isinstance(baselines, dict) and (released or baseline_turn):
                 baselines.pop(slot, None)
+                if isinstance(occurrences, dict):
+                    occurrences.pop(slot, None)
         except LedgerBlockingError as error:
             self._block_managed_for_ledger(error)
             return
@@ -1576,7 +1591,7 @@ class WeChatStyleReplyAssistant:
             messages = {
                 "prepared": "当前消息正在发送复核中，请稍候",
                 "keypress": "当前消息正在发送复核中，请稍候",
-                "verified": "发送台账显示该问题已验证回复，不会重复发送",
+                "verified": "当前这条消息已回复；对方重新提问时会再次处理",
                 "uncertain": "上次发送结果无法确认，为防止重复发送已暂停；请人工核对当前聊天",
             }
             self.queue.put(("status", messages.get(status, "当前消息未进入发送队列，请重新识别")))
@@ -1852,8 +1867,22 @@ class WeChatStyleReplyAssistant:
                 baseline_turns = {}
                 self._startup_baseline_turns = baseline_turns
             if baseline_created or existing_status == "baseline":
-                baseline_turns[self._startup_baseline_slot(observation)] = tuple(
-                    observation.customer_turn
+                slot = self._startup_baseline_slot(observation)
+                baseline_turns[slot] = tuple(observation.customer_turn)
+                baseline_occurrences = getattr(
+                    self,
+                    "_startup_baseline_occurrences",
+                    None,
+                )
+                if not isinstance(baseline_occurrences, dict):
+                    baseline_occurrences = {}
+                    self._startup_baseline_occurrences = baseline_occurrences
+                baseline_occurrences[slot] = (
+                    observation.occurrence_marker,
+                    _visible_turn_occurrence_count(
+                        observation.context,
+                        observation.customer_turn,
+                    ),
                 )
             self.stable_identity_tracker.observe(
                 observation.identity,
@@ -2173,6 +2202,7 @@ class WeChatStyleReplyAssistant:
                 context=context,
                 customer_turn=turn,
                 sender_name=sender_name,
+                occurrence_marker=_turn_occurrence_marker(context, turn),
                 captured_at=time.time(),
                 foreground=foreground,
             )
@@ -2577,9 +2607,29 @@ class WeChatStyleReplyAssistant:
         baseline = baselines.get(slot)
         if not baseline:
             return observation
+        occurrences = getattr(self, "_startup_baseline_occurrences", None)
+        baseline_evidence = (
+            occurrences.get(slot) if isinstance(occurrences, dict) else None
+        )
         baseline_messages = list(baseline)
         current_messages = list(observation.customer_turn)
         if _turns_are_same_or_similar(baseline_messages, current_messages):
+            baseline_count = (
+                baseline_evidence[1]
+                if isinstance(baseline_evidence, tuple)
+                and len(baseline_evidence) == 2
+                and type(baseline_evidence[1]) is int
+                else None
+            )
+            current_count = _visible_turn_occurrence_count(
+                observation.context,
+                observation.customer_turn,
+            )
+            if baseline_count is not None and current_count > baseline_count:
+                baselines.pop(slot, None)
+                if isinstance(occurrences, dict):
+                    occurrences.pop(slot, None)
+                return observation
             return None
         if _turn_has_real_new_message(baseline_messages, current_messages):
             new_tail = tuple(current_messages[len(baseline_messages) :])
@@ -2588,10 +2638,13 @@ class WeChatStyleReplyAssistant:
                 context=observation.context,
                 customer_turn=new_tail,
                 sender_name=observation.sender_name,
+                occurrence_marker=observation.occurrence_marker,
                 captured_at=observation.captured_at,
                 foreground=observation.foreground,
             )
         baselines.pop(slot, None)
+        if isinstance(occurrences, dict):
+            occurrences.pop(slot, None)
         return observation
 
     def _progress(self, text: str) -> None:
@@ -3338,6 +3391,49 @@ def _latest_own_message_before_current_turn(context: str) -> str:
     if index >= 0 and messages[index][0] == "own":
         return messages[index][1]
     return ""
+
+
+def _turn_occurrence_marker(context: str, turn_messages: tuple[str, ...]) -> str:
+    """Identify a later same-text customer turn without exposing chat text.
+
+    An empty marker preserves historical ledger keys when no own-message
+    boundary is visible.
+    Once an own-message boundary is visible, the hashed boundary plus the
+    visible occurrence count distinguishes a genuinely repeated question from
+    repeated OCR polls of the same bubble.  If older context scrolls away, the
+    marker can conservatively collapse to an earlier key and block rather than
+    risk duplicate sends.
+    """
+    if not turn_messages:
+        return ""
+    boundary = _latest_own_message_before_current_turn(context)
+    boundary_key = _normalize_turn_message(_strip_visible_summary(boundary))
+    if not boundary_key:
+        return ""
+    occurrences = _visible_turn_occurrence_count(context, turn_messages)
+    if not occurrences:
+        return ""
+    boundary_hash = hashlib.sha256(boundary_key.encode("utf-8")).hexdigest()
+    return f"{boundary_hash}:{occurrences}"
+
+
+def _visible_turn_occurrence_count(
+    context: str,
+    turn_messages: tuple[str, ...],
+) -> int:
+    if not turn_messages:
+        return 0
+    target = _normalize_turn_message(_strip_visible_summary(turn_messages[-1]))
+    if not target:
+        return 0
+    occurrences = 0
+    for role, text in _context_role_messages(context):
+        if role != "other":
+            continue
+        candidate = _normalize_turn_message(_strip_visible_summary(text))
+        if candidate == target or candidate.endswith(target):
+            occurrences += 1
+    return occurrences
 
 
 def _current_turn_has_own_boundary(context: str) -> bool:

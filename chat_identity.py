@@ -57,6 +57,7 @@ def turn_fingerprint(
     messages: Sequence[str],
     *,
     sender_name: str = "",
+    occurrence_marker: str = "",
 ) -> str:
     if not isinstance(identity, ChatIdentity):
         raise TypeError("identity must be ChatIdentity")
@@ -67,10 +68,17 @@ def turn_fingerprint(
         raise ValueError("messages must contain non-empty strings")
     if type(sender_name) is not str:
         raise TypeError("sender_name must be a string")
+    if type(occurrence_marker) is not str:
+        raise TypeError("occurrence_marker must be a string")
     normalized_sender = normalize_chat_title(sender_name).casefold() if identity.chat_type == "group" else ""
-    material = "\x1f".join(
-        (identity.key, identity.chat_type, normalized_sender, "\x1e".join(normalized_messages))
-    )
+    normalized_occurrence = _normalize_turn_text(occurrence_marker)
+    parts = [identity.key, identity.chat_type, normalized_sender]
+    # Keep the legacy fingerprint byte-for-byte stable when no occurrence
+    # evidence is visible, so existing durable ledger entries remain valid.
+    if normalized_occurrence:
+        parts.append(normalized_occurrence)
+    parts.append("\x1e".join(normalized_messages))
+    material = "\x1f".join(parts)
     return _sha256(material)
 
 
@@ -80,6 +88,7 @@ class ChatObservation:
     context: str
     customer_turn: tuple[str, ...]
     sender_name: str = ""
+    occurrence_marker: str = ""
     captured_at: float = 0.0
     foreground: bool = False
 
@@ -94,6 +103,8 @@ class ChatObservation:
             raise ValueError("customer_turn must contain non-empty strings")
         if type(self.sender_name) is not str:
             raise TypeError("sender_name must be a string")
+        if type(self.occurrence_marker) is not str:
+            raise TypeError("occurrence_marker must be a string")
         if self.identity.chat_type == "group" and not normalize_chat_title(self.sender_name):
             raise ValueError("group observation requires sender_name")
         if type(self.captured_at) not in {int, float} or not math.isfinite(float(self.captured_at)):
@@ -107,6 +118,7 @@ class ChatObservation:
             self.identity,
             self.customer_turn,
             sender_name=self.sender_name,
+            occurrence_marker=self.occurrence_marker,
         )
 
     @property
