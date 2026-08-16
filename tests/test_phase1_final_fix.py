@@ -1324,17 +1324,20 @@ def test_startup_baseline_suppresses_visible_old_turn(tmp_path: Path) -> None:
     assert app.send_ledger.status(observation.turn_key) == "baseline"
 
 
-def test_unreadable_visible_startup_turn_blocks_managed_monitoring(tmp_path: Path) -> None:
+def test_unreadable_visible_startup_turn_defers_sending_but_keeps_monitoring(tmp_path: Path) -> None:
     engine = _empty_engine(tmp_path)
     sender = _FakeSender()
     app, window = _new_managed_app(engine, SendLedger(tmp_path / "send_ledger.json").load(), sender)
     app.startup_blocking_error = ""
     app.detector = SimpleNamespace(foreground_chat=lambda: window)
     app._capture_runtime_observation = lambda *_args, **_kwargs: None
+    original_auto = app.settings.auto_recognize
 
     assert app._establish_startup_baseline() is False
-    assert app.settings.managed_mode == "off"
-    assert "启动基线" in app.startup_blocking_error
+    assert app.settings.managed_mode == "full"
+    assert app.settings.auto_recognize is original_auto
+    assert app._startup_baseline_pending is True
+    assert app.startup_blocking_error == ""
     assert sender.calls == []
 
 

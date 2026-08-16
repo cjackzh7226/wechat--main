@@ -315,6 +315,33 @@ class MemoryTests(unittest.TestCase):
             self.assertEqual(display[0]["source_cell"], runtime[0]["source_cell"])
             self.assertEqual(display[0]["score"], runtime[0]["enterprise_local_score"])
 
+    def test_enterprise_phrasebook_search_keeps_all_ranked_rows_for_review(self):
+        import main
+
+        rows = [
+            {"question": "第一候选", "score": 44},
+            {"question": "第二候选", "score": 39},
+            {"question": "第三候选", "score": 31},
+        ]
+        calls = []
+        app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+        app.memory = types.SimpleNamespace(
+            load=lambda: None,
+            enterprise_scored_examples=lambda query, limit: calls.append((query, limit))
+            or rows,
+            managed_scored_examples=lambda *_args, **_kwargs: self.fail(
+                "管理话术不得复用运行时 Top1/并列候选裁剪"
+            ),
+        )
+
+        display = app._get_phrasebook_examples(
+            "enterprise_annual_report_kb",
+            "社团理事数未按奇数设置如何整改",
+        )
+
+        self.assertEqual(display, rows)
+        self.assertEqual(calls, [("社团理事数未按奇数设置如何整改", 200)])
+
     def test_enterprise_decision_accepts_clear_margin_below_legacy_76_gate(self):
         import main
 
@@ -2085,6 +2112,8 @@ class ReplyParsingTests(unittest.TestCase):
 
         self.assertEqual(result, ["暂未查到对应答案"])
         self.assertIn("判断失败", engine.last_source)
+        self.assertIn("调用失败或超时", engine.last_source)
+        self.assertEqual(engine.last_error, "候选判断接口调用失败或超时，已自动重试一次")
 
     def test_enterprise_tie_managed_send_arbitrates_chosen_candidate(self):
         import main as main_module

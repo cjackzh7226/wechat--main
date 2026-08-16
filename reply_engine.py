@@ -189,10 +189,34 @@ class ReplyEngine:
             if decision.reason == "judge_inconsistent":
                 self.last_source = "企业年报知识库 · 判断不一致"
             elif decision.reason == "judge_failed_or_invalid":
+                category = str(
+                    getattr(
+                        getattr(self.managed_service, "judge", None),
+                        "last_error_category",
+                        "",
+                    )
+                    or ""
+                )
+                failure_labels = {
+                    "not_configured": "接口未配置",
+                    "http_component_unavailable": "网络组件不可用",
+                    "http_or_response_error": "调用失败或超时",
+                    "invalid_judgement": "返回格式无效",
+                }
+                detail = failure_labels.get(category, "")
                 self.last_source = "企业年报知识库 · 判断失败"
+                if detail:
+                    self.last_source += f"（{detail}）"
+                if category == "http_or_response_error":
+                    self.last_error = "候选判断接口调用失败或超时，已自动重试一次"
+                elif category == "invalid_judgement":
+                    self.last_error = "候选判断接口返回格式无效，已自动纠正并重试一次"
+                elif detail:
+                    self.last_error = f"候选判断接口{detail}"
             else:
                 self.last_source = "知识库 · 未命中"
-            self.last_error = ""
+            if decision.reason != "judge_failed_or_invalid":
+                self.last_error = ""
         else:
             self.last_source = "知识库 · 技术失败"
             self.last_error = "托管知识库技术校验失败，已取消发送"

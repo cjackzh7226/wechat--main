@@ -1461,7 +1461,7 @@ def test_startup_baseline_uses_visible_chat_when_assistant_has_focus(
     assert app.current_window is window
 
 
-def test_startup_baseline_fails_closed_without_any_visible_chat(tmp_path: Path) -> None:
+def test_startup_baseline_defers_without_disabling_continuous_monitoring(tmp_path: Path) -> None:
     import main
 
     app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
@@ -1478,9 +1478,13 @@ def test_startup_baseline_fails_closed_without_any_visible_chat(tmp_path: Path) 
     app.queue = Queue()
 
     assert app._establish_startup_baseline() is False
-    assert app.settings.managed_mode == "off"
-    assert app.settings.auto_recognize is False
-    assert "启动基线无法可靠建立" in app.startup_blocking_error
+    assert app.settings.managed_mode == "controlled"
+    assert app.settings.auto_recognize is True
+    assert app.startup_blocking_error == ""
+    assert app.queue.get_nowait() == (
+        "status",
+        "暂未识别到可建立启动基线的聊天，已保持持续识别并自动重试；托管发送暂缓。",
+    )
 
 
 def test_startup_baseline_accepts_readable_chat_with_no_unreplied_turn(
@@ -1537,8 +1541,9 @@ def test_startup_baseline_does_not_call_an_unreadable_pending_turn_idle(
     monkeypatch.setattr(main.time, "sleep", lambda _seconds: None)
 
     assert app._establish_startup_baseline() is False
-    assert app.settings.managed_mode == "off"
-    assert "启动基线无法可靠建立" in app.startup_blocking_error
+    assert app.settings.managed_mode == "controlled"
+    assert app.settings.auto_recognize is True
+    assert app.startup_blocking_error == ""
 
 
 def test_top_title_capture_uses_the_detector_calibration() -> None:
@@ -1798,6 +1803,44 @@ def test_successful_startup_baseline_event_starts_runtime_components_once(
     assert app._startup_baseline_pending is False
     assert calls.count(("worker",)) == 1
     assert calls.count(("monitor", True)) == 1
+
+
+def test_transient_startup_baseline_failure_starts_monitor_but_keeps_send_gate_closed() -> None:
+    import main
+
+    statuses = []
+    starts = []
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.startup_blocking_error = ""
+    app._startup_baseline_pending = True
+    app._startup_baseline_retry_after = 0.0
+    app.settings = SimpleNamespace(managed_mode="full")
+    app.ui = SimpleNamespace(set_status=statuses.append)
+    app._start_runtime_components = lambda: starts.append("runtime")
+
+    app._complete_startup_baseline(False)
+
+    assert app._startup_baseline_pending is True
+    assert starts == ["runtime"]
+    assert statuses == [
+        "暂未识别到可建立启动基线的聊天，已保持持续识别并自动重试；托管发送暂缓。"
+    ]
+
+
+def test_pending_startup_baseline_is_retried_by_runtime_monitor() -> None:
+    import main
+
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.startup_blocking_error = ""
+    app._startup_baseline_pending = True
+    app._startup_baseline_retry_after = 0.0
+    app.settings = SimpleNamespace(managed_mode="full")
+    app.queue = Queue()
+    app._establish_startup_baseline = lambda: True
+
+    assert app._retry_pending_startup_baseline(now=10.0) is True
+    assert app._startup_baseline_retry_after > 10.0
+    assert app.queue.get_nowait() == ("startup_baseline_complete", True)
 
 
 @pytest.mark.parametrize("callback_name", ("_auto_changed", "_training_changed"))
@@ -2942,9 +2985,7 @@ def test_managed_outcome_message_maps_only_known_user_visible_blocks(
     assert main._managed_outcome_message(reason) == expected
 
 
-def test_enabling_managed_mode_requires_baseline_before_starting_processing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_enabling_managed_mode_schedules_baseline_without_disabling_monitoring() -> None:
     import main
 
     app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
@@ -2956,19 +2997,16 @@ def test_enabling_managed_mode_requires_baseline_before_starting_processing(
     )
     statuses = []
     app.ui = SimpleNamespace(set_status=statuses.append)
-    app._establish_startup_baseline = lambda: False
-    app._target_wechat_window = lambda: pytest.fail(
-        "processing must not start after baseline failure"
-    )
-    monkeypatch.setattr(
-        main.threading,
-        "Thread",
-        lambda *_args, **_kwargs: pytest.fail("managed processing thread started"),
-    )
+    app._startup_baseline_pending = False
+    app._startup_baseline_retry_after = 99.0
 
     app._managed_mode_changed("full")
 
-    assert app.settings.managed_mode == "off"
+    assert app.settings.managed_mode == "full"
+    assert app.settings.auto_recognize is True
+    assert app._startup_baseline_pending is True
+    assert app._startup_baseline_retry_after == 0.0
+    assert statuses == ["正在初始化文字识别并建立启动防重复基线，请稍候"]
 
 
 def test_main_defers_knowledge_decision_until_the_serial_runtime_worker() -> None:

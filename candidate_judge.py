@@ -111,29 +111,46 @@ class CandidateJudge:
                 ),
             },
         ]
-        try:
-            request = build_text_generation_request(self.settings, messages)
-            if self.settings.api_provider != "custom_http":
-                request.payload["temperature"] = 0
-                request.payload["max_tokens"] = 80
-            response = post(
-                request.url,
-                headers=request.headers,
-                json=request.payload,
-                timeout=20,
-            )
-            status_code = int(getattr(response, "status_code", 200) or 200)
-            if status_code >= 400:
+        for attempt in range(2):
+            attempt_messages = list(messages)
+            if attempt:
+                attempt_messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "上一次输出格式不合规。不要解释，不要使用 Markdown 代码块；"
+                            "只能重新输出原始 JSON 对象，例如："
+                            '{"chosen":1,"consistent":true}'
+                        ),
+                    }
+                )
+            try:
+                request = build_text_generation_request(
+                    self.settings,
+                    attempt_messages,
+                )
+                if self.settings.api_provider != "custom_http":
+                    request.payload["temperature"] = 0
+                    request.payload["max_tokens"] = 500
+                response = post(
+                    request.url,
+                    headers=request.headers,
+                    json=request.payload,
+                    timeout=60,
+                )
+                status_code = int(getattr(response, "status_code", 200) or 200)
+                if status_code >= 400:
+                    self.last_error_category = "http_or_response_error"
+                    continue
+                response.raise_for_status()
+                content = extract_text_from_response(response.json(), self.settings)
+            except Exception:
                 self.last_error_category = "http_or_response_error"
-                return None
-            response.raise_for_status()
-            content = extract_text_from_response(response.json(), self.settings)
-        except Exception:
-            self.last_error_category = "http_or_response_error"
-            return None
+                continue
 
-        judgement = parse_judgement(content, len(candidates))
-        if judgement is None:
+            judgement = parse_judgement(content, len(candidates))
+            if judgement is not None:
+                self.last_error_category = ""
+                return judgement
             self.last_error_category = "invalid_judgement"
-            return None
-        return judgement
+        return None

@@ -756,7 +756,8 @@ def test_candidate_judge_sends_questions_and_ids_without_answer_bodies():
     )
 
     assert result == Judgement(chosen_index=0, consistent=True)
-    assert captured["timeout"] == 20
+    assert captured["timeout"] == 60
+    assert captured["json"]["max_tokens"] == 500
     serialized = __import__("json").dumps(captured["json"], ensure_ascii=False)
     assert "原始答案绝不能发送给模型" not in serialized
     assert candidate.answer_hash not in serialized
@@ -766,6 +767,58 @@ def test_candidate_judge_sends_questions_and_ids_without_answer_bodies():
     assert '"org_scope"' not in serialized
     assert "候选问题未写机构类型" in serialized
     assert "同义词" in serialized
+
+
+def test_candidate_judge_retries_one_invalid_model_format_without_accepting_it():
+    settings = AppSettings(
+        api_provider="deepseek",
+        api_key="configured",
+        base_url="https://api.deepseek.com",
+        model="deepseek-chat",
+    )
+    candidate = KnowledgeCandidate(
+        record_id="record-1",
+        question="社团理事数未按奇数设置如何整改？",
+        answer_hash="a" * 64,
+        org_scope="social",
+        score=44,
+        exact=False,
+        reasons=("local_similarity",),
+    )
+    payloads = iter(
+        (
+            '```json\n{"chosen":1,"consistent":true}\n```',
+            '{"chosen":1,"consistent":true}',
+        )
+    )
+    calls: list[dict[str, object]] = []
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        @staticmethod
+        def json():
+            return {
+                "choices": [{"message": {"content": next(payloads)}}]
+            }
+
+    def fake_post(_url, *, headers, json, timeout):
+        calls.append({"headers": headers, "json": json, "timeout": timeout})
+        return Response()
+
+    judge = CandidateJudge(settings, post=fake_post)
+
+    assert judge.judge("社团理事数未按奇数设置如何整改", [candidate]) == Judgement(
+        chosen_index=0,
+        consistent=True,
+    )
+    assert len(calls) == 2
+    assert "上一次输出格式不合规" in calls[1]["json"]["messages"][-1]["content"]
+    assert parse_judgement('```json\n{"chosen":1,"consistent":true}\n```', 1) is None
 
 
 def test_candidate_judge_fails_closed_with_redacted_error_category():

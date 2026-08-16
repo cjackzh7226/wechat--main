@@ -381,6 +381,7 @@ class WeChatStyleReplyAssistant:
             tuple[str, str], tuple[str, int]
         ] = {}
         self._startup_baseline_pending = False
+        self._startup_baseline_retry_after = 0.0
         self._runtime_components_started = False
         self.queue: Queue[tuple[str, object]] = Queue()
         self.current_window: WeChatWindow | None = None
@@ -480,14 +481,41 @@ class WeChatStyleReplyAssistant:
 
     def _complete_startup_baseline(self, success: bool) -> None:
         """Finish startup on the Tk thread after the baseline worker reports."""
-        self._startup_baseline_pending = False
-        if success is not True or self.startup_blocking_error:
-            self.ui.set_status(
-                self.startup_blocking_error
-                or "启动基线无法可靠建立，托管模式未启用。"
-            )
+        if self.startup_blocking_error:
+            self._startup_baseline_pending = False
+            self.ui.set_status(self.startup_blocking_error)
             return
+        if not _managed_mode_enabled(self.settings):
+            self._startup_baseline_pending = False
+            self._start_runtime_components()
+            return
+        if success is not True:
+            self._startup_baseline_pending = True
+            self._startup_baseline_retry_after = time.monotonic() + 1.0
+            self.ui.set_status(
+                "暂未识别到可建立启动基线的聊天，已保持持续识别并自动重试；托管发送暂缓。"
+            )
+            self._start_runtime_components()
+            return
+        self._startup_baseline_pending = False
+        self._startup_baseline_retry_after = 0.0
         self._start_runtime_components()
+
+    def _retry_pending_startup_baseline(self, *, now: float | None = None) -> bool:
+        """Retry a transient baseline failure from the long-lived monitor thread."""
+        if (
+            not getattr(self, "_startup_baseline_pending", False)
+            or getattr(self, "startup_blocking_error", "")
+            or not _managed_mode_enabled(self.settings)
+        ):
+            return False
+        checked_at = time.monotonic() if now is None else float(now)
+        if checked_at < float(getattr(self, "_startup_baseline_retry_after", 0.0) or 0.0):
+            return False
+        self._startup_baseline_retry_after = checked_at + 1.0
+        success = self._establish_startup_baseline()
+        self.queue.put(("startup_baseline_complete", success))
+        return True
 
     def _start_runtime_components(self) -> None:
         if getattr(self, "_runtime_components_started", False):
@@ -550,6 +578,13 @@ class WeChatStyleReplyAssistant:
                     self.current_hash = ""
                     self.last_capture = 0.0
                 self.queue.put(("window", wechat))
+                if (
+                    _managed_mode_enabled(self.settings)
+                    and getattr(self, "_startup_baseline_pending", False)
+                ):
+                    self._retry_pending_startup_baseline()
+                    time.sleep(self._poll_interval() / 1000)
+                    continue
                 if _managed_mode_enabled(self.settings) and self.managed_send_inflight:
                     time.sleep(self._poll_interval() / 1000)
                     continue
@@ -1378,7 +1413,7 @@ class WeChatStyleReplyAssistant:
         self.memory.load()
         if query.strip():
             if library_key == ENTERPRISE_ANNUAL_REPORT_SOURCE:
-                return self.memory.managed_scored_examples(query, limit=3)
+                return self.memory.enterprise_scored_examples(query, limit=200)
             return self.memory.scored_examples(query, library_key=library_key, limit=200)
         rows: list[dict[str, object]] = []
         for item in self.memory.examples_for_library(library_key, limit=200):
@@ -1706,29 +1741,15 @@ class WeChatStyleReplyAssistant:
         if selected != "off":
             self.settings.auto_recognize = True
             self.last_capture = 0.0
-            if getattr(self, "_startup_baseline_pending", False):
-                self.settings.save()
-                self.ui.set_status("正在初始化文字识别并建立启动防重复基线，请稍候")
-                return
-            if not self._establish_startup_baseline():
-                self.settings.managed_mode = "off"
-                self.settings.auto_recognize = False
-                self.settings.save()
-                self.ui.set_status(
-                    self.startup_blocking_error
-                    or "启动基线无法可靠建立，托管模式未启用。"
-                )
-                return
+            self._startup_baseline_pending = True
+            self._startup_baseline_retry_after = 0.0
+            self.settings.save()
+            self.ui.set_status("正在初始化文字识别并建立启动防重复基线，请稍候")
+            return
+        self._startup_baseline_pending = False
+        self._startup_baseline_retry_after = 0.0
         self.settings.save()
-        self.ui.set_status(MSG["managed_on"] if selected != "off" else MSG["managed_off"])
-        if selected != "off":
-            self.current_hash = ""
-            wechat = self._target_wechat_window()
-            if wechat:
-                self.current_window = wechat
-                threading.Thread(target=lambda: self._process_window(wechat, force=True), daemon=True).start()
-            else:
-                self.ui.set_status(MSG["no_window"])
+        self.ui.set_status(MSG["managed_off"])
 
     def _managed_changed(self, enabled: bool) -> None:
         """Compatibility callback for older UI builds without collapsing new modes."""
@@ -1826,7 +1847,7 @@ class WeChatStyleReplyAssistant:
                 visible_chat = getattr(self.detector, "any_chat_window", None)
                 window = visible_chat() if callable(visible_chat) else None
             if window is None:
-                return self._block_for_unreadable_startup_baseline()
+                return self._defer_unreadable_startup_baseline()
             observation = None
             idle_state: tuple[str, str, str] | None = None
             for attempt in range(3):
@@ -1836,7 +1857,7 @@ class WeChatStyleReplyAssistant:
                         visible_chat = getattr(self.detector, "any_chat_window", None)
                         current_window = visible_chat() if callable(visible_chat) else None
                     if not _same_strict_send_window(window, current_window):
-                        return self._block_for_unreadable_startup_baseline()
+                        return self._defer_unreadable_startup_baseline()
                     window = current_window
                 observation = self._capture_runtime_observation(window)
                 if observation is not None:
@@ -1848,7 +1869,7 @@ class WeChatStyleReplyAssistant:
                     time.sleep(0.25)
             if observation is None:
                 if idle_state is None:
-                    return self._block_for_unreadable_startup_baseline()
+                    return self._defer_unreadable_startup_baseline()
                 _title, chat_type, context = idle_state
                 self.current_window = window
                 self.current_context = context
@@ -1894,7 +1915,7 @@ class WeChatStyleReplyAssistant:
             self._block_managed_for_ledger(error)
             return False
         except Exception:
-            return self._block_for_unreadable_startup_baseline()
+            return self._defer_unreadable_startup_baseline()
 
     def _readable_idle_startup_context(
         self,
@@ -1923,15 +1944,15 @@ class WeChatStyleReplyAssistant:
                 return None
         return title, chat_type, context
 
-    def _block_for_unreadable_startup_baseline(self) -> bool:
-        self.settings.managed_mode = "off"
-        self.settings.auto_recognize = False
-        self.startup_blocking_error = (
-            "当前聊天的启动基线无法可靠建立，已关闭托管自动发送；请确认聊天可识别后重启。"
+    def _defer_unreadable_startup_baseline(self) -> bool:
+        """Keep observing after transient OCR/window failure while sends stay gated."""
+        self._startup_baseline_pending = True
+        message = (
+            "暂未识别到可建立启动基线的聊天，已保持持续识别并自动重试；托管发送暂缓。"
         )
         queue = getattr(self, "queue", None)
         if queue is not None:
-            queue.put(("status", self.startup_blocking_error))
+            queue.put(("status", message))
         return False
 
     def _managed_reply_readiness_allows_send(self) -> bool:
