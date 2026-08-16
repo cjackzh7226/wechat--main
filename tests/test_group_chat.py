@@ -161,6 +161,20 @@ class GroupChatHandlerTests(unittest.TestCase):
         context = "[对方] 阳光@微信\n[我] 程正恒@微信"
         self.assertEqual(self.handler.latest_role_by_sender(context, ACCOUNT), "我")
 
+    def test_role_by_sender_keeps_latest_own_reply_without_sender_header(self):
+        context = (
+            "[发送者] -@微信\n"
+            "[对方] @程正恒 社会团体怎么办？\n"
+            "[我] @- 请按规定办理。"
+        )
+
+        self.assertEqual(self.handler.latest_role_by_sender(context, ACCOUNT), "我")
+
+    def test_role_by_sender_still_uses_adjacent_header_for_misplaced_other_bubble(self):
+        context = "[发送者] 阳光@微信\n[我] 这是被位置规则误标的对方长消息"
+
+        self.assertEqual(self.handler.latest_role_by_sender(context, ACCOUNT), "对方")
+
     def test_role_by_sender_skips_at_content_line(self):
         # 最新一行是 @ 开头的内容行 → 跳过找上面名字行
         context = "[对方] 阳光@微信\n[对方] @程正恒 1234567"

@@ -4,6 +4,8 @@
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -12,6 +14,7 @@ from conversation_list import (
     ChatStateGuard,
     ConversationListMonitor,
     ConversationTypeDetector,
+    RedDotHit,
 )
 
 try:
@@ -35,7 +38,17 @@ CAL = {
         "max_consecutive_failures": 3,
         "retry_per_failure": 1,
     },
-    "system_whitelist": ["客户联系", "邮件提醒", "行业资讯", "企业微信团队", "腾讯云企业服务", "管理企业"],
+    "system_whitelist": [
+        "客户联系",
+        "学习园地",
+        "行业资讯",
+        "邮件提醒",
+        "管理企业",
+        "腾讯云客服",
+        "企业微信团队",
+        "腾讯云企业服务",
+        "程明现的机器人",
+    ],
     "system_keywords": ["团队", "客服", "服务", "提醒", "管理", "联系"],
 }
 
@@ -142,15 +155,29 @@ class TypeDetectorTests(unittest.TestCase):
         self.detector = ConversationTypeDetector(CAL)
 
     def test_system_whitelist_exact(self):
-        self.assertEqual(self.detector.detect("客户联系"), "system")
-        self.assertEqual(self.detector.detect("邮件提醒"), "system")
-        self.assertEqual(self.detector.detect("管理企业"), "system")
-
-    def test_system_whitelist_does_not_expand_to_unlisted_prefixes(self):
-        self.assertEqual(
-            self.detector.detect("腾讯云客服@abc", list_avatar_type="personal"),
-            "personal",
+        ignored = (
+            "客户联系",
+            "学习园地",
+            "行业资讯",
+            "邮件提醒",
+            "管理企业",
+            "腾讯云客服",
+            "企业微信团队",
+            "腾讯云企业服务",
+            "程明现的机器人",
         )
+        self.assertEqual(
+            [self.detector.detect(name, list_avatar_type="personal") for name in ignored],
+            ["system"] * len(ignored),
+        )
+
+    def test_known_system_account_suffix_is_ignored_without_broad_prefix_matching(self):
+        self.assertEqual(
+            self.detector.detect("腾讯云客服@腾讯云企业", list_avatar_type="personal"),
+            "system",
+        )
+        self.assertEqual(self.detector.detect("腾讯云客服小王", list_avatar_type="personal"), "personal")
+        self.assertEqual(self.detector.detect("程明现的机器人助手", list_avatar_type="personal"), "personal")
 
     def test_broad_system_keywords_do_not_override_contact_avatar(self):
         self.assertEqual(self.detector.detect("某某服务", list_avatar_type="personal"), "personal")
@@ -207,6 +234,18 @@ class TypeDetectorTests(unittest.TestCase):
         self.assertIsNotNone(avatar)
         self.assertGreater(avatar.width, 10)
         self.assertGreater(avatar.height, 10)
+
+    @unittest.skipIf(Image is None, "PIL 不可用")
+    def test_extract_row_title_excludes_avatar_and_preview_text(self):
+        img = make_full_window(red_dots=[(0.4, 150)])
+        monitor = ConversationListMonitor(CAL)
+        hit = monitor.scan(img)[0]
+
+        title = monitor.extract_row_title(img, hit)
+
+        self.assertIsNotNone(title)
+        self.assertGreater(title.width, 80)
+        self.assertLess(title.height, 35)
 
     def test_detect_with_list_avatar_type(self):
         img = make_full_window()
@@ -286,6 +325,170 @@ class IdentityTrackerTests(unittest.TestCase):
         tracker = ChatIdentityTracker()
         tracker.update_from_top_title("   ")
         self.assertEqual(tracker.current_chat_key, "")
+
+
+class ManagedConversationBypassTests(unittest.TestCase):
+    def _app(self):
+        import main
+
+        app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+        app.settings = SimpleNamespace(
+            managed_mode="full",
+            chat_area=None,
+            wecom_account_name="我方账号",
+        )
+        app.current_chat_type = "group"
+        app.bypass_switch_in_progress = False
+        app.bypass_self_since = 1.0
+        app.bypass_last_scan_at = 0.0
+        app.bypass_paused_until = 0.0
+        app.bypass_retrying = False
+        app.managed_send_inflight = False
+        app.processing = False
+        app.ocr = SimpleNamespace(read_image=lambda _image: "OCR context")
+        app.group_handler = SimpleNamespace(
+            latest_role_by_sender=lambda _context, _account: "我",
+            detect_at_mention=lambda _context, _account: False,
+            is_chat_idle=lambda _context, _account: False,
+        )
+        app.chat_state_guard = SimpleNamespace(
+            should_start_scan=lambda *_args, **_kwargs: True,
+            is_interrupted=lambda *_args, **_kwargs: False,
+        )
+        app._user_typing_detected = lambda: False
+        return app
+
+    def test_ready_scan_restores_verified_wecom_foreground_and_uses_fresh_bitmap(self):
+        import main
+
+        app = self._app()
+        activated = []
+        app.sender = SimpleNamespace(
+            activate_verified_target=lambda target: activated.append(target) or True
+        )
+        switched = []
+        app._bypass_try_switch = lambda target, bitmap: switched.append((target, bitmap))
+        window = SimpleNamespace(hwnd=2468)
+        old_bitmap, fresh_bitmap, chat_crop = object(), object(), object()
+
+        with patch(
+            "capture_ocr._capture_window_bitmap",
+            side_effect=[old_bitmap, fresh_bitmap],
+        ), patch(
+            "capture_ocr._crop_detected_chat_area_with_origin",
+            return_value=(chat_crop, (0, 0)),
+        ), patch.object(
+            main.WeChatSender,
+            "_is_target_foreground",
+            side_effect=[False, True],
+        ), patch.object(main.time, "time", side_effect=[10.0, 10.1]):
+            app._conversation_list_bypass(window)
+
+        self.assertEqual(activated, [window])
+        self.assertEqual(switched, [(window, fresh_bitmap)])
+
+    def test_idle_group_timer_survives_other_role_until_left_list_scan_starts(self):
+        import main
+
+        app = self._app()
+        app.bypass_self_since = 0.0
+        app.sender = SimpleNamespace(activate_verified_target=lambda _target: True)
+        app.group_handler = SimpleNamespace(
+            latest_role_by_sender=lambda _context, _account: "对方",
+            detect_at_mention=lambda _context, _account: False,
+            is_chat_idle=lambda _context, _account: True,
+        )
+        app.chat_state_guard = ChatStateGuard(CAL)
+        switched = []
+        app._bypass_try_switch = lambda target, bitmap: switched.append((target, bitmap))
+        window = SimpleNamespace(hwnd=2468)
+        bitmap1, bitmap2, fresh_bitmap, chat_crop = object(), object(), object(), object()
+
+        with patch(
+            "capture_ocr._capture_window_bitmap",
+            side_effect=[bitmap1, bitmap2, fresh_bitmap],
+        ), patch(
+            "capture_ocr._crop_detected_chat_area_with_origin",
+            return_value=(chat_crop, (0, 0)),
+        ), patch.object(
+            main.WeChatSender,
+            "_is_target_foreground",
+            return_value=True,
+        ), patch.object(main.time, "time", side_effect=[100.0, 103.0, 103.1]):
+            app._conversation_list_bypass(window)
+            app._conversation_list_bypass(window)
+
+        self.assertEqual(switched, [(window, fresh_bitmap)])
+
+    @unittest.skipIf(Image is None, "PIL 不可用")
+    def test_switch_skips_system_unread_rows_before_clicking_actionable_chat(self):
+        import main
+
+        app = self._app()
+        hits = [
+            RedDotHit(y=120, x_center=270),
+            RedDotHit(y=190, x_center=270),
+            RedDotHit(y=260, x_center=270),
+        ]
+        row_titles = iter(("客户联系", "管理企业", "真实联系人"))
+        scans = iter((hits, []))
+        monitor = SimpleNamespace(
+            scan=lambda _image: next(scans),
+            extract_row_avatar=lambda _image, _hit: None,
+            extract_row_title=lambda _image, _hit: next(row_titles),
+            click_point_for=lambda hit, _size: (180, int(hit.y)),
+        )
+        app.chat_list_monitor = monitor
+        app.chat_type_detector = ConversationTypeDetector(CAL)
+        app.ocr = SimpleNamespace(read_chat_title=lambda value, limit=1: value)
+        app.chat_identity = ChatIdentityTracker()
+        app.bypass_fail_count = 0
+        app.queue = SimpleNamespace(put=lambda _event: None)
+        app._read_top_title = lambda image: "原会话" if image is full else "真实联系人"
+        switched = []
+        app._after_switch = lambda _window, title, avatar_type="": switched.append(
+            (title, avatar_type)
+        )
+        window = SimpleNamespace(hwnd=2468, rect=SimpleNamespace(left=0, top=0))
+        full = Image.new("RGB", (1000, 700), "white")
+        after = Image.new("RGB", (1000, 700), "white")
+
+        with patch("capture_ocr._capture_window_bitmap", return_value=after), patch(
+            "pyautogui.click"
+        ) as click, patch.object(main.time, "sleep", return_value=None):
+            app._bypass_try_switch(window, full)
+
+        click.assert_called_once_with(180, 260)
+        self.assertEqual(switched, [("真实联系人", "")])
+        self.assertEqual(app.bypass_fail_count, 0)
+
+    @unittest.skipIf(Image is None, "PIL 不可用")
+    def test_all_system_unread_rows_are_ignored_without_failure_pause(self):
+        import main
+
+        app = self._app()
+        hits = [RedDotHit(y=120, x_center=270), RedDotHit(y=190, x_center=270)]
+        row_titles = iter(("客户联系", "管理企业"))
+        app.chat_list_monitor = SimpleNamespace(
+            scan=lambda _image: hits,
+            extract_row_avatar=lambda _image, _hit: None,
+            extract_row_title=lambda _image, _hit: next(row_titles),
+            click_point_for=lambda hit, _size: (180, int(hit.y)),
+        )
+        app.chat_type_detector = ConversationTypeDetector(CAL)
+        app.ocr = SimpleNamespace(read_chat_title=lambda value, limit=1: value)
+        app.chat_identity = ChatIdentityTracker()
+        app.bypass_fail_count = 2
+        app.queue = SimpleNamespace(put=lambda _event: None)
+        app._read_top_title = lambda _image: "原会话"
+        window = SimpleNamespace(hwnd=2468, rect=SimpleNamespace(left=0, top=0))
+        full = Image.new("RGB", (1000, 700), "white")
+
+        with patch("pyautogui.click") as click:
+            app._bypass_try_switch(window, full)
+
+        click.assert_not_called()
+        self.assertEqual(app.bypass_fail_count, 2)
 
 
 if __name__ == "__main__":

@@ -253,6 +253,25 @@ class SendLedger:
     def mark_uncertain(self, turn_key: str, reason: str) -> None:
         self._transition(turn_key, {"prepared", "keypress"}, "uncertain", reason)
 
+    def reconcile_uncertain_not_sent(self, turn_key: str) -> bool:
+        """把可见且确认未回复的首次 uncertain 释放为唯一一次安全重试。"""
+        with self._lock:
+            self._ensure_loaded()
+            turn_hash = _sha256(turn_key)
+            previous = self._entries.get(turn_hash)
+            if (
+                previous is None
+                or previous["status"] != "uncertain"
+                or int(previous["retry_count"]) >= 1
+            ):
+                return False
+            entry = dict(previous)
+            entry["status"] = "failed"
+            entry["updated_at"] = _utc_now()
+            entry["reason"] = "visible_not_sent"
+            self._replace_entry(turn_hash, entry)
+            return True
+
     def mark_failed(self, turn_key: str, reason: str) -> None:
         self._transition(turn_key, {"prepared", "keypress"}, "failed", reason)
 

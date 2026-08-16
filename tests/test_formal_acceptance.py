@@ -319,7 +319,7 @@ def test_spec_and_dependency_locks_are_release_exact() -> None:
     assert "copy_metadata" in spec
     assert "requests" in spec
     assert "pywin32" in spec
-    assert __version__ == "2026.08.16.4"
+    assert __version__ == "2026.08.16.8"
     for distribution, expected in RUNTIME_DEPENDENCIES.items():
         assert f"{distribution}=={expected}" in runtime_lock
     assert "pytest==9.1.1" in dev_lock

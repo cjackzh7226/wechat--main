@@ -1,6 +1,6 @@
 """Release identity and exact direct dependency contract."""
 
-__version__ = "2026.08.16.4"
+__version__ = "2026.08.16.8"
 
 RUNTIME_DEPENDENCIES = {
     "requests": "2.34.2",

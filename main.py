@@ -620,12 +620,6 @@ class WeChatStyleReplyAssistant:
         if context:
             latest_role, _latest_text = latest_meaningful_message(context)
         now = time.time()
-        if latest_role == "我":
-            if self.bypass_self_since == 0:
-                self.bypass_self_since = now
-        else:
-            self.bypass_self_since = 0.0
-        seconds_as_self = (now - self.bypass_self_since) if self.bypass_self_since else 0.0
         # 群聊：最新消息没 @ 我 = 聊天内容无变化 → 等同"我方发出"，也能触发扫描
         chat_type = getattr(self, "current_chat_type", "personal")
         group_idle = False
@@ -636,13 +630,6 @@ class WeChatStyleReplyAssistant:
             )
             if role_by_sender:
                 latest_role = role_by_sender
-                if latest_role == "我":
-                    if self.bypass_self_since == 0:
-                        self.bypass_self_since = now
-                    seconds_as_self = now - self.bypass_self_since
-                else:
-                    self.bypass_self_since = 0.0
-                    seconds_as_self = 0.0
             # 群聊里最新消息 @ 我 → 直接走群聊回复（不扫描列表）
             account_name = self.settings.wecom_account_name.strip()
             if latest_role == "对方" and account_name and self.group_handler.detect_at_mention(
@@ -651,6 +638,15 @@ class WeChatStyleReplyAssistant:
                 self._handle_group_chat(wechat, context, full)
                 return
             group_idle = self.group_handler.is_chat_idle(context, self.settings.wecom_account_name)
+        stable_for_scan = latest_role == "我" or (
+            chat_type == "group" and latest_role == "对方" and group_idle
+        )
+        if stable_for_scan:
+            if self.bypass_self_since == 0:
+                self.bypass_self_since = now
+        else:
+            self.bypass_self_since = 0.0
+        seconds_as_self = (now - self.bypass_self_since) if self.bypass_self_since else 0.0
         if not self.chat_state_guard.should_start_scan(
             True,
             latest_role,
@@ -662,13 +658,21 @@ class WeChatStyleReplyAssistant:
             group_idle=group_idle,
         ):
             return
-        self.bypass_last_scan_at = now
-        # 企业微信必须在最前台（不抢焦点，不在前台就等下一轮）
+        # 全托管已获得用户授权：需要切换会话时主动恢复企业微信前台。
+        # 激活后仍严格核对原 HWND，不能把点击发到其他窗口。
         if not WeChatSender._is_target_foreground(wechat):
-            return
+            if not self.sender.activate_verified_target(wechat):
+                return
+            if not WeChatSender._is_target_foreground(wechat):
+                return
         user_typing = self._user_typing_detected()
+        interrupt_role = (
+            "我"
+            if chat_type == "group" and latest_role == "对方" and group_idle
+            else latest_role
+        )
         if self.chat_state_guard.is_interrupted(
-            latest_role,
+            interrupt_role,
             user_typing,
             self.managed_send_inflight,
             self.processing,
@@ -676,7 +680,12 @@ class WeChatStyleReplyAssistant:
             self.bypass_retrying,
         ):
             return
-        self._bypass_try_switch(wechat, full)
+        # 前台可能刚被恢复，之前的全窗截图可能已过期；切换前必须重新截取左侧列表。
+        fresh_full = _capture_window_bitmap(wechat)
+        if fresh_full is None:
+            return
+        self.bypass_last_scan_at = time.time()
+        self._bypass_try_switch(wechat, fresh_full)
 
     def _bypass_try_switch(self, wechat: WeChatWindow, full=None) -> None:
         """执行一次扫描+切换（含重试与失败计数）。full 可复用旁路已截的全窗图。"""
@@ -690,12 +699,27 @@ class WeChatStyleReplyAssistant:
         if not hits:
             return
         title_before = self._read_top_title(full)
-        attempts = 1 + int(self.chat_state_guard.cal.get("timing", {}).get("retry_per_failure", 1))
+        guard_cal = getattr(self.chat_state_guard, "cal", {})
+        attempts = 1 + int(guard_cal.get("timing", {}).get("retry_per_failure", 1))
         success = False
-        for attempt in range(attempts):
-            if attempt >= len(hits):
+        attempted_switches = 0
+        actionable_seen = False
+        title_after = ""
+        row_avatar_type = ""
+        for hit in hits:
+            row_title = ""
+            try:
+                row_title_crop = self.chat_list_monitor.extract_row_title(full, hit)
+                row_title = self.ocr.read_chat_title(row_title_crop, limit=1)
+            except Exception:
+                row_title = ""
+            if self.chat_type_detector.detect(row_title) == "system":
+                continue
+            actionable_seen = True
+            if attempted_switches >= attempts:
                 break
-            self.bypass_retrying = attempt > 0
+            self.bypass_retrying = attempted_switches > 0
+            attempted_switches += 1
             if self.chat_state_guard.is_interrupted(
                 "我",
                 self._user_typing_detected(),
@@ -706,7 +730,6 @@ class WeChatStyleReplyAssistant:
             ):
                 self.bypass_retrying = False
                 return
-            hit = hits[attempt]
             # 切换前：用列表行头像预判会话类型（群聊九宫格 vs 个人单块）
             row_avatar_type = ""
             try:
@@ -721,7 +744,7 @@ class WeChatStyleReplyAssistant:
                 pyautogui.click(wechat.rect.left + x, wechat.rect.top + y)
             except Exception:
                 break
-            time.sleep(self.chat_state_guard.cal.get("timing", {}).get("switch_wait_seconds", 1.2))
+            time.sleep(guard_cal.get("timing", {}).get("switch_wait_seconds", 1.2))
             full_after = _capture_window_bitmap(wechat)
             if full_after is None:
                 continue
@@ -740,12 +763,15 @@ class WeChatStyleReplyAssistant:
             self.chat_identity.update_from_top_title(title_after)
             self._after_switch(wechat, title_after, row_avatar_type)
             return
+        # 红点全部来自系统入口：这是正常过滤，不得累计失败或触发暂停。
+        if not actionable_seen:
+            return
         # 切换失败
         self.bypass_fail_count += 1
-        max_failures = int(self.chat_state_guard.cal.get("timing", {}).get("max_consecutive_failures", 3))
+        max_failures = int(guard_cal.get("timing", {}).get("max_consecutive_failures", 3))
         if self.bypass_fail_count >= max_failures:
             self.bypass_fail_count = 0
-            pause = float(self.chat_state_guard.cal.get("timing", {}).get("fail_pause_seconds", 300))
+            pause = float(guard_cal.get("timing", {}).get("fail_pause_seconds", 300))
             self.bypass_paused_until = time.time() + pause
             self.queue.put(("bypass_alert", "会话切换连续失败，已暂停旁路 5 分钟。"))
 
@@ -870,7 +896,7 @@ class WeChatStyleReplyAssistant:
             return
         if not self.stable_identity_tracker.observe(
             observation.identity,
-            observation.context_hash,
+            observation.turn_key,
             now=time.monotonic(),
         ):
             self.queue.put(("status", "群聊仍在稳定识别中，本轮不发送"))
@@ -1411,7 +1437,7 @@ class WeChatStyleReplyAssistant:
 
         if not self.stable_identity_tracker.observe(
             observation.identity,
-            observation.context_hash,
+            observation.turn_key,
             now=time.monotonic(),
         ):
             delay = max(
@@ -1431,7 +1457,7 @@ class WeChatStyleReplyAssistant:
             observation = fresh
             if not self.stable_identity_tracker.observe(
                 observation.identity,
-                observation.context_hash,
+                observation.turn_key,
                 now=time.monotonic(),
             ):
                 self.queue.put(("status", "当前聊天识别尚未稳定，请稍后再试"))
@@ -1459,9 +1485,36 @@ class WeChatStyleReplyAssistant:
                         self.queue.put(("status", "当前消息的启动基线无法解除，未发送"))
                         return
                     released = True
-                elif ledger_status in {"prepared", "keypress", "verified", "uncertain"}:
-                    self.queue.put(("status", "当前消息已在处理或已经处理，不会重复发送"))
+                elif ledger_status in {"prepared", "keypress"}:
+                    self.queue.put(("status", "当前消息正在发送复核中，请稍候"))
                     return
+                elif ledger_status == "verified":
+                    self.queue.put(("status", "发送台账显示该问题已验证回复，不会重复发送"))
+                    return
+                elif ledger_status == "uncertain":
+                    fresh_unreplied = self._capture_runtime_observation(wechat)
+                    visibly_unsent = bool(
+                        turn_key == observation.turn_key
+                        and fresh_unreplied is not None
+                        and fresh_unreplied.identity == observation.identity
+                        and fresh_unreplied.turn_key == observation.turn_key
+                    )
+                    if not visibly_unsent:
+                        self.queue.put((
+                            "status",
+                            "上次发送结果无法确认，为防止重复发送已暂停；请人工核对当前聊天",
+                        ))
+                        return
+                    if not self.send_ledger.reconcile_uncertain_not_sent(turn_key):
+                        self.queue.put((
+                            "status",
+                            "该问题的安全重试次数已用完，仍未确认发出，请人工发送",
+                        ))
+                        return
+                    self.queue.put((
+                        "status",
+                        "已确认上次未实际发出，正在进行唯一一次安全重试",
+                    ))
             if isinstance(baselines, dict) and (released or baseline_turn):
                 baselines.pop(slot, None)
         except LedgerBlockingError as error:
@@ -1480,7 +1533,14 @@ class WeChatStyleReplyAssistant:
             _diag("send_queued")
             self.queue.put(("status", "已进入串行知识库匹配与发送复核队列"))
         else:
-            self.queue.put(("status", "当前消息已在处理或已经处理，不会重复发送"))
+            status = self.send_ledger.status(observation.turn_key)
+            messages = {
+                "prepared": "当前消息正在发送复核中，请稍候",
+                "keypress": "当前消息正在发送复核中，请稍候",
+                "verified": "发送台账显示该问题已验证回复，不会重复发送",
+                "uncertain": "上次发送结果无法确认，为防止重复发送已暂停；请人工核对当前聊天",
+            }
+            self.queue.put(("status", messages.get(status, "当前消息未进入发送队列，请重新识别")))
 
     def _manual_managed_preview(self, wechat: WeChatWindow) -> None:
         """Build a knowledge-only preview without entering any send authority."""
@@ -1733,17 +1793,22 @@ class WeChatStyleReplyAssistant:
             self.current_window = window
             self.current_context = observation.context
             self.current_chat_type = observation.identity.chat_type
-            self.send_ledger.baseline(observation.turn_key, observation.identity.key)
+            existing_status = self.send_ledger.status(observation.turn_key)
+            baseline_created = self.send_ledger.baseline(
+                observation.turn_key,
+                observation.identity.key,
+            )
             baseline_turns = getattr(self, "_startup_baseline_turns", None)
             if not isinstance(baseline_turns, dict):
                 baseline_turns = {}
                 self._startup_baseline_turns = baseline_turns
-            baseline_turns[self._startup_baseline_slot(observation)] = tuple(
-                observation.customer_turn
-            )
+            if baseline_created or existing_status == "baseline":
+                baseline_turns[self._startup_baseline_slot(observation)] = tuple(
+                    observation.customer_turn
+                )
             self.stable_identity_tracker.observe(
                 observation.identity,
-                observation.context_hash,
+                observation.turn_key,
                 now=time.monotonic(),
             )
             return True
@@ -1895,13 +1960,8 @@ class WeChatStyleReplyAssistant:
         if foreground_root == target_root:
             return "ready"
 
-        try:
-            assistant_hwnd = int(self.ui.root.winfo_id() or 0)
-            assistant_root = int(root_hwnd(assistant_hwnd) or assistant_hwnd)
-        except Exception:
-            return "activation_failed"
-        if not assistant_root or foreground_root != assistant_root:
-            return "user_active_elsewhere"
+        # 全托管模式下用户已授权程序主动恢复企业微信前台。
+        # 仍只激活排队时已经锁定、且刚刚通过 HWND/平台复核的窗口。
         try:
             activated = self.sender.activate_verified_target(live)
         except Exception:
@@ -1969,7 +2029,7 @@ class WeChatStyleReplyAssistant:
             return
         if not self.stable_identity_tracker.observe(
             observation.identity,
-            observation.context_hash,
+            observation.turn_key,
             now=time.monotonic(),
         ):
             self.queue.put(("status", "当前聊天仍在稳定识别中，本轮不发送"))
@@ -2024,6 +2084,11 @@ class WeChatStyleReplyAssistant:
         if not title or not context.strip():
             return None
         if detected_type == "group":
+            account_name = str(
+                getattr(self.settings, "wecom_account_name", "") or ""
+            ).strip()
+            if self.group_handler.latest_role_by_sender(context, account_name) != "对方":
+                return None
             sender_name = self.group_handler.extract_sender_name(context)
             message = self.group_handler.latest_other_message(context)
             question = self.group_handler.extract_question(
@@ -2198,6 +2263,17 @@ class WeChatStyleReplyAssistant:
         observation = self._observation_after_startup_baseline(observation)
         if observation is None:
             return False
+        if getattr(self, "send_ledger", None) is not None:
+            try:
+                ledger_status = self.send_ledger.status(observation.turn_key)
+            except LedgerBlockingError as error:
+                self._block_managed_for_ledger(error)
+                return False
+            if (
+                ledger_status == "uncertain"
+                and not self._reconcile_automatic_uncertain(observation)
+            ):
+                return False
         if getattr(self, "send_ledger", None) is not None and self._ledger_is_handled(
             observation.turn_key
         ):
@@ -2393,6 +2469,42 @@ class WeChatStyleReplyAssistant:
                 self._managed_pending_count = max(0, self._managed_pending_count - 1)
                 self.managed_send_inflight = self._managed_pending_count > 0
         return accepted
+
+    def _reconcile_automatic_uncertain(self, observation: ChatObservation) -> bool:
+        """连续两次看到同一未回复问题后，释放一次 uncertain 安全重试。"""
+        now = time.monotonic()
+        seen = getattr(self, "_uncertain_recovery_seen", None)
+        if not isinstance(seen, dict):
+            seen = {}
+            self._uncertain_recovery_seen = seen
+        first_seen = seen.get(observation.turn_key)
+        if first_seen is None or now - float(first_seen) < 1.0:
+            seen.clear()
+            seen[observation.turn_key] = now if first_seen is None else first_seen
+            self.queue.put((
+                "status",
+                "正在复核上次发送结果；确认仍未回复后将安全重试",
+            ))
+            return False
+        seen.pop(observation.turn_key, None)
+        try:
+            reconciled = self.send_ledger.reconcile_uncertain_not_sent(
+                observation.turn_key
+            )
+        except LedgerBlockingError as error:
+            self._block_managed_for_ledger(error)
+            return False
+        if not reconciled:
+            self.queue.put((
+                "status",
+                "该问题的安全重试次数已用完，仍未确认发出，请人工发送",
+            ))
+            return False
+        self.queue.put((
+            "status",
+            "已确认上次未实际发出，正在进行唯一一次安全重试",
+        ))
+        return True
 
     @staticmethod
     def _startup_baseline_slot(observation: ChatObservation) -> tuple[str, str]:
@@ -2673,6 +2785,7 @@ def _context_has_unanswered_question(context: str) -> bool:
             if later_role == "own" and _reply_is_substantive(later_text):
                 return False
         return True
+
     return False
 
 
