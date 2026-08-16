@@ -11,7 +11,7 @@ from typing import get_args
 import pytest
 
 from candidate_judge import CandidateJudge, Judgement, parse_judgement
-from managed_reply import NO_MATCH_REPLY, ManagedReplyService
+from managed_reply import NO_MATCH_REPLY, ManagedReplyService, ReplyDecision
 from memory import StyleMemory
 from reply_engine import ReplyEngine
 from knowledge_import import (
@@ -762,7 +762,10 @@ def test_candidate_judge_sends_questions_and_ids_without_answer_bodies():
     assert candidate.answer_hash not in serialized
     assert "record-1" in serialized
     assert "登记要求是什么？" in serialized
-    assert "只能选择候选编号" in serialized
+    assert "只能根据客户问题" in serialized
+    assert '"org_scope"' not in serialized
+    assert "候选问题未写机构类型" in serialized
+    assert "同义词" in serialized
 
 
 def test_candidate_judge_fails_closed_with_redacted_error_category():
@@ -823,14 +826,249 @@ def test_managed_reply_reloads_and_returns_the_unchanged_answer_by_id():
     assert len(judge.calls) == 1
 
 
-def test_exact_active_candidate_is_returned_without_model_judgement():
+def test_legacy_question_score_44_strictly_leads_and_is_confirmed_by_model():
+    approved_reply = "知识库批准答案原文"
+    second_reply = "第二候选答案"
+    memory = StyleMemory(
+        examples=[
+            {
+                "question": "理事数未按单数设置怎么办？",
+                "cue": "[对方] 理事数未按单数/奇数设置怎么办？",
+                "reply": approved_reply,
+                "source": "enterprise_annual_report_kb",
+                "module": "年检",
+                "source_file": "memory.json",
+                "source_locator": "examples[141]",
+                "source_excerpt": approved_reply,
+                "org_scope": "unknown",
+                "status": "pending",
+                "conversation_hash": "legacy-141",
+            },
+            {
+                "question": "存在“理事数未按规定设置”的问题如何整改？",
+                "cue": "民办非企业单位 / 年检 / 整改 / 存在“理事数未按规定设置”的问题如何整改？ / 民非",
+                "reply": second_reply,
+                "source": "enterprise_annual_report_kb",
+                "module": "年检",
+                "subcategory": "整改",
+                "organization_type": "民办非企业单位",
+                "source_file": "问答（年报）(1).xlsx",
+                "source_locator": "Sheet1!D45",
+                "source_excerpt": f"存在“理事数未按规定设置”的问题如何整改？\t{second_reply}",
+                "org_scope": "mfei",
+                "status": "active",
+                "conversation_hash": "formal-d45",
+            },
+        ]
+    )
+    question = "社团理事数未按奇数设置如何整改"
+    legacy = memory.enterprise_candidates(question, limit=3)
+    repository = memory.managed_knowledge_repository()
+    candidates = repository.candidates(question, f"[对方] {question}", limit=3)
+    judge = _FixedJudge(Judgement(chosen_index=0, consistent=True))
+
+    service = ManagedReplyService(repository, judge)
+    decision = service.decide(
+        question,
+        f"[对方] {question}",
+    )
+    displayed = memory.managed_scored_examples(question, limit=3)
+
+    assert [item["enterprise_local_score"] for item in legacy[:2]] == [44, 42]
+    assert len(candidates) == 1
+    assert candidates[0].question == "理事数未按单数设置怎么办？"
+    assert candidates[0].score == 44
+    assert len(judge.calls) == 1
+    assert decision.kind == "answer"
+    assert decision.text == approved_reply
+    assert decision.reason == "approved_candidate_reloaded"
+    assert service.validate_for_send(decision) is True
+    assert [item["question"] for item in displayed] == [candidates[0].question]
+    assert displayed[0]["score"] == 44
+    assert displayed[0]["enterprise_decision_label"] == "大模型待确认"
+
+
+@pytest.mark.parametrize("reply_source_mode", ("memory", "model_memory", "model"))
+def test_every_reply_source_mode_uses_the_same_managed_enterprise_decision(
+    reply_source_mode: str,
+):
+    record = _record(
+        "all-modes",
+        question="理事数未按单数设置怎么办？",
+        reply="批准答案原文",
+        scope="both",
+    )
+    candidate = KnowledgeCandidate(
+        record_id=record.record_id,
+        question=record.question,
+        answer_hash=record.answer_hash,
+        org_scope=record.org_scope,
+        score=44,
+        exact=False,
+        reasons=("strict_top_score_leader",),
+    )
+    answer = ReplyDecision.answer(record, candidate)
+
+    class FixedService:
+        def __init__(self):
+            self.calls = []
+
+        def decide(self, question, recent_context):
+            self.calls.append((question, recent_context))
+            return answer
+
+        def validate_for_send(self, decision):
+            return decision is answer
+
+    service = FixedService()
+    settings = AppSettings(reply_source_mode=reply_source_mode)
+    engine = ReplyEngine(settings, StyleMemory(), managed_service=service)
+    engine._select_enterprise_answer = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("legacy enterprise path must not run")
+    )
+
+    result = engine.generate(
+        "[对方] 社团理事数未按奇数设置如何整改",
+        target_turn=["社团理事数未按奇数设置如何整改"],
+    )
+
+    assert result == ["批准答案原文"]
+    assert service.calls == [
+        (
+            "社团理事数未按奇数设置如何整改",
+            "[对方] 社团理事数未按奇数设置如何整改",
+        )
+    ]
+    assert engine.last_source == "批准知识库 · 大模型确认一致"
+
+
+@pytest.mark.parametrize("reason", ("judge_inconsistent", "judge_failed_or_invalid"))
+def test_non_knowledge_only_model_rejection_never_falls_through_to_free_generation(
+    reason: str,
+):
+    decision = ReplyDecision.no_answer(reason)
+
+    class FixedService:
+        def decide(self, *_args):
+            return decision
+
+        def validate_for_send(self, _decision):
+            return False
+
+    engine = ReplyEngine(
+        AppSettings(reply_source_mode="model", api_key="configured"),
+        StyleMemory(),
+        managed_service=FixedService(),
+    )
+    engine._generate_from_api = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("rejected knowledge candidate must not reach free generation")
+    )
+
+    assert engine.generate("[对方] 客户问题", target_turn=["客户问题"]) == [NO_MATCH_REPLY]
+
+
+def test_only_exact_top_score_ties_send_two_or_three_questions_to_model():
+    examples = []
+    for index, question in enumerate(("候选问题甲", "候选问题乙", "候选问题丙"), 1):
+        reply = f"批准答案{index}"
+        examples.append(
+            {
+                "question": question,
+                "cue": f"[对方] {question}",
+                "reply": reply,
+                "source": "enterprise_annual_report_kb",
+                "source_file": "source.xlsx",
+                "source_locator": f"Sheet1!A{index}:B{index}",
+                "source_excerpt": f"{question}\t{reply}",
+                "org_scope": "both",
+                "status": "active",
+                "conversation_hash": f"candidate-{index}",
+            }
+        )
+    memory = StyleMemory(examples=examples)
+    ranked = [
+        {**examples[0], "enterprise_local_score": 44, "enterprise_exact_question": ""},
+        {**examples[1], "enterprise_local_score": 44, "enterprise_exact_question": ""},
+        {**examples[2], "enterprise_local_score": 43, "enterprise_exact_question": ""},
+    ]
+    memory.enterprise_candidates = lambda *_args, **_kwargs: list(ranked)  # type: ignore[method-assign]
+
+    candidates = memory.managed_knowledge_repository().candidates("客户问题", "客户问题", limit=3)
+
+    assert [candidate.question for candidate in candidates] == ["候选问题甲", "候选问题乙"]
+    assert [candidate.score for candidate in candidates] == [44, 44]
+
+
+@pytest.mark.parametrize(
+    "broken",
+    (
+        {"source": "chat_learning"},
+        {"source_file": "other.json"},
+        {"source_locator": "Sheet1!A1"},
+        {"source_excerpt": "不是批准答案原文"},
+    ),
+)
+def test_unproven_pending_rows_never_join_question_only_model_review(
+    broken: dict[str, str],
+):
+    reply = "批准答案原文"
+    item = {
+        "question": "理事数未按单数设置怎么办？",
+        "cue": "[对方] 理事数未按单数设置怎么办？",
+        "reply": reply,
+        "source": "enterprise_annual_report_kb",
+        "source_file": "memory.json",
+        "source_locator": "examples[141]",
+        "source_excerpt": reply,
+        "org_scope": "unknown",
+        "status": "pending",
+        "conversation_hash": "unproven-pending",
+        **broken,
+    }
+    memory = StyleMemory(examples=[item])
+
+    assert memory.managed_knowledge_repository().candidates(
+        "理事数未按单数设置怎么办",
+        "",
+    ) == []
+
+
+def test_managed_question_score_below_30_does_not_call_model():
+    reply = "批准答案原文"
+    item = {
+        "question": "候选问题",
+        "cue": "[对方] 候选问题",
+        "reply": reply,
+        "source": "enterprise_annual_report_kb",
+        "source_file": "source.xlsx",
+        "source_locator": "Sheet1!A1:B1",
+        "source_excerpt": f"候选问题\t{reply}",
+        "org_scope": "both",
+        "status": "active",
+        "conversation_hash": "below-floor",
+    }
+    memory = StyleMemory(examples=[item])
+    memory.enterprise_candidates = lambda *_args, **_kwargs: [  # type: ignore[method-assign]
+        {**item, "enterprise_local_score": 29, "enterprise_exact_question": ""}
+    ]
+    judge = _FixedJudge(Judgement(chosen_index=0, consistent=True))
+
+    decision = ManagedReplyService(memory.managed_knowledge_repository(), judge).decide(
+        "客户问题", ""
+    )
+
+    assert (decision.kind, decision.text) == ("no_answer", NO_MATCH_REPLY)
+    assert judge.calls == []
+
+
+def test_exact_active_candidate_still_requires_model_judgement():
     record = _record(
         "20-exact",
         question="社会团体能向分支机构收管理费、赞助费吗？",
         reply="知识库原始答案",
         scope="social",
     )
-    judge = _FixedJudge(None)
+    judge = _FixedJudge(Judgement(chosen_index=0, consistent=True))
 
     decision = ManagedReplyService(KnowledgeRepository([record]), judge).decide(
         "社会团体能向分支机构收管理费、赞助费吗?",
@@ -840,8 +1078,8 @@ def test_exact_active_candidate_is_returned_without_model_judgement():
     assert decision.kind == "answer"
     assert decision.text == "知识库原始答案"
     assert decision.record_id == record.record_id
-    assert decision.reason == "approved_exact_candidate_reloaded"
-    assert judge.calls == []
+    assert decision.reason == "approved_candidate_reloaded"
+    assert len(judge.calls) == 1
 
     engine = ReplyEngine(
         AppSettings(),
@@ -849,7 +1087,7 @@ def test_exact_active_candidate_is_returned_without_model_judgement():
         managed_service=SimpleNamespace(decide=lambda *_args: decision),
     )
     assert engine.decide_managed("", [record.question]) is decision
-    assert engine.last_source == "批准知识库 · 精确命中"
+    assert engine.last_source == "批准知识库 · 大模型确认一致"
 
 
 @pytest.mark.parametrize(
@@ -862,7 +1100,7 @@ def test_exact_active_candidate_is_returned_without_model_judgement():
         "民办非企业未按规定换届整改方式是什么",
     ),
 )
-def test_mfei_scope_and_common_remediation_wordings_are_exact_without_model_judgement(
+def test_mfei_scope_and_common_remediation_wordings_are_exact_then_model_confirmed(
     query: str,
 ):
     record = _record(
@@ -871,7 +1109,7 @@ def test_mfei_scope_and_common_remediation_wordings_are_exact_without_model_judg
         reply="民非换届整改原始答案",
         scope="mfei",
     )
-    judge = _FixedJudge(None)
+    judge = _FixedJudge(Judgement(chosen_index=0, consistent=True))
 
     decision = ManagedReplyService(KnowledgeRepository([record]), judge).decide(
         query,
@@ -880,9 +1118,9 @@ def test_mfei_scope_and_common_remediation_wordings_are_exact_without_model_judg
 
     assert decision.kind == "answer"
     assert decision.text == "民非换届整改原始答案"
-    assert decision.reason == "approved_exact_candidate_reloaded"
+    assert decision.reason == "approved_candidate_reloaded"
     assert decision.score == 100
-    assert judge.calls == []
+    assert len(judge.calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -918,7 +1156,7 @@ def test_remediation_normalization_preserves_explicit_problem_wording(
     )
 
 
-def test_equivalent_exact_candidates_with_identical_answers_deduplicate_and_bypass_model():
+def test_equivalent_exact_candidates_with_identical_answers_deduplicate_then_model_confirmed():
     first = _record(
         "20-equivalent-first",
         question="未按规定换届怎么办？",
@@ -931,7 +1169,7 @@ def test_equivalent_exact_candidates_with_identical_answers_deduplicate_and_bypa
         reply="相同且已批准的整改答案",
         scope="mfei",
     )
-    judge = _FixedJudge(None)
+    judge = _FixedJudge(Judgement(chosen_index=0, consistent=True))
 
     decision = ManagedReplyService(
         KnowledgeRepository([second, first]),
@@ -941,8 +1179,8 @@ def test_equivalent_exact_candidates_with_identical_answers_deduplicate_and_bypa
     assert decision.kind == "answer"
     assert decision.text == "相同且已批准的整改答案"
     assert decision.answer_hash == first.answer_hash == second.answer_hash
-    assert decision.reason == "approved_exact_candidate_reloaded"
-    assert judge.calls == []
+    assert decision.reason == "approved_candidate_reloaded"
+    assert len(judge.calls) == 1
 
 
 def test_equivalent_exact_candidates_with_different_answers_become_conflicts():

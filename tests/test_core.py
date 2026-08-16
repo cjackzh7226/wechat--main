@@ -88,6 +88,11 @@ def _enterprise_history_lookup_examples(history_reply: str) -> list[dict[str, st
             "module": "年检",
             "subcategory": "填报",
             "source_cell": "C11:D11",
+            "source_file": "年度报告知识库.xlsx",
+            "source_locator": "年报问答!C11:D11",
+            "source_excerpt": history_reply,
+            "org_scope": "both",
+            "status": "active",
         },
         {
             "source": "enterprise_annual_report_kb",
@@ -97,6 +102,11 @@ def _enterprise_history_lookup_examples(history_reply: str) -> list[dict[str, st
             "module": "年检",
             "subcategory": "填报",
             "source_cell": "C15:D15",
+            "source_file": "年度报告知识库.xlsx",
+            "source_locator": "年报问答!C15:D15",
+            "source_excerpt": "在已生成本年度年度工作报告的操作栏点“修改”填写。",
+            "org_scope": "both",
+            "status": "active",
         },
         {
             "source": "enterprise_annual_report_kb",
@@ -106,6 +116,11 @@ def _enterprise_history_lookup_examples(history_reply: str) -> list[dict[str, st
             "module": "年检",
             "subcategory": "填报",
             "source_cell": "C10:D10",
+            "source_file": "年度报告知识库.xlsx",
+            "source_locator": "年报问答!C10:D10",
+            "source_excerpt": "导出 PDF 后再打印。",
+            "org_scope": "both",
+            "status": "active",
         },
     ]
 
@@ -312,12 +327,12 @@ class MemoryTests(unittest.TestCase):
 
             self.assertLess(int(candidates[0]["enterprise_local_score"]), 76)
             self.assertEqual(candidates[0]["enterprise_local_confident"], "1")
-            self.assertEqual(candidates[0]["enterprise_decision_label"], "可直接发送")
+            self.assertEqual(candidates[0]["enterprise_decision_label"], "大模型待确认")
 
             display = app._get_phrasebook_examples("enterprise_annual_report_kb", "想查一下之前的年报")
 
-            self.assertEqual(display[0]["enterprise_decision_label"], "可直接发送")
-            self.assertEqual(display[0]["enterprise_decision"], "send")
+            self.assertEqual(display[0]["enterprise_decision_label"], "大模型待确认")
+            self.assertEqual(display[0]["enterprise_decision"], "judge")
 
     def test_enterprise_semantic_scope_without_annual_report_word_returns_official_answer(self):
         settings = AppSettings(api_key="configured", reply_source_mode="model")
@@ -336,7 +351,6 @@ class MemoryTests(unittest.TestCase):
             result = engine.generate("[对方] 之前那个报告怎么看", "客户")
 
         self.assertEqual(result, [history_answer])
-        self.assertIn("C11:D11", engine.last_source)
         self.assertIn("大模型确认一致", engine.last_source)
 
     def test_save_keeps_previous_memory_in_managed_backup(self):
@@ -400,8 +414,8 @@ class MemoryTests(unittest.TestCase):
         # 一致 → 发送被选中候选（不再是直接返回并列候选列表）。
         self.assertEqual(len(result), 1)
         self.assertIn("大模型确认一致", engine.last_source)
-        self.assertEqual(display[0]["enterprise_decision_label"], "并列待裁决")
-        self.assertEqual(display[0]["enterprise_decision"], "tie")
+        self.assertEqual(display[0]["enterprise_decision_label"], "大模型待确认")
+        self.assertEqual(display[0]["enterprise_decision"], "judge")
 
     def test_enterprise_imperative_request_ambiguous_returns_no_answer_without_api(self):
         settings = AppSettings(api_key="configured", reply_source_mode="model_memory")
@@ -1689,7 +1703,6 @@ class ReplyParsingTests(unittest.TestCase):
             result = engine.generate("[对方] 怎么查以前的年度报告", "客户")
 
         self.assertEqual(result, [history_answer])
-        self.assertIn("C11:D11", engine.last_source)
         self.assertIn("大模型确认一致", engine.last_source)
 
     def test_enterprise_generation_uses_current_target_turn_not_stale_history(self):
@@ -1706,6 +1719,11 @@ class ReplyParsingTests(unittest.TestCase):
                     "cue": "企业年报 / 年检 / 填报 / 往年年度工作报告如何查看？",
                     "reply": correct_answer,
                     "source_cell": "C11:D11",
+                    "source_file": "年度报告知识库.xlsx",
+                    "source_locator": "年报问答!C11:D11",
+                    "source_excerpt": correct_answer,
+                    "org_scope": "both",
+                    "status": "active",
                 },
                 {
                     "source": "enterprise_annual_report_kb",
@@ -1713,6 +1731,11 @@ class ReplyParsingTests(unittest.TestCase):
                     "cue": "企业年报 / 年检 / 填报 / 本年度年度工作报告已存在的问题该如何解决？",
                     "reply": "在已生成本年度年度工作报告的操作栏点修改填写。",
                     "source_cell": "C15:D15",
+                    "source_file": "年度报告知识库.xlsx",
+                    "source_locator": "年报问答!C15:D15",
+                    "source_excerpt": "在已生成本年度年度工作报告的操作栏点修改填写。",
+                    "org_scope": "both",
+                    "status": "active",
                 },
             ]
         )
@@ -1729,7 +1752,7 @@ class ReplyParsingTests(unittest.TestCase):
             )
 
         self.assertEqual(result, [correct_answer])
-        self.assertIn("C11:D11", engine.last_source)
+        self.assertIn("大模型确认一致", engine.last_source)
 
     def test_enterprise_ambiguous_local_match_returns_explicit_no_answer_without_selector(self):
         settings = AppSettings(api_key="configured", reply_source_mode="memory")
@@ -1746,6 +1769,11 @@ class ReplyParsingTests(unittest.TestCase):
                     "cue": "企业年报 / 年检 / 填报 / 年度工作报告无法直接打印如何解决？",
                     "reply": print_answer,
                     "source_cell": "C10:D10",
+                    "source_file": "年度报告知识库.xlsx",
+                    "source_locator": "年报问答!C10:D10",
+                    "source_excerpt": print_answer,
+                    "org_scope": "both",
+                    "status": "active",
                 },
                 {
                     "source": "enterprise_annual_report_kb",
@@ -1753,6 +1781,11 @@ class ReplyParsingTests(unittest.TestCase):
                     "cue": "企业年报 / 年检 / 填报 / 本年度年度工作报告已存在的问题该如何解决？",
                     "reply": edit_answer,
                     "source_cell": "C15:D15",
+                    "source_file": "年度报告知识库.xlsx",
+                    "source_locator": "年报问答!C15:D15",
+                    "source_excerpt": edit_answer,
+                    "org_scope": "both",
+                    "status": "active",
                 },
             ]
         )
@@ -1856,16 +1889,16 @@ class ReplyParsingTests(unittest.TestCase):
         self.assertEqual(result, ["暂未查到对应答案"])
         post.assert_not_called()
 
-    def test_enterprise_score_between_20_and_40_with_margin_is_sendable(self):
-        # 新底线 20（2026-08-04 用户要求降到 25 以下）：20-40 分区间且明显领先的
-        # 问法也应可直接发送，而不是沿用旧的 40 分硬门槛。
+    def test_enterprise_score_above_30_with_any_strict_lead_goes_to_model(self):
+        # 30 分为唯一底线；第一名只要严格高于第二名就送给模型，不再要求领先 8 分。
         with tempfile.TemporaryDirectory() as tmp:
             memory = StyleMemory(Path(tmp) / "memory.json")
             memory.learn_from_training_examples(_enterprise_history_lookup_examples("历史报告请到公示页面查询。"))
             candidates = memory.enterprise_candidates("想查一下之前的年报", limit=3)
             self.assertLess(int(candidates[0]["enterprise_local_score"]), 76)
+            self.assertGreaterEqual(int(candidates[0]["enterprise_local_score"]), 30)
             self.assertEqual(candidates[0]["enterprise_local_confident"], "1")
-            self.assertEqual(candidates[0]["enterprise_decision_label"], "可直接发送")
+            self.assertEqual(candidates[0]["enterprise_decision_label"], "大模型待确认")
 
     def test_enterprise_ratio_phrase_disambiguates_rectify_question(self):
         # 用户案例（2026-08-04）："负责人超理事数1/3怎么整改"必须命中
@@ -1881,6 +1914,11 @@ class ReplyParsingTests(unittest.TestCase):
                         "reply": "常务理事整改答案。",
                         "module": "治理",
                         "source_cell": "C50",
+                        "source_file": "年度报告知识库.xlsx",
+                        "source_locator": "年报问答!C50",
+                        "source_excerpt": "常务理事整改答案。",
+                        "org_scope": "both",
+                        "status": "active",
                     },
                     {
                         "source": "enterprise_annual_report_kb",
@@ -1894,7 +1932,7 @@ class ReplyParsingTests(unittest.TestCase):
             )
             candidates = memory.enterprise_candidates("负责人超理事数1/3怎么整改", limit=3)
             self.assertEqual(candidates[0]["source_cell"], "C49")
-            self.assertEqual(candidates[0]["enterprise_decision_label"], "可直接发送")
+            self.assertEqual(candidates[0]["enterprise_decision_label"], "大模型待确认")
             self.assertGreaterEqual(
                 int(candidates[0]["enterprise_local_score"]),
                 int(candidates[1]["enterprise_local_score"]) + 8,
@@ -1953,6 +1991,11 @@ class ReplyParsingTests(unittest.TestCase):
                         "reply": "情形一：填报人员填写错误，整改方式：填写情况说明。（以上材料需加盖单位公章）",
                         "module": "治理",
                         "source_cell": "C49",
+                        "source_file": "年度报告知识库.xlsx",
+                        "source_locator": "年报问答!C49",
+                        "source_excerpt": "情形一：填报人员填写错误，整改方式：填写情况说明。（以上材料需加盖单位公章）",
+                        "org_scope": "both",
+                        "status": "active",
                     },
                 ]
             )
@@ -1964,9 +2007,9 @@ class ReplyParsingTests(unittest.TestCase):
                 result = engine.generate("[对方] 负责人超理事数1/3怎么整改", "客户")
             post.assert_called_once()
             self.assertIn("填写情况说明", " ".join(result))
-            self.assertIn("C49", engine.last_source)
+            self.assertIn("大模型确认一致", engine.last_source)
 
-    def test_enterprise_tie_arbitration_picks_chosen_candidate(self):
+    def test_enterprise_arbitration_picks_chosen_candidate_from_explicit_tie(self):
         settings = AppSettings(api_key="configured", reply_source_mode="model_memory")
         settings.enable_web_search = False
         tmp = tempfile.TemporaryDirectory()
@@ -1976,7 +2019,8 @@ class ReplyParsingTests(unittest.TestCase):
         engine = ReplyEngine(settings, memory)
         question = "年度工作报告在哪里找"
         tie_candidates = memory.enterprise_candidates(question, limit=3)
-        self.assertEqual(tie_candidates[0].get("enterprise_decision"), "tie")
+        tie_candidates[0]["enterprise_decision"] = "tie"
+        tie_candidates[1]["enterprise_local_score"] = tie_candidates[0]["enterprise_local_score"]
 
         with patch("reply_engine.requests.post") as post:
             post.return_value.status_code = 200
@@ -2040,7 +2084,7 @@ class ReplyParsingTests(unittest.TestCase):
             result = engine.generate("[对方] 想查一下之前的年报", "客户")
 
         self.assertEqual(result, ["暂未查到对应答案"])
-        self.assertIn("判断不一致", engine.last_source)
+        self.assertIn("判断失败", engine.last_source)
 
     def test_enterprise_tie_managed_send_arbitrates_chosen_candidate(self):
         import main as main_module

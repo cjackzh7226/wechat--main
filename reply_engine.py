@@ -103,7 +103,7 @@ class ReplyEngine:
         self.last_search = ""
         self.last_enterprise_tie_candidates: list[dict[str, str]] = []
         self.managed_service = managed_service or ManagedReplyService(
-            memory.knowledge_repository(), CandidateJudge(settings)
+            memory.managed_knowledge_repository(), CandidateJudge(settings)
         )
         self.last_managed_decision: ReplyDecision | None = None
 
@@ -115,28 +115,18 @@ class ReplyEngine:
             decision = self.decide_managed(conversation_text, effective_target_turn)
             return [decision.text] if decision.kind in {"answer", "no_answer"} else []
 
+        # 所有回复来源共用同一条企业知识候选管线，避免模式切换后重新落入旧阈值、
+        # 旧并列规则或把答案正文发给模型的历史分支。
+        managed_decision = self.decide_managed(conversation_text, effective_target_turn)
+        if managed_decision.kind == "answer":
+            return [managed_decision.text]
+        if managed_decision.reason != "no_eligible_candidate":
+            # 已有候选但模型判不一致、调用失败或发送前记录复核失败，均按固定
+            # 未命中文案安全收口，绝不继续进入自由生成。
+            return [ENTERPRISE_NO_ANSWER_REPLY]
+
         enterprise_query = "\n".join(message.strip() for message in effective_target_turn if message.strip())
         enterprise_context = enterprise_query or conversation_text
-        enterprise_answer = self._select_enterprise_answer(enterprise_context)
-        if enterprise_answer:
-            # 命中后不直接发送：交大模型做一致性判断（客户问题 vs 候选对应问题）。
-            # 一致 → 发送；不一致/判断失败 → 未命中文案。
-            return self._enterprise_answer_via_judgement(enterprise_query or enterprise_context, [enterprise_answer])
-        # 并列/接近候选：大模型先从并列候选中选出最匹配的一条，再判断一致性。
-        tie_candidates = self.memory.enterprise_candidates(enterprise_context, limit=3)
-        if (
-            len(tie_candidates) >= 2
-            and str(tie_candidates[0].get("enterprise_decision", "")) == "tie"
-        ):
-            tie_replies = [
-                str(item.get("reply", ""))
-                for item in tie_candidates
-                if str(item.get("reply", "")).strip()
-            ][:3]
-            if tie_replies:
-                return self._enterprise_answer_via_judgement(
-                    enterprise_query or enterprise_context, list(tie_candidates[:3])
-                )
         if (
             self.memory.has_enterprise_annual_report_knowledge()
             and self.memory.is_enterprise_annual_report_query(enterprise_context)
@@ -193,14 +183,15 @@ class ReplyEngine:
         decision = self.managed_service.decide(question, conversation_text)
         self.last_managed_decision = decision
         if decision.kind == "answer":
-            self.last_source = (
-                "批准知识库 · 精确命中"
-                if decision.reason == "approved_exact_candidate_reloaded"
-                else "批准知识库 · 大模型确认一致"
-            )
+            self.last_source = "批准知识库 · 大模型确认一致"
             self.last_error = ""
         elif decision.kind == "no_answer":
-            self.last_source = "知识库 · 未命中"
+            if decision.reason == "judge_inconsistent":
+                self.last_source = "企业年报知识库 · 判断不一致"
+            elif decision.reason == "judge_failed_or_invalid":
+                self.last_source = "企业年报知识库 · 判断失败"
+            else:
+                self.last_source = "知识库 · 未命中"
             self.last_error = ""
         else:
             self.last_source = "知识库 · 技术失败"

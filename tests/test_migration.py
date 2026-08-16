@@ -490,6 +490,8 @@ def test_apply_rejects_wrong_backup_hash_and_old_target_count(tmp_path):
 
 
 def test_real_449_source_reproduces_approved_scope_and_conflict_baseline():
+    if not REAL_SOURCE.is_file():
+        pytest.skip("optional historical 449-row development fixture is not installed")
     result = build_migration(REAL_SOURCE, expected_source_count=449)
 
     assert result.source_count == 449

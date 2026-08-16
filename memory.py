@@ -13,6 +13,7 @@ from app_paths import memory_path, vector_path
 from atomic_json import JsonDataError, JsonLoadResult, atomic_write_json, load_json
 from knowledge_base import (
     KnowledgeAudit,
+    KnowledgeCandidate,
     KnowledgeRecord,
     KnowledgeRepository,
     KnowledgeSchemaError,
@@ -22,7 +23,6 @@ from knowledge_base import (
 
 
 ENTERPRISE_ANNUAL_REPORT_SOURCE = "enterprise_annual_report_kb"
-ENTERPRISE_LOCAL_CONFIDENT_MARGIN = 8
 ENTERPRISE_LOCAL_MIN_SCORE = 8
 MEMORY_SCHEMA_VERSION = 2
 VECTOR_SCHEMA_VERSION = 1
@@ -65,7 +65,55 @@ _EXACT_KNOWLEDGE_METADATA_FIELDS = frozenset(
 
 class VectorIndexError(RuntimeError):
     """Raised when the vector index is unavailable for managed replies."""
-# 企业年报"可直接发送"的可靠底线：第一名分数不低于该值且明显领先第二名（>=8 分）且无冲突。
+
+
+def _source_locator_from_example(item: dict[str, str]) -> str:
+    source_locator = str(item.get("source_locator", "")).strip()
+    if source_locator:
+        return source_locator
+    source_sheet = str(item.get("source_sheet", "")).strip()
+    source_cell = str(item.get("source_cell", "")).strip()
+    return f"{source_sheet}!{source_cell}" if source_sheet and source_cell else source_cell
+
+
+def _legacy_pending_question_can_be_model_reviewed(
+    item: dict[str, str], record: KnowledgeRecord
+) -> bool:
+    """Admit a proven legacy answer to question-only model review, never directly."""
+    return bool(
+        item.get("source") == ENTERPRISE_ANNUAL_REPORT_SOURCE
+        and record.status == "pending"
+        and record.org_scope == "unknown"
+        and Path(record.source_file).name.casefold() == "memory.json"
+        and re.fullmatch(r"examples\[\d+\]", record.source_locator) is not None
+        and record.reply.strip()
+        and record.source_excerpt.strip() == record.reply.strip()
+    )
+
+
+def _record_for_question_only_model_review(record: KnowledgeRecord) -> KnowledgeRecord:
+    return record_from_example(
+        {
+            "question": record.question,
+            "reply": record.reply,
+            "organization_type": record.organization_type,
+            "keywords": list(record.keywords),
+            "source_file": record.source_file,
+            "source_locator": record.source_locator,
+            "source_excerpt": record.source_excerpt,
+            "org_scope": "both",
+            "status": "active",
+        }
+    )
+
+
+def _managed_row_key(
+    *, question: str, reply: str, source_file: str, source_locator: str
+) -> tuple[str, str, str, str]:
+    return (question, reply, source_file.strip(), source_locator.strip())
+
+
+# 企业知识候选底线：第一名不低于 30 分；严格领先只送第一名，完全同分才送 2-3 条。
 # 2026-08-05 用户要求低分阈值 20 -> 30：命中评分 < 30 时回复企业未命中文案。
 ENTERPRISE_LOCAL_CONFIDENT_FLOOR = 30
 
@@ -743,6 +791,19 @@ class StyleMemory:
     def knowledge_repository(self) -> KnowledgeRepository:
         return KnowledgeRepository(self.knowledge_records())
 
+    def managed_knowledge_repository(self) -> "ManagedKnowledgeRepository":
+        """Build the managed repository that shares the management-page ranking."""
+        return ManagedKnowledgeRepository(self)
+
+    def managed_scored_examples(
+        self, conversation_text: str, limit: int = 3
+    ) -> list[dict[str, object]]:
+        return self.managed_knowledge_repository().scored_examples(
+            conversation_text,
+            conversation_text,
+            limit=limit,
+        )
+
     def replace_knowledge_audit_atomic(self, audit: KnowledgeAudit) -> None:
         """Replace the complete knowledge snapshot with one validated memory write."""
         if not isinstance(audit, KnowledgeAudit):
@@ -884,6 +945,150 @@ class StyleMemory:
     def _extract_phrases(text: str) -> list[str]:
         pieces = re.split(r"[，。！？、,.!?\s]+", text)
         return [piece for piece in pieces if 2 <= len(piece) <= 10]
+
+
+class ManagedKnowledgeRepository:
+    """Question-ranked view shared by managed runtime and management hit tests."""
+
+    def __init__(self, memory: StyleMemory) -> None:
+        self.memory = memory
+        provisional: list[tuple[tuple[str, str, str, str], KnowledgeRecord]] = []
+        for item, record in zip(memory.examples, memory.knowledge_records(), strict=True):
+            eligible = record if record.status == "active" else None
+            if eligible is None and _legacy_pending_question_can_be_model_reviewed(item, record):
+                eligible = _record_for_question_only_model_review(record)
+            if eligible is None:
+                continue
+            provisional.append(
+                (
+                    _managed_row_key(
+                        question=record.question,
+                        reply=record.reply,
+                        source_file=record.source_file,
+                        source_locator=record.source_locator,
+                    ),
+                    eligible,
+                )
+            )
+
+        self._repository = KnowledgeRepository(record for _key, record in provisional)
+        canonical = {
+            (record.semantic_duplicate_key, record.org_scope): record
+            for record in self._repository.records
+            if record.status == "active"
+        }
+        self._record_by_row: dict[tuple[str, str, str, str], KnowledgeRecord] = {}
+        for key, record in provisional:
+            active = canonical.get((record.semantic_duplicate_key, record.org_scope))
+            if active is not None:
+                self._record_by_row[key] = active
+
+    def _selected_rows(
+        self, question: str, recent_context: str, limit: int
+    ) -> list[tuple[dict[str, str], KnowledgeRecord, int, bool]]:
+        if not isinstance(question, str):
+            raise KnowledgeSchemaError("question must be a string")
+        if not isinstance(recent_context, str):
+            raise KnowledgeSchemaError("recent_context must be a string")
+        if type(limit) is not int or limit <= 0:
+            raise KnowledgeSchemaError("limit must be a positive integer")
+
+        ranked = self.memory.enterprise_candidates(
+            question,
+            limit=max(len(self.memory.examples), 3),
+        )
+        eligible: list[tuple[dict[str, str], KnowledgeRecord, int, bool]] = []
+        seen_record_ids: set[str] = set()
+        for row in ranked:
+            key = _managed_row_key(
+                question=str(row.get("question", "")),
+                reply=str(row.get("reply", "")),
+                source_file=str(row.get("source_file", "")),
+                source_locator=_source_locator_from_example(row),
+            )
+            record = self._record_by_row.get(key)
+            if record is None or record.record_id in seen_record_ids:
+                continue
+            try:
+                score = int(float(str(row.get("enterprise_local_score", "0"))))
+            except (TypeError, ValueError):
+                continue
+            if score < ENTERPRISE_LOCAL_CONFIDENT_FLOOR:
+                continue
+            seen_record_ids.add(record.record_id)
+            eligible.append(
+                (
+                    row,
+                    record,
+                    score,
+                    str(row.get("enterprise_exact_question", "")).strip() == "1",
+                )
+            )
+        if not eligible:
+            return []
+        top_score = eligible[0][2]
+        tied = [item for item in eligible if item[2] == top_score]
+        return (tied if len(tied) > 1 else eligible[:1])[: min(limit, 3)]
+
+    def candidates(
+        self, question: str, recent_context: str, limit: int = 3
+    ) -> list[KnowledgeCandidate]:
+        selected = self._selected_rows(question, recent_context, limit)
+        tied = len(selected) > 1
+        return [
+            KnowledgeCandidate(
+                record_id=record.record_id,
+                question=record.question,
+                answer_hash=record.answer_hash,
+                org_scope=record.org_scope,
+                score=score,
+                exact=exact,
+                reasons=(
+                    "question_only_model_review",
+                    "top_score_tie" if tied else "strict_top_score_leader",
+                ),
+            )
+            for _row, record, score, exact in selected
+        ]
+
+    def scored_examples(
+        self, question: str, recent_context: str, limit: int = 3
+    ) -> list[dict[str, object]]:
+        selected = self._selected_rows(question, recent_context, limit)
+        tied = len(selected) > 1
+        decision_fields = {
+            "enterprise_decision": "tie" if tied else "judge",
+            "enterprise_decision_label": "并列待裁决" if tied else "大模型待确认",
+            "enterprise_decision_reason": (
+                "最高分完全相同，送2-3条候选问题给大模型选择并判断一致性"
+                if tied
+                else "第一名达到30分且严格领先，只送最高分候选问题给大模型判断一致性"
+            ),
+        }
+        rows: list[dict[str, object]] = []
+        for row, record, score, exact in selected:
+            displayed: dict[str, object] = dict(row)
+            displayed.update(
+                {
+                    "question": record.question,
+                    "reply": record.reply,
+                    "library_key": ENTERPRISE_ANNUAL_REPORT_SOURCE,
+                    "library_name": _library_name(ENTERPRISE_ANNUAL_REPORT_SOURCE),
+                    "score": score,
+                    "enterprise_local_score": score,
+                    "enterprise_exact_question": "1" if exact else "",
+                    "reasons": [
+                        "question_only_model_review",
+                        "top_score_tie" if tied else "strict_top_score_leader",
+                    ],
+                    **decision_fields,
+                }
+            )
+            rows.append(displayed)
+        return rows
+
+    def get_active(self, record_id: str) -> KnowledgeRecord | None:
+        return self._repository.get_active(record_id)
 
 
 def _unique_replies(examples: list[dict[str, str]], limit: int) -> list[str]:
@@ -1179,26 +1384,22 @@ def _annotate_enterprise_decision(candidates: list[dict[str, str]]) -> None:
     except (TypeError, ValueError):
         next_score = 0
     margin = max(0, top_score - next_score)
-    has_conflict = str(top.get("enterprise_conflict_count", "")) not in {"", "0"}
     is_exact = str(top.get("enterprise_exact_question", "")).strip() == "1"
     is_confident = bool(
         top_score >= ENTERPRISE_LOCAL_CONFIDENT_FLOOR
-        and not has_conflict
-        and (is_exact or margin >= ENTERPRISE_LOCAL_CONFIDENT_MARGIN)
+        and margin > 0
     )
     top["enterprise_local_confident"] = "1" if is_confident else ""
-    # 并列待裁决：分数达到可靠底线但前三名并列/接近（margin<8），
-    # 运行时交给大模型从并列候选中裁决，测试页显示"并列待裁决"。
+    # 只有最高分完全相同才是并列；只要第一名严格领先，就只送第一名给大模型。
     is_tie = bool(
         not is_confident
-        and not has_conflict
         and top_score >= ENTERPRISE_LOCAL_CONFIDENT_FLOOR
-        and margin < ENTERPRISE_LOCAL_CONFIDENT_MARGIN
+        and margin == 0
         and len(candidates) >= 2
     )
     if is_confident:
-        top["enterprise_decision"] = "send"
-        top["enterprise_decision_label"] = "可直接发送"
+        top["enterprise_decision"] = "judge"
+        top["enterprise_decision_label"] = "大模型待确认"
     elif is_tie:
         top["enterprise_decision"] = "tie"
         top["enterprise_decision_label"] = "并列待裁决"
@@ -1208,17 +1409,13 @@ def _annotate_enterprise_decision(candidates: list[dict[str, str]]) -> None:
     top["enterprise_next_score"] = str(next_score)
     top["enterprise_score_margin"] = str(margin)
     if is_confident:
-        top["enterprise_decision_reason"] = "精确问题" if is_exact else "第一名领先第二名且无时间/操作冲突"
+        top["enterprise_decision_reason"] = "精确问题，送大模型确认" if is_exact else "第一名严格领先，只送最高分候选问题给大模型确认"
     elif is_tie:
-        top["enterprise_decision_reason"] = "前三名并列/接近，运行时交大模型裁决"
+        top["enterprise_decision_reason"] = "最高分完全相同，运行时送2-3条候选问题给大模型裁决"
     else:
         reasons = []
-        if has_conflict:
-            reasons.append("存在时间/操作冲突")
-        if margin < ENTERPRISE_LOCAL_CONFIDENT_MARGIN:
-            reasons.append("第一名未明显领先第二名")
-        if top_score < ENTERPRISE_LOCAL_MIN_SCORE:
-            reasons.append("有效匹配信息不足")
+        if top_score < ENTERPRISE_LOCAL_CONFIDENT_FLOOR:
+            reasons.append("最高分低于30分")
         top["enterprise_decision_reason"] = "；".join(reasons) or "匹配不可靠"
 
 

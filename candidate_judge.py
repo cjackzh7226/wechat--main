@@ -52,7 +52,9 @@ class CandidateJudge:
         post: Callable[..., Any] | None = None,
     ) -> None:
         self.settings = settings
-        self._post = post if post is not None else getattr(requests, "post", None)
+        # 显式注入用于测试/自定义传输；默认请求函数在调用时解析，避免应用启动后
+        # 网络组件被替换或测试打补丁时仍持有过期引用。
+        self._post = post
         self.last_error_category = ""
 
     def judge(
@@ -65,7 +67,8 @@ class CandidateJudge:
         if not isinstance(self.settings.api_key, str) or not self.settings.api_key.strip():
             self.last_error_category = "not_configured"
             return None
-        if self._post is None:
+        post = self._post if self._post is not None else getattr(requests, "post", None)
+        if post is None:
             self.last_error_category = "http_component_unavailable"
             return None
         if any(not isinstance(candidate, KnowledgeCandidate) for candidate in candidates):
@@ -77,7 +80,6 @@ class CandidateJudge:
                 "number": index,
                 "record_id": candidate.record_id,
                 "question": candidate.question,
-                "org_scope": candidate.org_scope,
                 "score": candidate.score,
                 "exact": candidate.exact,
             }
@@ -87,7 +89,11 @@ class CandidateJudge:
             {
                 "role": "system",
                 "content": (
-                    "你只能选择候选编号并判断候选问题是否与客户问题一致。"
+                    "你只能根据客户问题和每个候选的 question 文本选择候选编号，并判断所选"
+                    "候选问题是否与客户问题属于同一核心事项。先选最匹配的候选，再判断一致性。"
+                    "同义词、口语与书面语、奇数与单数、怎么办与如何整改等表达差异不构成不一致。"
+                    "候选问题未写机构类型时，不得仅因机构范围未写明而判为不一致；只有候选问题"
+                    "明确限定的机构类型与客户问题明确限定的机构类型冲突，或核心事项不同，才判 false。"
                     "不得生成、补写或改写任何答案。"
                     "只输出严格 JSON，且键只能是 chosen 和 consistent："
                     '{"chosen":1,"consistent":true}'
@@ -110,7 +116,7 @@ class CandidateJudge:
             if self.settings.api_provider != "custom_http":
                 request.payload["temperature"] = 0
                 request.payload["max_tokens"] = 80
-            response = self._post(
+            response = post(
                 request.url,
                 headers=request.headers,
                 json=request.payload,
