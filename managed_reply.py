@@ -98,17 +98,6 @@ class ManagedReplyService:
         if not candidates:
             return ReplyDecision.no_answer("no_eligible_candidate")
 
-        exact_candidates = [
-            candidate
-            for candidate in candidates
-            if candidate.exact and candidate.score == 100
-        ]
-        if len(exact_candidates) == 1:
-            return self._reload_answer(
-                exact_candidates[0],
-                reason="approved_exact_candidate_reloaded",
-            )
-
         try:
             judgement = self.judge.judge(current_question, candidates)
         except Exception:

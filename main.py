@@ -1378,7 +1378,7 @@ class WeChatStyleReplyAssistant:
         self.memory.load()
         if query.strip():
             if library_key == ENTERPRISE_ANNUAL_REPORT_SOURCE:
-                return self.memory.enterprise_scored_examples(query, limit=200)
+                return self.memory.managed_scored_examples(query, limit=3)
             return self.memory.scored_examples(query, library_key=library_key, limit=200)
         rows: list[dict[str, object]] = []
         for item in self.memory.examples_for_library(library_key, limit=200):
