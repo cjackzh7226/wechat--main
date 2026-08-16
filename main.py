@@ -1874,10 +1874,12 @@ class WeChatStyleReplyAssistant:
                 self.current_window = window
                 self.current_context = context
                 self.current_chat_type = chat_type
+                self._publish_startup_baseline_context(window, context)
                 return True
             self.current_window = window
             self.current_context = observation.context
             self.current_chat_type = observation.identity.chat_type
+            self._publish_startup_baseline_context(window, observation.context)
             existing_status = self.send_ledger.status(observation.turn_key)
             baseline_created = self.send_ledger.baseline(
                 observation.turn_key,
@@ -1916,6 +1918,19 @@ class WeChatStyleReplyAssistant:
             return False
         except Exception:
             return self._defer_unreadable_startup_baseline()
+
+    def _publish_startup_baseline_context(
+        self,
+        window: WeChatWindow,
+        context: str,
+    ) -> None:
+        """Publish the first readable snapshot even when later OCR is unchanged."""
+        queue = getattr(self, "queue", None)
+        if queue is None:
+            return
+        queue.put(("window", window))
+        queue.put(("clear_replies", None))
+        queue.put(("context", context))
 
     def _readable_idle_startup_context(
         self,

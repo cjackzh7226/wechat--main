@@ -1455,10 +1455,16 @@ def test_startup_baseline_uses_visible_chat_when_assistant_has_focus(
     app.current_context = ""
     app.startup_blocking_error = ""
     app.settings = SimpleNamespace(managed_mode="observe", auto_recognize=True)
+    app.queue = Queue()
 
     assert app._establish_startup_baseline() is True
     assert app.send_ledger.status(observation.turn_key) == "baseline"
     assert app.current_window is window
+    assert [app.queue.get_nowait() for _ in range(3)] == [
+        ("window", window),
+        ("clear_replies", None),
+        ("context", observation.context),
+    ]
 
 
 def test_startup_baseline_defers_without_disabling_continuous_monitoring(tmp_path: Path) -> None:
