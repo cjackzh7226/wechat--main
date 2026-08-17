@@ -1865,6 +1865,54 @@ class ChatTrainingTests(unittest.TestCase):
 
 
 class ReplyParsingTests(unittest.TestCase):
+    def test_enterprise_exact_question_cannot_be_vetoed_by_model(self):
+        settings = AppSettings(api_key="configured", reply_source_mode="model_memory")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        memory = StyleMemory(Path(tmp.name) / "memory.json")
+        official_answer = "请补充批复材料并按要求加盖党组织公章。"
+        memory.learn_from_training_examples(
+            [
+                {
+                    "source": "enterprise_annual_report_kb",
+                    "question": "‘党建批复材料不符合要求’问题该如何修改？",
+                    "cue": "企业年报 / 整改 / ‘党建批复材料不符合要求’问题该如何修改？",
+                    "reply": official_answer,
+                    "source_cell": "C25:D25",
+                }
+            ]
+        )
+        engine = ReplyEngine(settings, memory)
+
+        with patch("reply_engine.requests.post") as post:
+            result = engine.generate("[对方] 党建批复材料不符合要求问题该如何修改", "客户")
+
+        self.assertEqual(result, [official_answer])
+        self.assertIn("精确匹配", engine.last_source)
+        post.assert_not_called()
+
+    def test_enterprise_judgement_accepts_markdown_fenced_json(self):
+        settings = AppSettings(api_key="configured", reply_source_mode="model_memory")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        memory = StyleMemory(Path(tmp.name) / "memory.json")
+        official_answer = "打开年度报告公示，输入社会组织名称查询。"
+        memory.learn_from_training_examples(_enterprise_history_lookup_examples(official_answer))
+        engine = ReplyEngine(settings, memory)
+
+        with patch("reply_engine.requests.post") as post:
+            post.return_value.status_code = 200
+            post.return_value.raise_for_status.return_value = None
+            post.return_value.json.return_value = {
+                "choices": [
+                    {"message": {"content": "```json\n{\"chosen\": 1, \"consistent\": true}\n```"}}
+                ]
+            }
+            result = engine.generate("[对方] 想查一下之前的年报", "客户")
+
+        self.assertEqual(result, [official_answer])
+        self.assertIn("大模型确认一致", engine.last_source)
+
     def test_enterprise_fuzzy_history_lookup_returns_official_answer_without_api_key(self):
         settings = AppSettings(api_key="configured", reply_source_mode="model_memory")
         tmp = tempfile.TemporaryDirectory()
@@ -2233,7 +2281,8 @@ class ReplyParsingTests(unittest.TestCase):
             result = engine.generate("[对方] 想查一下之前的年报", "客户")
 
         self.assertEqual(result, ["未在当前企业年报知识库中找到对应答案。"])
-        self.assertIn("判断不一致", engine.last_source)
+        self.assertIn("判断失败", engine.last_source)
+        self.assertIn("timeout", engine.last_error)
 
     def test_enterprise_tie_managed_send_arbitrates_chosen_candidate(self):
         import main as main_module

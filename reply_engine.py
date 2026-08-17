@@ -59,6 +59,24 @@ def parse_numbered_replies(content: str) -> list[str]:
     return replies
 
 
+def _parse_model_json_object(content: str) -> dict:
+    """解析模型 JSON，兼容 ```json 代码块和前后少量说明文字。"""
+
+    text = str(content or "").strip()
+    if not text:
+        raise ValueError("模型返回为空")
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+    start = text.find("{")
+    if start < 0:
+        raise ValueError("未找到 JSON 对象")
+    data, _end = json.JSONDecoder().raw_decode(text[start:])
+    if type(data) is not dict:
+        raise ValueError("返回内容不是 JSON 对象")
+    return data
+
+
 def classify_intent(conversation_text: str) -> str:
     last = last_meaningful_other_message(conversation_text)
     all_text = conversation_text or ""
@@ -103,6 +121,12 @@ class ReplyEngine:
         enterprise_context = enterprise_query or conversation_text
         enterprise_answer = self._select_enterprise_answer(enterprise_context)
         if enterprise_answer:
+            # 规范化后的客户问题与知识库问题完全相同，已经是确定性的一致。
+            # 这类 100 分精确命中不能再被模型偶发的 false、超时或 JSON 格式
+            # 波动否决；否则会出现“管理页第一名 100 分，运行时却说未找到”。
+            if _enterprise_is_exact_question(enterprise_answer):
+                self.last_source = _enterprise_source_label(enterprise_answer) + " · 精确匹配"
+                return [str(enterprise_answer.get("reply", ""))]
             # 命中后不直接发送：交大模型做一致性判断（客户问题 vs 候选对应问题）。
             # 一致 → 发送；不一致/判断失败 → 未命中文案。
             return self._enterprise_answer_via_judgement(enterprise_query or enterprise_context, [enterprise_answer])
@@ -412,7 +436,10 @@ class ReplyEngine:
         - 不一致 / 无 Key / 判断失败 → 返回 [企业未命中文案]（安全降级，绝不误发）。
         """
         judgement = self._judge_enterprise_consistency(question, candidates)
-        if judgement and judgement.get("consistent"):
+        if judgement is None:
+            self.last_source = "企业年报知识库 · 判断失败"
+            return [ENTERPRISE_NO_ANSWER_REPLY]
+        if judgement.get("consistent"):
             chosen = candidates[judgement["chosen_index"]]
             self.last_source = _enterprise_source_label(chosen) + " · 大模型确认一致"
             return [str(chosen.get("reply", ""))]
@@ -425,6 +452,7 @@ class ReplyEngine:
         返回 {"chosen_index": int, "consistent": bool}；调用失败/输出无法解析返回 None。
         """
         if not self.settings.api_key or requests is None or not candidates:
+            self.last_error = "大模型一致性判断失败：未配置可用的文本接口"
             return None
         lines = []
         for index, cand in enumerate(candidates[:3], 1):
@@ -456,17 +484,24 @@ class ReplyEngine:
             response = requests.post(request.url, headers=request.headers, json=request.payload, timeout=60)
             response.raise_for_status()
             content = extract_text_from_response(response.json(), self.settings)
-        except Exception:
+        except Exception as exc:
+            self.last_error = f"大模型一致性判断失败：{exc}"
             return None
         try:
-            text = (content or "").strip().strip("`")
-            data = json.loads(text)
-            chosen = int(data.get("chosen", 0))
-            consistent = bool(data.get("consistent", False))
-        except Exception:
+            data = _parse_model_json_object(content)
+            if type(data) is not dict:
+                raise ValueError("返回内容不是 JSON 对象")
+            chosen = data.get("chosen")
+            consistent = data.get("consistent")
+            if type(chosen) is not int or type(consistent) is not bool:
+                raise ValueError("chosen/consistent 字段类型不正确")
+        except Exception as exc:
+            self.last_error = f"大模型一致性判断失败：{exc}"
             return None
         if not (1 <= chosen <= len(candidates)):
+            self.last_error = "大模型一致性判断失败：chosen 超出候选范围"
             return None
+        self.last_error = ""
         return {"chosen_index": chosen - 1, "consistent": consistent}
 
     def _quality_filter(self, replies: list[str], context: str) -> list[str]:
