@@ -4995,6 +4995,16 @@ class SettingsTests(unittest.TestCase):
 
 
 class BuildReleaseTests(unittest.TestCase):
+    def test_update_installer_preserves_all_user_data(self):
+        script_path = Path(__file__).resolve().parents[1] / "build" / "聊小智_update_installer.iss"
+        script = script_path.read_text(encoding="utf-8")
+
+        self.assertIn("AppId={{D67B9715-251B-4BBE-B2AB-3481CC740C70}", script)
+        self.assertIn("OutputBaseFilename=聊小智_更新包_{#AppVersion}", script)
+        self.assertIn('Excludes: "user_data\\*"', script)
+        self.assertIn('Name: "{app}\\user_data"; Flags: uninsneveruninstall', script)
+        self.assertNotIn('Source: "..\\dist\\聊小智\\user_data', script)
+
     def test_build_release_collects_dynamic_training_import_dependencies(self):
         import build_release
 
