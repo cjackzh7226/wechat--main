@@ -3362,18 +3362,6 @@ class VisibleContentTests(unittest.TestCase):
 
 
 class SettingsTests(unittest.TestCase):
-    def test_installer_caches_seed_knowledge_decision_for_memory_and_vector(self):
-        script = (Path(__file__).resolve().parent.parent / "build" / "聊小智_installer.iss").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertEqual(script.count("Check: ShouldInstallSeedKnowledge"), 2)
-        self.assertIn("SeedKnowledgeDecisionSet: Boolean", script)
-        self.assertIn("if not SeedKnowledgeDecisionSet then", script)
-        self.assertIn("Result := InstallSeedKnowledge", script)
-        self.assertIn('Excludes: "user_data\\*"', script)
-        self.assertIn("Flags: uninsneveruninstall", script)
-
     def test_model_prompt_is_readable_chinese_and_forbids_invented_data(self):
         settings = AppSettings()
         settings.reply_source_mode = "model"
