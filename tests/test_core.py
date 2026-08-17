@@ -2483,7 +2483,27 @@ class ReplyParsingTests(unittest.TestCase):
 
         result = unreplied_other_messages(context)
 
-        self.assertEqual(result, ["收到了", "放在房间哪个位置", "需要每天动它吗"])
+        self.assertEqual(result, ["需要每天动它吗"])
+
+    def test_latest_recall_is_a_system_event_and_clears_old_unreplied_message(self):
+        context = "[对方] 党建批复材料不符合要求怎么修改\n[系统] -撤回了一条消息"
+
+        self.assertEqual(latest_meaningful_message(context), ("系统", "-撤回了一条消息"))
+        self.assertEqual(unreplied_other_messages(context), [])
+        self.assertEqual(_current_unreplied_turn(context), [])
+        self.assertFalse(_managed_context_allows_generation(context))
+
+    def test_ocr_keeps_personal_and_group_recall_as_system_events(self):
+        from PIL import Image
+
+        image = Image.new("RGB", (700, 300), "white")
+        for text in ("-撤回了一条消息", "来自微信的阳光撤回了一条消息", "张三撒回了一条消息"):
+            lines = ChatOCR._to_chat_lines(
+                [{"text": text, "x": 350, "left": 260, "right": 440, "y": 240}],
+                image.width,
+                image,
+            )
+            self.assertEqual([(line.role, line.text) for line in lines], [("系统", text)])
 
     def test_single_character_other_message_is_unreplied_turn(self):
         context = "\n".join(
@@ -3497,7 +3517,7 @@ class SettingsTests(unittest.TestCase):
 
         self.assertTrue(_generation_result_still_current(context, old_window, context, live_window))
 
-    def test_managed_generation_result_survives_qq_ocr_noise_for_same_turn(self):
+    def test_managed_generation_result_is_discarded_when_new_image_is_latest(self):
         window = ChatWindow(
             hwnd=9,
             title="QQ contact",
@@ -3515,7 +3535,7 @@ class SettingsTests(unittest.TestCase):
             ]
         )
 
-        self.assertTrue(_managed_generation_result_still_current(target_turn, window, noisy_context, window))
+        self.assertFalse(_managed_generation_result_still_current(target_turn, window, noisy_context, window))
 
     def test_managed_generation_result_is_discarded_when_qq_gets_new_turn_message(self):
         window = ChatWindow(
@@ -4144,7 +4164,7 @@ class SettingsTests(unittest.TestCase):
                 engine.generate(context, "好友")
 
         _conversation, _partner = build_prompt.call_args.args[:2]
-        self.assertEqual(build_prompt.call_args.kwargs["target_turn"], ["山海镇收到了", "应该怎么放"])
+        self.assertEqual(build_prompt.call_args.kwargs["target_turn"], ["应该怎么放"])
 
     def test_memory_only_mode_uses_training_when_relevant_without_api_call(self):
         settings = AppSettings()
@@ -4600,7 +4620,7 @@ class SettingsTests(unittest.TestCase):
 
         self.assertEqual(
             _current_unreplied_turn(context),
-            ["还有一个小的配饰是挂件吗", "挂件需要单独放哪里吗"],
+            ["挂件需要单独放哪里吗"],
         )
 
     def test_current_unreplied_turn_includes_latest_visible_image_understanding(self):
@@ -4806,6 +4826,29 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.training_mode)
         self.assertGreaterEqual(settings.chat_area.x_left, 0.30)
         self.assertLessEqual(settings.chat_area.x_right, 0.98)
+        self.assertEqual(settings.poll_interval_ms, 800)
+        self.assertEqual(settings.group_poll_interval_ms, 500)
+        self.assertEqual(settings.capture_cooldown_seconds, 0.8)
+
+    def test_settings_load_migrates_old_hidden_polling_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "poll_interval_ms": 1200,
+                        "group_poll_interval_ms": 800,
+                        "capture_cooldown_seconds": 4.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            loaded = AppSettings(config_path=path).load()
+
+            self.assertEqual(loaded.poll_interval_ms, 800)
+            self.assertEqual(loaded.group_poll_interval_ms, 500)
+            self.assertEqual(loaded.capture_cooldown_seconds, 0.8)
 
     def test_settings_roundtrip_keeps_api_key_out_of_source_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -50,12 +50,12 @@ class AppSettings:
     enable_web_search: bool = True
     search_max_results: int = 3
     auto_reply_delay_seconds: float = 1.2
-    poll_interval_ms: int = 1200
-    capture_cooldown_seconds: float = 4.0
+    poll_interval_ms: int = 800
+    capture_cooldown_seconds: float = 0.8
     # 群聊：当前企业微信账号用户名（用于 @ 识别与回复 @ 回去）
     wecom_account_name: str = ""
     # 群聊 OCR 轮询间隔（比个人聊天快，@ 响应更及时）
-    group_poll_interval_ms: int = 800
+    group_poll_interval_ms: int = 500
     chat_area: ChatArea = field(default_factory=ChatArea)
 
     def load(self) -> "AppSettings":
@@ -109,12 +109,23 @@ class AppSettings:
         self.enable_web_search = bool(data.get("enable_web_search", self.enable_web_search))
         self.search_max_results = max(1, min(6, int(data.get("search_max_results", self.search_max_results))))
         self.auto_reply_delay_seconds = float(data.get("auto_reply_delay_seconds", self.auto_reply_delay_seconds))
-        self.poll_interval_ms = int(data.get("poll_interval_ms", self.poll_interval_ms))
-        self.capture_cooldown_seconds = float(
+        stored_poll_interval = int(data.get("poll_interval_ms", self.poll_interval_ms))
+        stored_capture_cooldown = float(
             data.get("capture_cooldown_seconds", self.capture_cooldown_seconds)
         )
+        # 旧版本把 1200 ms / 4 s 写进了 user_data/settings.json。仅迁移
+        # 这两个旧默认值，保留用户手工设置的其他轮询间隔。
+        self.poll_interval_ms = 800 if stored_poll_interval == 1200 else stored_poll_interval
+        self.capture_cooldown_seconds = (
+            0.8 if stored_capture_cooldown == 4.0 else stored_capture_cooldown
+        )
         self.wecom_account_name = str(data.get("wecom_account_name", self.wecom_account_name)).strip()
-        self.group_poll_interval_ms = int(data.get("group_poll_interval_ms", self.group_poll_interval_ms))
+        stored_group_poll_interval = int(
+            data.get("group_poll_interval_ms", self.group_poll_interval_ms)
+        )
+        self.group_poll_interval_ms = (
+            500 if stored_group_poll_interval == 800 else stored_group_poll_interval
+        )
         area = data.get("chat_area", {})
         if isinstance(area, dict):
             self.chat_area = ChatArea(

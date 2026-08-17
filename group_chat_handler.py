@@ -76,12 +76,29 @@ def _has_platform_marker(text: str) -> bool:
     return any(marker.casefold() in folded for marker in _PLATFORM_MARKERS)
 
 
-def _latest_other_message(context: str) -> str:
-    """取最新一条 role==对方 的消息文本。"""
+def _latest_chat_event(context: str) -> tuple[str, str]:
+    """取最后一个聊天事件；发送者头仅是元数据，不代表一条新消息。"""
+    prefixes = (
+        ("[对方]", "对方"),
+        ("[瀵规柟]", "对方"),
+        ("[我]", "我"),
+        ("[鎴]", "我"),
+        ("[系统]", "系统"),
+    )
     for line in reversed((context or "").splitlines()):
-        if line.startswith("[对方]") or line.startswith("[瀵规柟]"):
-            return line.split("]", 1)[1].strip() if "]" in line else line.strip()
-    return ""
+        stripped = line.strip()
+        if not stripped:
+            continue
+        for prefix, role in prefixes:
+            if stripped.startswith(prefix):
+                return role, _line_text(stripped)
+    return "", ""
+
+
+def _latest_other_message(context: str) -> str:
+    """仅当最后一个聊天事件来自对方时返回其文本，不向前追旧消息。"""
+    role, text = _latest_chat_event(context)
+    return text if role == "对方" else ""
 
 
 def _latest_other_header(context: str) -> str:
@@ -112,6 +129,9 @@ class GroupChatHandler:
         """
         name = _clean_name(account_name)
         lines = (context or "").splitlines()
+        event_role, _event_text = _latest_chat_event(context)
+        if event_role == "系统":
+            return "系统"
         meaningful = [index for index, line in enumerate(lines) if _line_text(line)]
         if meaningful:
             latest_index = meaningful[-1]
@@ -182,6 +202,8 @@ class GroupChatHandler:
         1. 单行合并：`阳光@微信 @程正恒 问题` → 取 @ 前的头部
         2. 上下双行：`阳光@微信`（上）+ `@程正恒 问题`（下）→ 内容行 @ 在行首时取上一行
         """
+        if not _latest_other_message(context):
+            return ""
         all_lines = (context or "").splitlines()
         latest_other_index = next(
             (
@@ -236,14 +258,9 @@ class GroupChatHandler:
         """
         if not context or not context.strip():
             return True
-        latest_role = ""
-        for line in reversed(context.splitlines()):
-            if line.startswith("[对方]") or line.startswith("[瀵规柟]"):
-                latest_role = "对方"
-                break
-            if line.startswith("[我]") or line.startswith("[鎴]"):
-                latest_role = "我"
-                break
+        latest_role, _latest_text = _latest_chat_event(context)
+        if latest_role == "系统":
+            return True
         if latest_role != "对方":
             return False
         return not self.detect_at_mention(context, account_name)

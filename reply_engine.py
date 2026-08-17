@@ -513,16 +513,14 @@ def unreplied_other_messages(conversation_text: str) -> list[str]:
     messages = [(role, text) for role, text in _parse_messages(conversation_text) if _is_meaningful_text(text)]
     if not messages or messages[-1][0] != "对方":
         return []
-    last_own = -1
-    for index, (role, _text) in enumerate(messages):
-        if role == "我":
-            last_own = index
-    return [text for role, text in messages[last_own + 1 :] if role == "对方"]
+    # 自动客服只处理屏幕上最新一条对方消息。不能向前追补旧问题：旧消息
+    # 可能早已过时，也会让生成流程在积压会话中逐条排队而无法切换聊天。
+    return [messages[-1][1]]
 
 
 def select_best_reply_for_context(conversation_text: str, replies: list[str]) -> str:
     latest_role, _latest_text = latest_meaningful_message(conversation_text)
-    if latest_role == "我":
+    if latest_role != "对方":
         return ""
     filtered = ReplyEngine(AppSettings(), StyleMemory())._quality_filter(replies, conversation_text)
     if not filtered:
@@ -555,11 +553,7 @@ def select_best_reply_for_context(conversation_text: str, replies: list[str]) ->
 
 
 def _infer_unreplied_other_messages(conversation_text: str) -> list[str]:
-    messages = unreplied_other_messages(conversation_text)
-    if messages:
-        return messages
-    last = last_meaningful_other_message(conversation_text)
-    return [last] if last else []
+    return unreplied_other_messages(conversation_text)
 
 
 def _parse_messages(conversation_text: str) -> list[tuple[str, str]]:
@@ -570,7 +564,10 @@ def _parse_messages(conversation_text: str) -> list[tuple[str, str]]:
             continue
         if line.startswith("[可见内容理解]") or line.startswith("[鍙鍐呭鐞嗚В]"):
             continue
-        match = re.match(r"^\[(对方|我|瀵规柟|鎴[^\]]*)\]\s*(.*)$", line)
+        match = re.match(
+            r"^\[(对方|我|系统|瀵规柟|鎴[^\]\s]*)\]?\s*(.*)$",
+            line,
+        )
         if match:
             role = _normalize_role(match.group(1))
             text = match.group(2).strip()
@@ -584,7 +581,11 @@ def _parse_messages(conversation_text: str) -> list[tuple[str, str]]:
 
 
 def _normalize_role(role: str) -> str:
-    return "对方" if role.startswith("对方") or role.startswith("瀵规柟") else "我"
+    if role.startswith("对方") or role.startswith("瀵规柟"):
+        return "对方"
+    if role.startswith("系统"):
+        return "系统"
+    return "我"
 
 
 def _is_meaningful_text(text: str) -> bool:

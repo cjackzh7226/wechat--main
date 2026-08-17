@@ -152,6 +152,7 @@ class WeChatStyleReplyAssistant:
         self.pending_generation: tuple[str, WeChatWindow, list[str]] | None = None
         self.generation_active_turn: list[str] = []
         self.generation_lock = threading.Lock()
+        self.engine_call_lock = threading.Lock()
         # ---- 会话列表自动切换旁路（conversation_list 模块）----
         from conversation_list import (
             ChatIdentityTracker,
@@ -170,6 +171,9 @@ class WeChatStyleReplyAssistant:
         self.group_handler = GroupChatHandler(self.settings)
         self.current_chat_type = "personal"
         self.group_last_handled_msg = ""
+        self.group_generation_inflight = False
+        self.pending_group_generation: tuple[WeChatWindow, str, str, str, str, str] | None = None
+        self.group_generation_lock = threading.Lock()
         self.bypass_last_scan_at = 0.0
         self.bypass_self_since = 0.0
         self.bypass_fail_count = 0
@@ -329,7 +333,7 @@ class WeChatStyleReplyAssistant:
                 self._handle_group_chat(wechat, context, full)
                 return
             group_idle = self.group_handler.is_chat_idle(context, self.settings.wecom_account_name)
-        stable_for_scan = latest_role == "我" or (
+        stable_for_scan = latest_role in {"我", "系统"} or (
             chat_type == "group" and latest_role == "对方" and group_idle
         )
         if stable_for_scan:
@@ -354,7 +358,8 @@ class WeChatStyleReplyAssistant:
             return
         user_typing = self._user_typing_detected()
         interrupt_role = "我" if (
-            chat_type == "group" and latest_role == "对方" and group_idle
+            latest_role == "系统"
+            or (chat_type == "group" and latest_role == "对方" and group_idle)
         ) else latest_role
         if self.chat_state_guard.is_interrupted(
             interrupt_role,
@@ -469,6 +474,7 @@ class WeChatStyleReplyAssistant:
         self.managed_last_handled_partner = ""
         self.managed_last_handled_turn_messages = []
         self.managed_last_handled_turn_key = ""
+        self.group_last_handled_msg = ""
         self.force_refresh = True
         # 四分类分流（system 标题优先；group/personal 优先用列表行头像判定）
         full = None
@@ -544,42 +550,165 @@ class WeChatStyleReplyAssistant:
             latest_role, _latest_text = latest_meaningful_message(context)
         if latest_role != "对方":
             # 我方发出或空 → 无需回复（列表扫描条件已覆盖）
+            self.group_last_handled_msg = ""
             return
         if not self.group_handler.detect_at_mention(context, account_name):
             # 没 @ 我 → 聊天内容无变化，不回复
+            self.group_last_handled_msg = ""
             return
-        # 防重：同一 @ 消息只回复一次（回复发送有延迟，800ms 轮询期间会重复触发）
+        # 防重：同一群聊的同一条 @ 消息只进入一次生成队列。
         latest_msg = self.group_handler.latest_other_message(context)
-        if latest_msg and latest_msg == self.group_last_handled_msg:
-            return
-        self.group_last_handled_msg = latest_msg
         # @ 我：提取问题 + 发送者名字 → 复用现有决策链生成 → @ 回
         question = self.group_handler.extract_question(
-            self.group_handler.latest_other_message(context), account_name
+            latest_msg, account_name
         )
         sender_name = self.group_handler.extract_sender_name(context)
         if not question.strip():
             return
-        replies = self.engine.generate(question, "群聊")
-        if not replies:
-            self.queue.put(("status", f"群聊 @ 回复：未找到合适回答（问题：{question[:30]}）"))
+        expected_title = self._read_top_title(full)
+        message_key = hashlib.sha1(
+            f"{expected_title}\n{sender_name}\n{latest_msg}".encode("utf-8")
+        ).hexdigest()
+        if message_key == self.group_last_handled_msg:
             return
-        final_reply = self.group_handler.build_reply(sender_name, replies[0])
-        self._send_group_reply(wechat, final_reply, question)
+        self.group_last_handled_msg = message_key
+        self._schedule_group_generation(
+            wechat,
+            context,
+            latest_msg,
+            question,
+            sender_name,
+            expected_title,
+        )
+
+    def _schedule_group_generation(
+        self,
+        wechat: WeChatWindow,
+        context: str,
+        latest_msg: str,
+        question: str,
+        sender_name: str,
+        expected_title: str,
+    ) -> None:
+        """群聊生成在后台执行；新 @ 到来时只保留最后一个待处理任务。"""
+        job = (wechat, context, latest_msg, question, sender_name, expected_title)
+        lock = getattr(self, "group_generation_lock", None)
+        if lock is None:
+            lock = self.group_generation_lock = threading.Lock()
+        with lock:
+            if getattr(self, "group_generation_inflight", False):
+                self.pending_group_generation = job
+                return
+            self.group_generation_inflight = True
+        threading.Thread(
+            target=lambda: self._group_generation_worker(job),
+            daemon=True,
+        ).start()
+
+    def _group_generation_worker(
+        self,
+        job: tuple[WeChatWindow, str, str, str, str, str],
+    ) -> None:
+        wechat, _context, latest_msg, question, sender_name, expected_title = job
+        try:
+            engine_lock = getattr(self, "engine_call_lock", None)
+            if engine_lock is None:
+                replies = self.engine.generate(question, "群聊")
+            else:
+                with engine_lock:
+                    replies = self.engine.generate(question, "群聊")
+            lock = getattr(self, "group_generation_lock", None)
+            with lock:
+                has_newer_pending = self.pending_group_generation is not None
+            if has_newer_pending:
+                return
+            if not replies:
+                self.queue.put(("status", f"群聊 @ 回复：未找到合适回答（问题：{question[:30]}）"))
+                return
+            allowed, reason = self._group_send_preflight_allows(
+                wechat,
+                latest_msg,
+                sender_name,
+                expected_title,
+            )
+            if not allowed:
+                self.queue.put(("status", f"群聊回复发送前复核未通过：{reason}"))
+                return
+            final_reply = self.group_handler.build_reply(sender_name, replies[0])
+            self._send_group_reply(wechat, final_reply, question)
+        except Exception as exc:
+            self.queue.put(("status", f"群聊回复生成异常：{exc}"))
+        finally:
+            next_job = None
+            lock = getattr(self, "group_generation_lock", None)
+            with lock:
+                if self.pending_group_generation is not None:
+                    next_job = self.pending_group_generation
+                    self.pending_group_generation = None
+                else:
+                    self.group_generation_inflight = False
+            if next_job is not None:
+                threading.Thread(
+                    target=lambda: self._group_generation_worker(next_job),
+                    daemon=True,
+                ).start()
+
+    def _group_send_preflight_allows(
+        self,
+        wechat: WeChatWindow,
+        expected_message: str,
+        expected_sender: str,
+        expected_title: str,
+    ) -> tuple[bool, str]:
+        """发送前重新 OCR：会话、最新消息和 @ 任一变化就丢弃旧结果。"""
+        from capture_ocr import _capture_window_bitmap, _crop_detected_chat_area_with_origin
+
+        if not WeChatSender._is_target_foreground(wechat):
+            return False, "企业微信已不在前台"
+        full = _capture_window_bitmap(wechat)
+        if full is None:
+            return False, "无法重新截取当前群聊"
+        live_title = self._read_top_title(full)
+        if expected_title and not live_title:
+            return False, "无法复核当前群聊标题"
+        if expected_title:
+            expected_compact = re.sub(r"\s+", "", expected_title)
+            live_compact = re.sub(r"\s+", "", live_title)
+            if expected_compact != live_compact:
+                return False, "当前群聊已切换"
+        try:
+            chat_crop, _origin = _crop_detected_chat_area_with_origin(
+                full, "wecom", self.settings.chat_area
+            )
+            live_context = self.ocr.read_image(chat_crop)
+        except Exception:
+            return False, "无法复核群聊最新消息"
+        if self.group_handler.latest_role_by_sender(
+            live_context, self.settings.wecom_account_name
+        ) != "对方":
+            return False, "最新消息已不是对方消息"
+        live_message = self.group_handler.latest_other_message(live_context)
+        if not live_message or not _messages_are_similar(expected_message, live_message):
+            return False, "对方最新消息已变化"
+        if not self.group_handler.detect_at_mention(
+            live_context, self.settings.wecom_account_name
+        ):
+            return False, "最新消息没有 @ 当前账号"
+        live_sender = self.group_handler.extract_sender_name(live_context)
+        if expected_sender and live_sender and expected_sender != live_sender:
+            return False, "最新消息发送者已变化"
+        return True, ""
 
     def _send_group_reply(self, wechat: WeChatWindow, text: str, question: str) -> None:
-        """群聊回复发送（后台线程，避免阻塞监控循环）。"""
-        def _do_send() -> None:
-            try:
-                ok, message = self.sender.send(wechat, text)
-                if ok:
-                    self.queue.put(("status", f"群聊 @ 回复已发送：{text[:40]}"))
-                else:
-                    self.queue.put(("status", f"群聊回复发送失败：{message}"))
-            except Exception as exc:
-                self.queue.put(("status", f"群聊回复发送异常：{exc}"))
-
-        threading.Thread(target=_do_send, daemon=True).start()
+        """在群聊生成工作线程内发送，主监控循环不会被网络或发送动作阻塞。"""
+        try:
+            ok, message = self.sender.send(wechat, text)
+            if ok:
+                self.queue.put(("status", f"群聊 @ 回复已发送：{text[:40]}"))
+            else:
+                self.queue.put(("status", f"群聊回复发送失败：{message}"))
+        except Exception as exc:
+            self.queue.put(("status", f"群聊回复发送异常：{exc}"))
 
     def _read_top_title(self, full_window_image) -> str:
         """顶部标题栏 OCR（会话标题/系统号名称）。"""
@@ -766,7 +895,12 @@ class WeChatStyleReplyAssistant:
 
     def _generation_worker(self, context: str, wechat: WeChatWindow, target_turn: list[str]) -> None:
         try:
-            replies = self.engine.generate(context, wechat.title, target_turn=target_turn)
+            engine_lock = getattr(self, "engine_call_lock", None)
+            if engine_lock is None:
+                replies = self.engine.generate(context, wechat.title, target_turn=target_turn)
+            else:
+                with engine_lock:
+                    replies = self.engine.generate(context, wechat.title, target_turn=target_turn)
             with self.generation_lock:
                 has_newer_pending = self.pending_generation is not None
             if self.settings.managed_auto_reply:
@@ -1726,7 +1860,8 @@ def _managed_context_allows_generation(context: str, handled_messages: list[str]
         _is_feedback_question(_strip_visible_summary(message)) for message in unreplied_messages
     ):
         return False
-    if handled_messages and _turns_are_same_or_similar(handled_messages, unreplied_messages):
+    handled_latest = _latest_turn_message(handled_messages)
+    if handled_latest and _turns_are_same_or_similar(handled_latest, unreplied_messages):
         return _current_turn_has_own_boundary(context)
     return True
 
@@ -1758,11 +1893,12 @@ def _managed_reply_gate_allows_generation(
     latest_role, _latest_text = latest_meaningful_message(context)
     if latest_role == "我":
         return False, False
-    if allow_new_without_own_echo and handled_messages and _turn_has_real_new_message(handled_messages, current_turn):
+    handled_latest = _latest_turn_message(handled_messages)
+    if allow_new_without_own_echo and handled_latest and _turn_has_real_new_message(handled_latest, current_turn):
         return True, False
     if not _context_has_own_echo(context, last_sent_text):
         return False, True
-    if handled_messages and _turns_are_same_or_similar(handled_messages, current_turn):
+    if handled_latest and _turns_are_same_or_similar(handled_latest, current_turn):
         if _current_turn_has_own_boundary(context):
             return True, False
         return False, True
@@ -1773,6 +1909,12 @@ def _managed_reply_gate_allows_generation(
 
 def _turn_key(messages: list[str]) -> str:
     return "\n".join(_normalize_turn_message(message) for message in messages if _normalize_turn_message(message))
+
+
+def _latest_turn_message(messages: list[str] | None) -> list[str]:
+    """兼容旧运行状态里的多消息列表；新机制只比较最后一条消息。"""
+    latest = [str(message or "") for message in (messages or []) if _normalize_turn_message(str(message or ""))]
+    return latest[-1:] if latest else []
 
 
 def _normalize_turn_message(text: str) -> str:
@@ -1799,14 +1941,13 @@ def _turns_are_same_or_similar(old_messages: list[str] | None, new_messages: lis
 
 
 def _turn_has_real_new_message(old_messages: list[str] | None, new_messages: list[str] | None) -> bool:
-    old = old_messages or []
-    new = new_messages or []
-    if not old or len(new) <= len(old):
+    old = _latest_turn_message(old_messages)
+    new = _latest_turn_message(new_messages)
+    if not old or not new:
         return False
-    if _turns_are_same_or_similar(old, new[: len(old)]):
-        tail = [_normalize_turn_message(message) for message in new[len(old) :]]
-        return any(len(message) >= 2 for message in tail)
-    return False
+    if _turns_are_same_or_similar(old, new):
+        return False
+    return len(_normalize_turn_message(new[0])) >= 2
 
 
 def _messages_are_similar(left: str, right: str) -> bool:
@@ -1875,7 +2016,7 @@ def _context_role_messages(context: str) -> list[tuple[str, str]]:
             if summary:
                 messages.append(("visible", summary))
             continue
-        match = re.match(r"^\[([^\]]+)\]\s*(.+)$", stripped)
+        match = re.match(r"^\[([^\]\s]+)\]?\s+(.+)$", stripped)
         if not match:
             continue
         role = _normalize_context_role(match.group(1))

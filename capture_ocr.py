@@ -212,7 +212,12 @@ class ChatOCR:
                 continue
             if not text or score < 0.25:
                 continue
-            if _is_noise_text(text) and not (keep_voice and _voice_duration_seconds(text) is not None):
+            is_recall = _is_recall_message_text(text)
+            if (
+                _is_noise_text(text)
+                and not is_recall
+                and not (keep_voice and _voice_duration_seconds(text) is not None)
+            ):
                 continue
             xs = [float(point[0]) for point in box]
             ys = [float(point[1]) for point in box]
@@ -233,11 +238,14 @@ class ChatOCR:
         merged: list[dict] = []
         for item in items:
             text = item["text"].strip()
-            if _is_noise_text(text):
+            is_recall = _is_recall_message_text(text)
+            if _is_noise_text(text) and not is_recall:
                 continue
             if (
                 merged
                 and abs(item["y"] - merged[-1]["y"]) < 18
+                and not is_recall
+                and not _is_recall_message_text(str(merged[-1].get("text", "")))
                 and not _separate_group_sender_from_message(
                     str(merged[-1].get("text", "")),
                     text,
@@ -258,12 +266,16 @@ class ChatOCR:
 
         lines: list[ChatLine] = []
         for item in merged:
-            if image is not None and _is_embedded_visual_text(item, image):
+            is_recall = _is_recall_message_text(str(item.get("text", "")))
+            if not is_recall and image is not None and _is_embedded_visual_text(item, image):
                 continue
             text = re.sub(r"\s+", " ", item["text"]).strip()
-            if text and not _is_noise_text(text):
+            if text and (is_recall or not _is_noise_text(text)):
                 text = _restore_visible_dash_sender(item, text, image)
-                role = "发送者" if _is_group_sender_header(text) else _infer_chat_role(item, image_width, image)
+                if is_recall:
+                    role = "系统"
+                else:
+                    role = "发送者" if _is_group_sender_header(text) else _infer_chat_role(item, image_width, image)
                 lines.append(ChatLine(role=role, text=text, y=item["y"]))
         return _merge_wrapped_chat_lines(lines)
 
@@ -313,6 +325,8 @@ def _looks_like_wrapped_ocr_continuation(previous: dict, current: dict, image_wi
         return False
     previous_text = str(previous.get("text", "")).strip()
     current_text = str(current.get("text", "")).strip()
+    if _is_recall_message_text(previous_text) or _is_recall_message_text(current_text):
+        return False
     if _separate_group_sender_from_message(previous_text, current_text):
         return False
     if len(previous_text) < 18 and len(current_text) < 8:
@@ -793,8 +807,23 @@ _SYSTEM_MESSAGE_KEYWORDS = (
 )
 
 
+def _is_recall_message_text(text: str) -> bool:
+    """识别个人/群聊撤回提示，并容忍常见 OCR 的“撤/撒”和“一/1”误判。"""
+    compact = re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(text or "")))
+    if not compact or len(compact) > 60:
+        return False
+    return bool(
+        re.fullmatch(
+            r"(?:来自微信的)?[^，。！？!?：:]{0,32}(?:撤|撒)回了(?:一|1)?条消息",
+            compact,
+        )
+    )
+
+
 def _is_system_message_text(compact: str) -> bool:
     """企业微信/微信的居中系统消息（非对话内容），按关键词识别。"""
+    if _is_recall_message_text(compact):
+        return True
     if len(compact) > 60:
         return False
     for keyword in _SYSTEM_MESSAGE_KEYWORDS:
@@ -893,6 +922,8 @@ def _merge_wrapped_chat_lines(lines: list[ChatLine]) -> list[ChatLine]:
 
 def _looks_like_wrapped_continuation(previous: ChatLine, current: ChatLine) -> bool:
     if previous.role != current.role:
+        return False
+    if _is_recall_message_text(previous.text) or _is_recall_message_text(current.text):
         return False
     if _separate_group_sender_from_message(previous.text, current.text):
         return False

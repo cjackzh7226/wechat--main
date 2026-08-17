@@ -43,7 +43,8 @@ _DEFAULT_CALIBRATION: dict = {
         "retry_per_failure": 1,
     },
     "system_whitelist": [
-        "客户联系", "学习园地", "行业资讯", "邮件提醒", "管理企业",
+        "客户联系", "可能的商务伙伴", "一周小结", "学习园地", "行业资讯",
+        "接收微信中的工作消息", "客户咨询", "微信客服", "邮件提醒", "管理企业",
         "腾讯云客服", "企业微信团队", "腾讯云企业服务", "程明现的机器人",
     ],
     "system_keywords": ["团队", "客服", "服务", "提醒", "管理", "联系"],
@@ -251,7 +252,7 @@ class ChatStateGuard:
     ) -> bool:
         """触发扫描列表的条件。
 
-        个人/其他：最新消息为我方发出且持续 2 秒。
+        个人/其他：最新消息为我方发出或撤回系统提示，且持续 2 秒。
         群聊：我方发出 2 秒；或对方消息没 @ 我（聊天内容无变化）2 秒——都视为可切走。
         @ 我（group_idle=False）不触发（要走回复流程）。
         """
@@ -259,7 +260,7 @@ class ChatStateGuard:
             return False
         if now < paused_until:
             return False
-        if latest_role == "我":
+        if latest_role in {"我", "系统"}:
             if seconds_as_self < self.self_stable_seconds:
                 return False
         elif chat_type == "group" and latest_role == "对方" and group_idle:
@@ -370,14 +371,24 @@ class ConversationTypeDetector:
         return colorful >= 4
 
     def _is_system(self, top_title_text: str) -> bool:
-        text = re.sub(r"\s+", "", str(top_title_text or "")).casefold()
+        text = self._normalize_system_title(top_title_text)
         if not text:
             return False
         for name in self.system_whitelist:
-            normalized_name = re.sub(r"\s+", "", str(name)).casefold()
-            if text == normalized_name or text.startswith(f"{normalized_name}@"):
+            normalized_name = self._normalize_system_title(name)
+            if text == normalized_name:
+                return True
+            if text.startswith(normalized_name) and text[len(normalized_name):len(normalized_name) + 1] in {
+                "@", "·", "：", ":", "-", "—", "（", "(",
+            }:
                 return True
         return False
+
+    @staticmethod
+    def _normalize_system_title(value: str) -> str:
+        text = re.sub(r"\s+", "", str(value or "")).casefold()
+        # 企业微信浅色列表的小字号 OCR 偶尔把“联系”的“系”读成“糸”。
+        return text.replace("客户联糸", "客户联系")
 
     @staticmethod
     def _is_explicit_personal_title(top_title_text: str) -> bool:

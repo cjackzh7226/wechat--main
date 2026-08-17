@@ -2,6 +2,8 @@
 """conversation_list 模块单测：红点检测 / 四分类 / 状态机（用合成图，不依赖真实窗口）。"""
 
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from queue import Queue
@@ -42,6 +44,7 @@ CAL = {
     "system_whitelist": [
         "客户联系", "学习园地", "行业资讯", "邮件提醒", "管理企业",
         "腾讯云客服", "企业微信团队", "腾讯云企业服务", "程明现的机器人",
+        "可能的商务伙伴", "一周小结", "接收微信中的工作消息", "客户咨询", "微信客服",
     ],
     "system_keywords": ["团队", "客服", "服务", "提醒", "管理", "联系"],
 }
@@ -155,6 +158,23 @@ class TypeDetectorTests(unittest.TestCase):
         self.assertEqual(self.detector.detect("客户联系"), "system")
         self.assertEqual(self.detector.detect("邮件提醒"), "system")
         self.assertEqual(self.detector.detect("管理企业"), "system")
+
+    def test_six_new_non_chat_entries_are_system(self):
+        for title in (
+            "可能的商务伙伴",
+            "一周小结",
+            "行业资讯",
+            "接收微信中的工作消息",
+            "客户咨询",
+            "微信客服",
+        ):
+            self.assertEqual(self.detector.detect_title(title), "system", title)
+
+    def test_dynamic_customer_consultation_suffix_is_system(self):
+        self.assertEqual(self.detector.detect_title("客户咨询·海峡非营利组织"), "system")
+
+    def test_common_customer_contact_ocr_confusion_is_system(self):
+        self.assertEqual(self.detector.detect_title("客户联糸"), "system")
 
     def test_system_prefix_match(self):
         self.assertEqual(self.detector.detect("腾讯云客服@abc"), "system")
@@ -290,6 +310,13 @@ class StateGuardTests(unittest.TestCase):
             self.guard.should_start_scan(True, "我", 5.0, now - 5.0, now, 0, chat_type="group", group_idle=False)
         )
 
+    def test_recall_system_event_can_enter_scan_gate(self):
+        now = 1000.0
+        self.assertTrue(
+            self.guard.should_start_scan(True, "系统", 2.0, now - 5.0, now, 0, chat_type="personal")
+        )
+        self.assertFalse(self.guard.is_interrupted("系统", False, False, False, True, False))
+
 
 class IdentityTrackerTests(unittest.TestCase):
     def test_update_and_match(self):
@@ -308,6 +335,124 @@ class IdentityTrackerTests(unittest.TestCase):
 
 @unittest.skipIf(Image is None, "PIL 不可用")
 class MainConversationRoutingTests(unittest.TestCase):
+    def test_group_model_generation_does_not_block_monitor_loop(self):
+        import main
+        from group_chat_handler import GroupChatHandler
+
+        app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+        app.settings = SimpleNamespace(wecom_account_name="程正恒", chat_area=SimpleNamespace())
+        app.queue = Queue()
+        app.group_handler = GroupChatHandler(app.settings)
+        app.group_last_handled_msg = ""
+        app.group_generation_lock = threading.Lock()
+        app.group_generation_inflight = False
+        app.pending_group_generation = None
+        app.engine = MagicMock()
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def slow_generate(*_args, **_kwargs):
+            started.set()
+            release.wait(1.0)
+            finished.set()
+            return []
+
+        app.engine.generate.side_effect = slow_generate
+        context = "[发送者] 阳光@微信\n[对方] @程正恒 最新问题"
+        timer = threading.Timer(0.3, release.set)
+        timer.start()
+        begin = time.perf_counter()
+        app._handle_group_chat(SimpleNamespace(), context=context, full=object())
+        elapsed = time.perf_counter() - begin
+
+        self.assertTrue(started.wait(0.5))
+        self.assertLess(elapsed, 0.15)
+        self.assertTrue(finished.wait(1.0))
+
+    def test_group_send_preflight_discards_old_reply_after_latest_event_changes(self):
+        import main
+        from group_chat_handler import GroupChatHandler
+
+        app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+        app.settings = SimpleNamespace(wecom_account_name="程正恒", chat_area=SimpleNamespace())
+        app.group_handler = GroupChatHandler(app.settings)
+        app.ocr = MagicMock()
+        app._read_top_title = MagicMock(return_value="阳光、琳、阿琳")
+        old_message = "@程正恒 旧问题"
+        live_contexts = (
+            "[发送者] 阿琳@微信\n[对方] 大家下午好",
+            "[发送者] 阳光@微信\n[对方] @程正恒 旧问题\n[系统] 来自微信的阳光撤回了一条消息",
+        )
+
+        with (
+            patch("main.WeChatSender._is_target_foreground", return_value=True),
+            patch("capture_ocr._capture_window_bitmap", return_value=object()),
+            patch("capture_ocr._crop_detected_chat_area_with_origin", return_value=(object(), (0, 0))),
+        ):
+            for live_context in live_contexts:
+                with self.subTest(live_context=live_context):
+                    app.ocr.read_image.return_value = live_context
+                    allowed, _reason = app._group_send_preflight_allows(
+                        SimpleNamespace(),
+                        old_message,
+                        "阳光",
+                        "阳光、琳、阿琳",
+                    )
+                    self.assertFalse(allowed)
+
+    def test_same_group_question_can_be_handled_again_after_a_message_boundary(self):
+        import main
+        from group_chat_handler import GroupChatHandler
+
+        app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+        app.settings = SimpleNamespace(wecom_account_name="程正恒", chat_area=SimpleNamespace())
+        app.queue = Queue()
+        app.group_handler = GroupChatHandler(app.settings)
+        app.group_last_handled_msg = ""
+        app._read_top_title = MagicMock(return_value="阳光、琳、阿琳")
+        app._schedule_group_generation = MagicMock()
+        window = SimpleNamespace()
+        mentioned = "[发送者] 阳光@微信\n[对方] @程正恒 同一个问题"
+
+        app._handle_group_chat(window, context=mentioned, full=object())
+        app._handle_group_chat(window, context=mentioned, full=object())
+        app._handle_group_chat(
+            window,
+            context="[发送者] 阿琳@微信\n[对方] 大家下午好",
+            full=object(),
+        )
+        app._handle_group_chat(window, context=mentioned, full=object())
+
+        self.assertEqual(app._schedule_group_generation.call_count, 2)
+
+    def test_group_generation_exception_resets_worker_and_reports_status(self):
+        import main
+        from group_chat_handler import GroupChatHandler
+
+        app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+        app.settings = SimpleNamespace(wecom_account_name="程正恒")
+        app.group_handler = GroupChatHandler(app.settings)
+        app.queue = Queue()
+        app.engine = MagicMock()
+        app.engine.generate.side_effect = RuntimeError("model unavailable")
+        app.group_generation_lock = threading.Lock()
+        app.group_generation_inflight = True
+        app.pending_group_generation = None
+        job = (
+            SimpleNamespace(),
+            "[对方] @程正恒 问题",
+            "@程正恒 问题",
+            "问题",
+            "阳光",
+            "阳光、琳、阿琳",
+        )
+
+        app._group_generation_worker(job)
+
+        self.assertFalse(app.group_generation_inflight)
+        self.assertIn("群聊回复生成异常", app.queue.get_nowait()[1])
+
     def test_monitor_refreshes_conversation_type_before_personal_processing(self):
         import main
 

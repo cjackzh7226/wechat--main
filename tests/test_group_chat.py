@@ -50,6 +50,29 @@ class GroupChatHandlerTests(unittest.TestCase):
             context = f"[对方] {variant}"
             self.assertTrue(self.handler.detect_at_mention(context, ACCOUNT), variant)
 
+    def test_latest_own_message_blocks_older_mention(self):
+        context = "[发送者] 阳光@微信\n[对方] @程正恒 旧问题\n[我] 已经回复"
+        self.assertEqual(self.handler.latest_other_message(context), "")
+        self.assertFalse(self.handler.detect_at_mention(context, ACCOUNT))
+
+    def test_latest_recall_blocks_older_mention(self):
+        context = "[发送者] 阳光@微信\n[对方] @程正恒 旧问题\n[系统] 来自微信的阳光撤回了一条消息"
+        self.assertEqual(self.handler.latest_other_message(context), "")
+        self.assertFalse(self.handler.detect_at_mention(context, ACCOUNT))
+        self.assertEqual(self.handler.latest_role_by_sender(context, ACCOUNT), "系统")
+        self.assertTrue(self.handler.is_chat_idle(context, ACCOUNT))
+
+    def test_latest_non_mention_blocks_older_mention(self):
+        context = (
+            "[发送者] 阳光@微信\n"
+            "[对方] @程正恒 旧问题\n"
+            "[发送者] 阿琳@微信\n"
+            "[对方] 大家下午好"
+        )
+        self.assertEqual(self.handler.latest_other_message(context), "大家下午好")
+        self.assertFalse(self.handler.detect_at_mention(context, ACCOUNT))
+        self.assertTrue(self.handler.is_chat_idle(context, ACCOUNT))
+
     # ---- extract_question ----
     def test_extract_question_basic(self):
         self.assertEqual(
