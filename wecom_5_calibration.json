@@ -40,7 +40,7 @@
     "note": "点击会话行头像区（x=列表区内 18% 处，约工具栏右缘+25px，落在会话行头像），不点红点本身"
   },
   "timing": {
-    "self_stable_seconds": 2.0,
+    "self_stable_seconds": 1.2,
     "scan_interval_seconds": 0.8,
     "switch_wait_seconds": 1.2,
     "user_typing_seconds": 1.5,

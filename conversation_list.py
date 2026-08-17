@@ -34,7 +34,7 @@ _DEFAULT_CALIBRATION: dict = {
     "avatar_grid": {"grid": 3, "boundary_jump_min": 18},
     "click_target": {"avatar_x_ratio": 0.18},
     "timing": {
-        "self_stable_seconds": 2.0,
+        "self_stable_seconds": 1.2,
         "scan_interval_seconds": 0.8,
         "switch_wait_seconds": 1.2,
         "user_typing_seconds": 1.5,
@@ -235,7 +235,7 @@ class ChatStateGuard:
         cal = calibration or load_calibration()
         self.cal = cal
         timing = cal.get("timing", {})
-        self.self_stable_seconds = float(timing.get("self_stable_seconds", 2.0))
+        self.self_stable_seconds = float(timing.get("self_stable_seconds", 1.2))
         self.scan_interval_seconds = float(timing.get("scan_interval_seconds", 0.8))
         self.user_typing_seconds = float(timing.get("user_typing_seconds", 1.5))
 
@@ -252,8 +252,8 @@ class ChatStateGuard:
     ) -> bool:
         """触发扫描列表的条件。
 
-        个人/其他：最新消息为我方发出或撤回系统提示，且持续 2 秒。
-        群聊：我方发出 2 秒；或对方消息没 @ 我（聊天内容无变化）2 秒——都视为可切走。
+        个人/其他：最新消息为我方发出或撤回系统提示，且持续 1.2 秒。
+        群聊：我方发出 1.2 秒；或对方消息没 @ 我（聊天内容无变化）1.2 秒——都视为可切走。
         @ 我（group_idle=False）不触发（要走回复流程）。
         """
         if not managed_enabled:

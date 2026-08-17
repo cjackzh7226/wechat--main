@@ -33,7 +33,7 @@ CAL = {
     "avatar_grid": {"grid": 3, "boundary_jump_min": 18},
     "click_target": {"avatar_x_ratio": 0.18},
     "timing": {
-        "self_stable_seconds": 2.0,
+        "self_stable_seconds": 1.2,
         "scan_interval_seconds": 0.8,
         "switch_wait_seconds": 1.2,
         "user_typing_seconds": 1.5,
@@ -260,7 +260,7 @@ class StateGuardTests(unittest.TestCase):
         self.assertFalse(self.guard.should_start_scan(False, "我", 5.0, 0, now, 0))
         # 最新消息是对方
         self.assertFalse(self.guard.should_start_scan(True, "对方", 5.0, 0, now, 0))
-        # 我方但未持续 2 秒
+        # 我方但未持续 1.2 秒
         self.assertFalse(self.guard.should_start_scan(True, "我", 1.0, 0, now, 0))
         # 扫描间隔未到
         self.assertFalse(self.guard.should_start_scan(True, "我", 5.0, now - 0.5, now, 0))
@@ -268,6 +268,12 @@ class StateGuardTests(unittest.TestCase):
         self.assertFalse(self.guard.should_start_scan(True, "我", 5.0, 0, now, now + 10))
         # 全部满足
         self.assertTrue(self.guard.should_start_scan(True, "我", 5.0, now - 5.0, now, 0))
+
+    def test_stable_chat_starts_red_dot_scan_after_one_point_two_seconds(self):
+        now = 1000.0
+        self.assertEqual(self.guard.self_stable_seconds, 1.2)
+        self.assertFalse(self.guard.should_start_scan(True, "我", 1.19, 0, now, 0))
+        self.assertTrue(self.guard.should_start_scan(True, "我", 1.20, 0, now, 0))
 
     def test_red_dot_scan_interval_is_eight_hundred_milliseconds(self):
         now = 1000.0
