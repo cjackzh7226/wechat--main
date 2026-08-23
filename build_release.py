@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import json
 from pathlib import Path
 
 
@@ -13,6 +14,7 @@ PACKAGE_DIR = DIST_ROOT / APP_NAME
 ZIP_PATH = DIST_ROOT / f"{APP_NAME}_便携版.zip"
 REQUIREMENTS = ROOT / "requirements.txt"
 ICON_PATH = ROOT / "assets" / "app_icon_clean.ico"
+RELEASE_SEED_DIR = ROOT / "release_seed" / "user_data"
 
 REQUIRED_IMPORTS = [
     "requests",
@@ -133,6 +135,7 @@ def main() -> None:
 
     _write_release_files()
     _remove_private_data()
+    _copy_release_seed()
     shutil.make_archive(str(ZIP_PATH.with_suffix("")), "zip", DIST_ROOT, APP_NAME)
     print(f"打包完成：{PACKAGE_DIR}")
     print(f"便携压缩包：{ZIP_PATH}")
@@ -171,13 +174,42 @@ def _remove_private_data() -> None:
             target.unlink()
 
 
+def _copy_release_seed() -> None:
+    required_names = ("settings.json", "memory.json", "vector_memory.json")
+    missing = [name for name in required_names if not (RELEASE_SEED_DIR / name).is_file()]
+    if missing:
+        raise RuntimeError(f"完整发布种子缺少文件：{', '.join(missing)}")
+
+    settings = json.loads((RELEASE_SEED_DIR / "settings.json").read_text(encoding="utf-8"))
+    if (
+        settings.get("api_key")
+        or settings.get("vision_api_key")
+        or settings.get("provider_api_keys")
+    ):
+        raise RuntimeError("完整发布种子仍包含 API Key，已阻止打包")
+
+    memory = json.loads((RELEASE_SEED_DIR / "memory.json").read_text(encoding="utf-8"))
+    examples = memory.get("examples", [])
+    if len(examples) < 400 or any(
+        not isinstance(item, dict)
+        or item.get("source") != "enterprise_annual_report_kb"
+        for item in examples
+    ):
+        raise RuntimeError("完整发布种子不是纯企业年报知识库，已阻止打包")
+
+    target = PACKAGE_DIR / "user_data"
+    target.mkdir(parents=True, exist_ok=True)
+    for name in required_names:
+        shutil.copy2(RELEASE_SEED_DIR / name, target / name)
+
+
 def _write_clean_marker() -> None:
     marker = PACKAGE_DIR / "重要说明_首次打开先填APIKey.txt"
     marker.write_text(
-        "这个便携包不包含打包者本机的 API Key、设置、聊天记忆或话术库。\n"
-        "首次打开后，请在右上角“设置”里选择模型公司，并填写自己的 API Key。\n"
-        "Base URL 和模型名会自动填入默认值，普通用户不用修改。\n"
-        "如需风格训练或话术库，请在设置中导入自己的聊天记录或话术表。\n",
+        "这个发布包不包含任何 API Key、聊天记录、运行日志或发送账本。\n"
+        "发布包已内置企业年报知识库和不含密钥的非敏感设置。\n"
+        "首次打开后，请在右上角“设置”里填写自己的 API Key。\n"
+        "Base URL、模型名和现有知识库已经准备好。\n",
         encoding="utf-8-sig",
     )
 
