@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 from types import SimpleNamespace
 
+import build_release
 import float_ui
 import main
 import pytest
@@ -264,6 +265,16 @@ def test_usage_help_matches_direct_candidate_send_without_manual_editor() -> Non
 
     assert "候选右侧“发送”" in usage
     assert all(text not in usage for text in ("点“改”", "手动输入", "下方编辑"))
+
+
+def test_portable_help_matches_approved_candidate_send_and_automation_names() -> None:
+    help_text = build_release.README_TEXT
+
+    assert "候选右侧“发送”" in help_text
+    assert "半自动会自动识别并生成候选" in help_text
+    assert "全自动会自动识别、生成并发送" in help_text
+    assert "主界面右上角“管理话术”" in help_text
+    assert all(text not in help_text for text in ("候选右侧“改”", "下方手动输入框", "全托管"))
 
 
 def _descendants(widget):
