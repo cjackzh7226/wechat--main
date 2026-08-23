@@ -28,9 +28,14 @@ TEXT = {
     "training": "\u8bad\u7ec3\u6a21\u5f0f  i",
     "training_tip": "\u8bad\u7ec3\u6a21\u5f0f\uff1a\u6301\u7eed\u8bc6\u522b\u5f53\u524d\u804a\u5929\uff0c\u53ea\u5b66\u4e60\u4e0a\u4e0b\u6587\u548c\u4f60\u5b9e\u9645\u53d1\u51fa\u7684\u56de\u590d\uff0c\u7528\u6765\u589e\u52a0\u573a\u666f\u8bdd\u672f\u5e93\u3002\u4e0d\u4f1a\u81ea\u52a8\u53d1\u9001\u6d88\u606f\u3002",
     "automation_tip": (
-        "半自动：等同于原来的“自动”已勾选、“全托管”未勾选，只自动识别并生成候选，不自动发送。\n"
-        "全自动：等同于原来的“自动”和“全托管”都已勾选，会自动识别、生成并发送。\n"
+        "半自动：自动识别并生成候选回复，不会自动发送。\n"
+        "全自动：自动识别、生成并自动发送回复。\n"
         "再次选择当前模式即可关闭自动功能。"
+    ),
+    "account_name_tip": (
+        "为什么要填写用户名：群聊中只有消息开头完整 @ 当前企业微信账号时，程序才会处理该问题。\n"
+        "请填写企业微信里显示的完整账号姓名，用于核对 @ 对象、区分群成员和组织回复。\n"
+        "未填写时，群聊自动回复不会启用；该名称只保存在本机。"
     ),
     "replies": "\u5019\u9009\u56de\u590d",
     "reply_source_empty": "来源：未生成",
@@ -160,6 +165,10 @@ COLORS = {
     "selected": "#dff6e9",
 }
 
+DEFAULT_WINDOW_WIDTH = 500
+DEFAULT_WINDOW_HEIGHT = 700
+MIN_WINDOW_WIDTH = 460
+
 
 class ReplyAssistantUI:
     def __init__(self, settings: AppSettings, callbacks: dict) -> None:
@@ -182,8 +191,10 @@ class ReplyAssistantUI:
                 self.root.iconbitmap(str(ico_icon_path))
             except Exception:
                 pass
-        self.root.geometry("440x700+120+120")
-        self.root.minsize(410, 560)
+        self.root.geometry(
+            f"{DEFAULT_WINDOW_WIDTH}x{DEFAULT_WINDOW_HEIGHT}+120+120"
+        )
+        self.root.minsize(MIN_WINDOW_WIDTH, 560)
         self.root.attributes("-topmost", True)
         self.root.configure(bg=COLORS["page"])
 
@@ -310,15 +321,19 @@ class ReplyAssistantUI:
         automation_button = tk.Menubutton(
             automation_group,
             textvariable=self.automation_mode_label_var,
-            bg=COLORS["page"],
-            fg=COLORS["text"],
-            activebackground=COLORS["bubble"],
+            bg=COLORS["green"],
+            fg="white",
+            activebackground=COLORS["green_dark"],
+            activeforeground="white",
             relief="flat",
-            borderwidth=0,
+            borderwidth=1,
             font=("Microsoft YaHei UI", 9, "bold"),
-            highlightthickness=0,
-            padx=8,
-            pady=4,
+            highlightthickness=1,
+            highlightbackground=COLORS["green_dark"],
+            highlightcolor=COLORS["green_dark"],
+            cursor="hand2",
+            padx=12,
+            pady=5,
         )
         self.automation_menu = tk.Menu(automation_button, tearoff=0)
         automation_button.configure(menu=self.automation_menu)
@@ -334,13 +349,16 @@ class ReplyAssistantUI:
         # 当前账号用户名输入行（群聊 @ 识别用）：模式行下方、上下文面板上方
         username_row = tk.Frame(outer, bg=COLORS["page"])
         username_row.pack(fill="x", pady=(0, 6))
-        tk.Label(
+        account_name_label = tk.Label(
             username_row,
-            text="当前账号用户名",
+            text="当前账号用户名  i",
             bg=COLORS["page"],
             fg=COLORS["muted"],
             font=("Microsoft YaHei UI", 9),
-        ).pack(side="left")
+            cursor="question_arrow",
+        )
+        account_name_label.pack(side="left")
+        Tooltip(account_name_label, TEXT["account_name_tip"])
         self.account_name_var = tk.StringVar(value=self.settings.wecom_account_name)
         self.account_name_entry = tk.Entry(
             username_row,

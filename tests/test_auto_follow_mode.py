@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 from types import SimpleNamespace
 
+import float_ui
 import main
 import pytest
 from float_ui import ReplyAssistantUI
@@ -108,6 +109,10 @@ def test_snap_geometry_supports_a_monitor_left_of_the_primary_screen() -> None:
     assert main._parse_geometry(geometry) == (440, 700, -492, 100)
 
 
+def test_dock_follow_refresh_interval_is_fifty_milliseconds() -> None:
+    assert main.DOCK_FOLLOW_INTERVAL_SECONDS == 0.05
+
+
 def test_automation_mode_matches_the_two_legacy_checkbox_states() -> None:
     from automation_mode import (
         FULL_AUTO,
@@ -136,6 +141,22 @@ def test_main_ui_replaces_legacy_auto_and_managed_checkboxes_with_one_menu() -> 
     assert "automation_button = tk.Menubutton" in source
     assert "auto = tk.Checkbutton" not in source
     assert "managed = tk.Checkbutton" not in source
+
+
+def test_automation_help_describes_current_functions_without_legacy_wording() -> None:
+    tip = float_ui.TEXT["automation_tip"]
+
+    assert "半自动：自动识别并生成候选回复，不会自动发送" in tip
+    assert "全自动：自动识别、生成并自动发送回复" in tip
+    assert all(word not in tip for word in ("原来", "之前", "勾选"))
+
+
+def test_default_window_is_wider_and_username_has_hover_help() -> None:
+    source = inspect.getsource(ReplyAssistantUI._build)
+
+    assert float_ui.DEFAULT_WINDOW_WIDTH == 500
+    assert "Tooltip(account_name_label, TEXT[\"account_name_tip\"])" in source
+    assert "为什么" in float_ui.TEXT["account_name_tip"]
 
 
 def test_automation_menu_exposes_exactly_half_and_full_auto(tmp_path) -> None:
@@ -175,6 +196,10 @@ def test_automation_menu_exposes_exactly_half_and_full_auto(tmp_path) -> None:
         )
         menu = automation_button.nametowidget(automation_button.cget("menu"))
 
+        assert automation_button.cget("background") == float_ui.COLORS["green"]
+        assert automation_button.cget("foreground") == "white"
+        assert automation_button.cget("cursor") == "hand2"
+        assert ui.automation_mode_label_var.get().endswith("▾")
         assert [menu.entrycget(index, "label").strip() for index in range(menu.index("end") + 1)] == [
             "半自动",
             "全自动",

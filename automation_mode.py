@@ -35,8 +35,9 @@ def next_automation_mode(current: str, selected: str) -> str:
 
 
 def automation_mode_label(mode: str) -> str:
-    return {
+    label = {
         OFF: "自动模式",
         HALF_AUTO: "半自动",
         FULL_AUTO: "全自动",
     }.get(mode, "自动模式")
+    return f"{label}  ▾"

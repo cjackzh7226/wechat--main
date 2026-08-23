@@ -71,6 +71,8 @@ def _setup_diag_log() -> logging.Logger:
 
 DIAG_LOG = _setup_diag_log()
 
+DOCK_FOLLOW_INTERVAL_SECONDS = 0.05
+
 
 def _diag(*args: object) -> None:
     try:
@@ -265,7 +267,7 @@ class WeChatStyleReplyAssistant:
                 self._dock_follow_once()
             except Exception:
                 pass
-            time.sleep(0.12)
+            time.sleep(DOCK_FOLLOW_INTERVAL_SECONDS)
 
     def _monitor_loop(self) -> None:
         while self.running:
