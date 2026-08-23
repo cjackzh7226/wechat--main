@@ -11,14 +11,14 @@
 #ifndef InstallerOutputDir
   #define InstallerOutputDir "..\dist\release"
 #endif
-#ifndef AppIdSuffix
-  #define AppIdSuffix ""
+#ifndef InstallerAppId
+  #define InstallerAppId "{{D67B9715-251B-4BBE-B2AB-3481CC740C70}"
 #endif
 #define AppPublisher "聊小智"
 #define AppExeName "聊小智.exe"
 
 [Setup]
-AppId={{D67B9715-251B-4BBE-B2AB-3481CC740C70}{#AppIdSuffix}
+AppId={#InstallerAppId}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
