@@ -144,6 +144,7 @@ def test_full_installer_is_not_update_package_and_preserves_existing_user_data()
 
     assert "完整安装包" in script
     assert "更新包" not in script
+    assert '#define AppIdSuffix ""' in script
     assert "ShouldInstallSeedKnowledge" in script
     assert "ShouldInstallSeedSettings" in script
     assert 'user_data\\settings.json"' in script
