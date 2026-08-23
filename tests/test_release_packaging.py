@@ -12,6 +12,7 @@ from tools.prepare_release_seed import ENTERPRISE_KNOWLEDGE_SOURCE, prepare_rele
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_USER_DATA = ROOT / "release_seed" / "user_data"
 FULL_INSTALLER = ROOT / "build" / "聊小智_installer.iss"
+INSTALLER_LANGUAGE = ROOT / "build" / "ChineseSimplified.isl"
 
 
 def _knowledge_item(index: int, source: str = ENTERPRISE_KNOWLEDGE_SOURCE) -> dict[str, str]:
@@ -152,3 +153,10 @@ def test_full_installer_is_not_update_package_and_preserves_existing_user_data()
     assert 'user_data\\vector_memory.json"' in script
     assert "uninsneveruninstall" in script
     assert "credentials.dat" not in script
+
+
+def test_full_installer_chinese_language_file_is_available() -> None:
+    text = INSTALLER_LANGUAGE.read_text(encoding="utf-8-sig")
+
+    assert "Inno Setup version 6.5.0+ Chinese Simplified messages" in text
+    assert "[LangOptions]" in text
