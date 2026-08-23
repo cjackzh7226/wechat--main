@@ -161,8 +161,10 @@ def test_default_window_is_wider_and_username_has_hover_help() -> None:
 
 def test_automation_menu_exposes_exactly_half_and_full_auto(tmp_path) -> None:
     import tkinter as tk
+    from tkinter import scrolledtext
 
     events: list[str] = []
+    sent: list[tuple[str, str]] = []
     callbacks = {
         name: (lambda *_args, **_kwargs: None)
         for name in (
@@ -179,6 +181,7 @@ def test_automation_menu_exposes_exactly_half_and_full_auto(tmp_path) -> None:
         )
     }
     callbacks["automation_mode_changed"] = events.append
+    callbacks["send"] = lambda text, source: sent.append((text, source))
     settings = AppSettings(config_path=tmp_path / "settings.json")
     try:
         ui = ReplyAssistantUI(settings, callbacks)
@@ -210,8 +213,57 @@ def test_automation_menu_exposes_exactly_half_and_full_auto(tmp_path) -> None:
         menu.invoke(1)
         assert (settings.auto_recognize, settings.managed_auto_reply) == (True, True)
         assert events == ["half_auto", "full_auto"]
+
+        ui.set_replies(["这是第一条候选回复"])
+        candidate_buttons = [
+            widget
+            for widget in _descendants(ui.reply_area)
+            if isinstance(widget, tk.Button)
+        ]
+        assert not hasattr(ui, "editor")
+        assert not any(isinstance(widget, scrolledtext.ScrolledText) for widget in _descendants(ui.root))
+        assert [button.cget("text") for button in candidate_buttons] == ["发送"]
+        candidate_buttons[0].invoke()
+        assert sent == [("这是第一条候选回复", "selected_candidate")]
     finally:
         ui.root.destroy()
+
+
+def test_approved_ui_uses_neutral_palette_and_compact_main_sections() -> None:
+    assert float_ui.COLORS == {
+        "page": "#f2f2f1",
+        "panel": "#fafaf9",
+        "input": "#ffffff",
+        "text": "#202321",
+        "muted": "#666b66",
+        "line": "#d5d7d3",
+        "green": "#2f6f52",
+        "green_dark": "#285f46",
+        "green_soft": "#e6eee9",
+        "bubble": "#eeeeec",
+        "selected": "#dfe9e3",
+    }
+    assert float_ui.MODE_CONTROL_FONT_SIZE == 9
+    assert float_ui.MODE_CONTROL_PAD_Y == 3
+    assert float_ui.CONTEXT_CANVAS_HEIGHT == 100
+    assert float_ui.REPLY_CANVAS_HEIGHT >= 280
+
+
+def test_main_ui_keeps_chat_context_and_gives_freed_space_to_candidates() -> None:
+    source = inspect.getsource(ReplyAssistantUI._build)
+
+    assert "self.context_canvas" in source
+    assert "height=CONTEXT_CANVAS_HEIGHT" in source
+    assert "height=REPLY_CANVAS_HEIGHT" in source
+    assert "TEXT[\"manual_reply\"]" not in source
+    assert "self._send_editor" not in source
+
+
+def test_usage_help_matches_direct_candidate_send_without_manual_editor() -> None:
+    usage = float_ui.TEXT["usage_body"]
+
+    assert "候选右侧“发送”" in usage
+    assert all(text not in usage for text in ("点“改”", "手动输入", "下方编辑"))
 
 
 def _descendants(widget):

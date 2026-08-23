@@ -40,14 +40,9 @@ TEXT = {
     "replies": "\u5019\u9009\u56de\u590d",
     "reply_source_empty": "来源：未生成",
     "regen": "\u91cd\u65b0\u751f\u6210\u56de\u590d",
-    "copy": "\u590d\u5236\u56de\u590d",
-    "send": "发送到当前聊天",
-    "send_short": "\u53d1",
-    "edit_short": "\u6539",
-    "manual_reply": "\u624b\u52a8\u8f93\u5165 / \u7f16\u8f91\u540e\u53d1\u9001",
+    "send_short": "发送",
     "empty_title": "\u6ca1\u6709\u5185\u5bb9",
     "empty_body": "\u8bf7\u5148\u9009\u62e9\u6216\u586b\u5199\u4e00\u6761\u56de\u590d\u3002",
-    "copied": "\u5df2\u590d\u5236\u5230\u526a\u8d34\u677f",
     "api_provider": "文本生成接口",
     "api_config": "文本接口配置",
     "api_key": "接口 API Key",
@@ -92,8 +87,8 @@ TEXT = {
         "基础使用：\n"
         "1. 先打开微信并点进一个具体聊天。\n"
         "2. 点“识别当前聊天”，程序会截图、OCR、结合长期记忆生成 3 条回复。\n"
-        "3. 可以点候选右侧“发”直接发送，或点“改”后在下方编辑再发送。\n"
-        "4. 只有成功发送的候选/手动输入内容，才会写入长期记忆。\n\n"
+        "3. 点击候选右侧“发送”，可将该条回复发送到当前聊天。\n"
+        "4. 只有成功发送的候选回复，才会写入长期记忆。\n\n"
         "训练聊天记录：\n"
         "1. 准备 txt 文本，按 A/B 对话格式整理：\n"
         "   A: 对方说的话\n"
@@ -121,8 +116,8 @@ TEXT["usage_body"] = (
     "2. 第一次使用先点右上角“设置”，在“文本接口配置”里选择模型公司，例如 DeepSeek 或 Zhipu。\n"
     "3. 只需要填写自己的 API Key；Base URL 和模型名会随模型公司自动填好，普通用户不用改。\n"
     "4. 保存后回到主界面，点击“识别当前聊天”，程序会截图、OCR，并生成 3 条候选回复。\n"
-    "5. 可以点候选右侧“发”直接发送，或点“改”后在下方编辑再发送。\n"
-    "6. 只有手动确认发送的候选/手动输入内容，才会写入长期记忆；全自动发送不会写入记忆。\n\n"
+    "5. 点击候选右侧“发送”，可将该条回复发送到当前聊天。\n"
+    "6. 只有手动确认发送的候选回复，才会写入长期记忆；全自动发送不会写入记忆。\n\n"
     "回复来源：\n"
     "1. 大模型：只根据当前聊天上下文调用你填写的模型接口生成。\n"
     "2. 话术库：优先从你导入或发送后积累的长期记忆中找相似回复；没有可用数据时会用大模型兜底。\n"
@@ -153,21 +148,26 @@ TEXT["usage_body"] = (
     "4. 如果需要学习自己的话术，对方可以在设置里导入自己的聊天记录训练包。\n"
 )
 COLORS = {
-    "page": "#f2f3f5",
-    "panel": "#ffffff",
-    "text": "#1f2329",
-    "muted": "#6b7280",
-    "line": "#e5e7eb",
-    "green": "#07c160",
-    "green_dark": "#06ad56",
-    "green_soft": "#e8f8ef",
-    "bubble": "#f7f8fa",
-    "selected": "#dff6e9",
+    "page": "#f2f2f1",
+    "panel": "#fafaf9",
+    "input": "#ffffff",
+    "text": "#202321",
+    "muted": "#666b66",
+    "line": "#d5d7d3",
+    "green": "#2f6f52",
+    "green_dark": "#285f46",
+    "green_soft": "#e6eee9",
+    "bubble": "#eeeeec",
+    "selected": "#dfe9e3",
 }
 
 DEFAULT_WINDOW_WIDTH = 500
 DEFAULT_WINDOW_HEIGHT = 700
 MIN_WINDOW_WIDTH = 460
+MODE_CONTROL_FONT_SIZE = 9
+MODE_CONTROL_PAD_Y = 3
+CONTEXT_CANVAS_HEIGHT = 100
+REPLY_CANVAS_HEIGHT = 290
 
 
 class ReplyAssistantUI:
@@ -216,15 +216,14 @@ class ReplyAssistantUI:
         self.reply_cards: list[tk.Frame] = []
 
         self._build()
-        self.root.bind("<Control-Return>", lambda _event: self._send_editor())
         self.root.protocol("WM_DELETE_WINDOW", self._close_requested)
 
     def _build(self) -> None:
-        outer = tk.Frame(self.root, bg=COLORS["page"], padx=11, pady=6)
+        outer = tk.Frame(self.root, bg=COLORS["page"], padx=11, pady=5)
         outer.pack(fill="both", expand=True)
 
         meta = tk.Frame(outer, bg=COLORS["page"])
-        meta.pack(fill="x", pady=(0, 4))
+        meta.pack(fill="x", pady=(0, 3))
         top_line = tk.Frame(meta, bg=COLORS["page"])
         top_line.pack(fill="x")
         tk.Label(
@@ -236,23 +235,22 @@ class ReplyAssistantUI:
             anchor="w",
         ).pack(side="left", fill="x", expand=True)
         # 管理话术入口移到主界面右上角（设置按钮左边）
-        self._ghost_button(
+        self._mini_button(top_line, TEXT["settings"], self.callbacks["settings"]).pack(side="right")
+        self._mini_button(
             top_line,
             TEXT["phrasebook_manager"],
             lambda: self._open_phrasebook_manager(self.root),
-            width=9,
-        ).pack(side="right", padx=(0, 0))
-        self._ghost_button(top_line, TEXT["settings"], self.callbacks["settings"]).pack(side="right", padx=(8, 0))
+        ).pack(side="right", padx=(7, 0))
         activity_row = tk.Frame(
             meta,
             bg=COLORS["green_soft"],
         )
-        activity_row.pack(fill="x", pady=(6, 0), ipady=4)
+        activity_row.pack(fill="x", pady=(4, 0), ipady=3)
         status = tk.Label(
             activity_row,
             textvariable=self.status_var,
             bg=COLORS["green_soft"],
-            fg="#18864b",
+            fg=COLORS["green"],
             font=("Microsoft YaHei UI", 9),
             padx=8,
             anchor="w",
@@ -271,7 +269,7 @@ class ReplyAssistantUI:
         self.progress_label.pack(side="right", fill="x", expand=True)
 
         action_row = tk.Frame(outer, bg=COLORS["page"])
-        action_row.pack(fill="x", pady=(0, 8))
+        action_row.pack(fill="x", pady=(0, 6))
         self._primary_button(action_row, TEXT["recognize"], self.callbacks["recognize"]).pack(
             side="left", fill="x", expand=True
         )
@@ -279,7 +277,7 @@ class ReplyAssistantUI:
             side="left", padx=(8, 0)
         )
         mode_row = tk.Frame(outer, bg=COLORS["page"])
-        mode_row.pack(fill="x", pady=(0, 8))
+        mode_row.pack(fill="x", pady=(0, 5))
         training_group = tk.Frame(mode_row, bg=COLORS["page"])
         training_group.pack(side="left")
         training = tk.Checkbutton(
@@ -291,13 +289,13 @@ class ReplyAssistantUI:
             fg=COLORS["muted"],
             activebackground=COLORS["page"],
             selectcolor=COLORS["panel"],
-            font=("Microsoft YaHei UI", 10),
-            padx=4,
+            font=("Microsoft YaHei UI", MODE_CONTROL_FONT_SIZE),
+            padx=2,
         )
         training.pack(side="left")
         Tooltip(training, TEXT["training_tip"])
         source_group = tk.Frame(mode_row, bg=COLORS["page"])
-        source_group.pack(side="left", padx=(12, 0))
+        source_group.pack(side="left", padx=(9, 0))
         source_button = tk.Menubutton(
             source_group,
             text=f"{TEXT['reply_source_mode']}  ▾",
@@ -306,10 +304,12 @@ class ReplyAssistantUI:
             activebackground=COLORS["bubble"],
             relief="flat",
             borderwidth=0,
-            font=("Microsoft YaHei UI", 9),
-            highlightthickness=0,
-            padx=8,
-            pady=4,
+            font=("Microsoft YaHei UI", MODE_CONTROL_FONT_SIZE),
+            highlightthickness=1,
+            highlightbackground=COLORS["line"],
+            highlightcolor=COLORS["line"],
+            padx=7,
+            pady=MODE_CONTROL_PAD_Y,
         )
         self.source_menu = tk.Menu(source_button, tearoff=0)
         self._refresh_source_menu()
@@ -317,7 +317,7 @@ class ReplyAssistantUI:
         source_button.pack(side="left")
         Tooltip(source_button, TEXT["reply_source_tip"])
         automation_group = tk.Frame(mode_row, bg=COLORS["page"])
-        automation_group.pack(side="right", padx=(8, 0))
+        automation_group.pack(side="right", padx=(7, 0))
         automation_button = tk.Menubutton(
             automation_group,
             textvariable=self.automation_mode_label_var,
@@ -327,13 +327,13 @@ class ReplyAssistantUI:
             activeforeground="white",
             relief="flat",
             borderwidth=1,
-            font=("Microsoft YaHei UI", 9, "bold"),
+            font=("Microsoft YaHei UI", MODE_CONTROL_FONT_SIZE, "bold"),
             highlightthickness=1,
             highlightbackground=COLORS["green_dark"],
             highlightcolor=COLORS["green_dark"],
             cursor="hand2",
-            padx=12,
-            pady=5,
+            padx=10,
+            pady=MODE_CONTROL_PAD_Y,
         )
         self.automation_menu = tk.Menu(automation_button, tearoff=0)
         automation_button.configure(menu=self.automation_menu)
@@ -341,14 +341,9 @@ class ReplyAssistantUI:
         automation_button.pack(side="left")
         Tooltip(automation_button, TEXT["automation_tip"])
 
-        bottom = tk.Frame(outer, bg=COLORS["page"])
-        bottom.pack(side="bottom", fill="x", pady=(4, 0))
-        self._ghost_button(bottom, TEXT["copy"], self._copy_editor).pack(side="left", fill="x", expand=True, padx=(0, 8))
-        self._primary_button(bottom, TEXT["send"], self._send_editor).pack(side="right", fill="x", expand=True)
-
         # 当前账号用户名输入行（群聊 @ 识别用）：模式行下方、上下文面板上方
         username_row = tk.Frame(outer, bg=COLORS["page"])
-        username_row.pack(fill="x", pady=(0, 6))
+        username_row.pack(fill="x", pady=(0, 5))
         account_name_label = tk.Label(
             username_row,
             text="当前账号用户名  i",
@@ -364,9 +359,13 @@ class ReplyAssistantUI:
             username_row,
             textvariable=self.account_name_var,
             relief="flat",
-            bg="white",
+            bg=COLORS["input"],
             fg=COLORS["text"],
             font=("Microsoft YaHei UI", 10),
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=COLORS["line"],
+            highlightcolor=COLORS["green"],
         )
         self.account_name_entry.pack(side="left", fill="x", expand=True, padx=(10, 0), ipady=4)
         self.account_name_entry.bind("<FocusOut>", self._save_account_name)
@@ -384,7 +383,7 @@ class ReplyAssistantUI:
         context_wrap.pack(fill="both", expand=True, padx=12, pady=(0, 8))
         self.context_canvas = tk.Canvas(
             context_wrap,
-            height=112,
+            height=CONTEXT_CANVAS_HEIGHT,
             bg=COLORS["bubble"],
             highlightthickness=0,
             borderwidth=0,
@@ -422,10 +421,10 @@ class ReplyAssistantUI:
         ).pack(side="right")
         # 候选回复板块：Canvas + 滚动条，支持滚轮查看被窗口遮住的更多候选
         reply_scroll_wrap = tk.Frame(replies_panel, bg=COLORS["panel"])
-        reply_scroll_wrap.pack(fill="x", padx=12)
+        reply_scroll_wrap.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         self.reply_scroll_canvas = tk.Canvas(
             reply_scroll_wrap,
-            height=170,
+            height=REPLY_CANVAS_HEIGHT,
             bg=COLORS["panel"],
             highlightthickness=0,
             borderwidth=0,
@@ -445,23 +444,6 @@ class ReplyAssistantUI:
             lambda event: self.reply_scroll_canvas.itemconfigure(self.reply_canvas_window, width=event.width),
         )
         self.reply_scroll_canvas.bind("<MouseWheel>", self._scroll_replies)
-
-        self._section_title(replies_panel, TEXT["manual_reply"]).pack(anchor="w", padx=12, pady=(5, 5))
-        editor_wrap = tk.Frame(replies_panel, bg=COLORS["bubble"], highlightthickness=1, highlightbackground=COLORS["line"])
-        editor_wrap.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-        self.editor = scrolledtext.ScrolledText(
-            editor_wrap,
-            height=6,
-            wrap="word",
-            font=("Microsoft YaHei UI", 11),
-            bg=COLORS["bubble"],
-            fg=COLORS["text"],
-            relief="flat",
-            borderwidth=0,
-            padx=10,
-            pady=6,
-        )
-        self.editor.pack(fill="both", expand=True)
 
     def _panel(self, parent: tk.Widget) -> tk.Frame:
         return tk.Frame(parent, bg=COLORS["panel"], highlightthickness=1, highlightbackground=COLORS["line"])
@@ -486,6 +468,9 @@ class ReplyAssistantUI:
             activeforeground="white",
             relief="flat",
             borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=COLORS["green_dark"],
+            highlightcolor=COLORS["green_dark"],
             padx=14,
             pady=9,
             width=width or 0,
@@ -507,8 +492,11 @@ class ReplyAssistantUI:
             activeforeground=COLORS["text"],
             relief="flat",
             borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=COLORS["line"],
+            highlightcolor=COLORS["green"],
             padx=12,
-            pady=8,
+            pady=7,
             width=width or 0,
             cursor="hand2",
             font=("Microsoft YaHei UI", 10),
@@ -532,10 +520,13 @@ class ReplyAssistantUI:
             activeforeground=fg,
             relief="flat",
             borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=COLORS["green_dark"] if is_primary else COLORS["line"],
+            highlightcolor=COLORS["green_dark"] if is_primary else COLORS["green"],
             padx=8,
             pady=4,
             cursor="hand2",
-            font=("Microsoft YaHei UI", 9, "bold"),
+            font=("Microsoft YaHei UI", 9),
         )
         button.bind("<Enter>", lambda _e: button.configure(bg=hover_bg))
         button.bind("<Leave>", lambda _e: button.configure(bg=normal_bg))
@@ -817,7 +808,6 @@ class ReplyAssistantUI:
             return
         for index, reply in enumerate(replies, 1):
             self._add_reply_card(index, reply, selected=False)
-        self.set_editor("")
 
     def set_reply_source(self, text: str) -> None:
         self.reply_source_var.set(text or TEXT["reply_source_empty"])
@@ -827,7 +817,6 @@ class ReplyAssistantUI:
             child.destroy()
         self.reply_cards.clear()
         self.selected_reply = ""
-        self.set_editor("")
         self.set_reply_source(TEXT["reply_source_empty"])
 
     def _add_reply_card(self, index: int, reply: str, selected: bool) -> None:
@@ -848,13 +837,6 @@ class ReplyAssistantUI:
             width=3,
         )
         number.pack(side="left", padx=(8, 4), pady=9)
-        edit_button = self._mini_button(
-            card,
-            TEXT["edit_short"],
-            lambda value=reply, frame=card: self._edit_reply(value, frame),
-            kind="ghost",
-        )
-        edit_button.pack(side="left", padx=(0, 8), pady=7)
         label = tk.Label(
             card,
             text=reply,
@@ -882,8 +864,6 @@ class ReplyAssistantUI:
 
     def _select_reply(self, text: str, card: tk.Frame) -> None:
         self.selected_reply = text
-        self.set_editor(text)
-        self.editor.focus_set()
         for item in self.reply_cards:
             item.configure(
                 bg=COLORS["selected"] if item is card else COLORS["bubble"],
@@ -892,10 +872,6 @@ class ReplyAssistantUI:
             for child in item.winfo_children():
                 if not isinstance(child, tk.Button):
                     child.configure(bg=item["bg"])
-
-    def _edit_reply(self, text: str, card: tk.Frame) -> None:
-        self._select_reply(text, card)
-        self.editor.mark_set("insert", "end-1c")
 
     def _refresh_card_colors(self) -> None:
         for card in self.reply_cards:
@@ -908,33 +884,12 @@ class ReplyAssistantUI:
                 if not isinstance(child, tk.Button):
                     child.configure(bg=card["bg"])
 
-    def set_editor(self, text: str) -> None:
-        self.editor.delete("1.0", "end")
-        self.editor.insert("1.0", text)
-
-    def editor_text(self) -> str:
-        return self.editor.get("1.0", "end").strip()
-
-    def _send_editor(self) -> None:
-        text = self.editor_text()
-        if not text:
-            messagebox.showwarning(TEXT["empty_title"], TEXT["empty_body"])
-            return
-        source = "selected_candidate" if text == self.selected_reply else "manual_edit"
-        self._send_text(text, source)
-
     def _send_text(self, text: str, source: str) -> None:
         cleaned = text.strip()
         if not cleaned:
             messagebox.showwarning(TEXT["empty_title"], TEXT["empty_body"])
             return
         self.callbacks["send"](cleaned, source)
-
-    def _copy_editor(self) -> None:
-        text = self.editor_text()
-        self.root.clipboard_clear()
-        self.root.clipboard_append(text)
-        self.set_status(TEXT["copied"])
 
     def _close_requested(self) -> None:
         callback = self.callbacks.get("exit")
@@ -1052,13 +1007,15 @@ class ReplyAssistantUI:
         tk.Label(api_detail_frame, text=TEXT["api_provider"], bg=COLORS["page"], fg=COLORS["muted"], anchor="w").pack(fill="x")
         provider_menu = tk.OptionMenu(api_detail_frame, provider_var, *[label for _key, label in provider_items])
         provider_menu.configure(
-            bg=COLORS["panel"],
+            bg=COLORS["input"],
             fg=COLORS["text"],
             activebackground=COLORS["bubble"],
             relief="flat",
             borderwidth=0,
             font=("Microsoft YaHei UI", 10),
-            highlightthickness=0,
+            highlightthickness=1,
+            highlightbackground=COLORS["line"],
+            highlightcolor=COLORS["green"],
         )
         provider_menu.pack(fill="x", ipady=3, pady=(3, 6))
         tk.Label(
@@ -1096,9 +1053,13 @@ class ReplyAssistantUI:
             textvariable=api_var,
             show="*",
             relief="flat",
-            bg=COLORS["panel"],
+            bg=COLORS["input"],
             fg=COLORS["text"],
             font=("Microsoft YaHei UI", 10),
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=COLORS["line"],
+            highlightcolor=COLORS["green"],
         )
         api_entry.pack(side="left", fill="x", expand=True, ipady=7)
 
@@ -1122,9 +1083,13 @@ class ReplyAssistantUI:
                 api_detail_frame,
                 textvariable=var,
                 relief="flat",
-                bg=COLORS["panel"],
+                bg=COLORS["input"],
                 fg=COLORS["text"],
                 font=("Microsoft YaHei UI", 10),
+                borderwidth=0,
+                highlightthickness=1,
+                highlightbackground=COLORS["line"],
+                highlightcolor=COLORS["green"],
             ).pack(fill="x", ipady=7, pady=(3, 10))
 
         for label, var in [
@@ -1136,9 +1101,13 @@ class ReplyAssistantUI:
                 api_detail_frame,
                 textvariable=var,
                 relief="flat",
-                bg=COLORS["panel"],
+                bg=COLORS["input"],
                 fg=COLORS["text"],
                 font=("Microsoft YaHei UI", 10),
+                borderwidth=0,
+                highlightthickness=1,
+                highlightbackground=COLORS["line"],
+                highlightcolor=COLORS["green"],
             ).pack(fill="x", ipady=7, pady=(3, 10))
 
         tk.Label(api_detail_frame, text=TEXT["custom_body"], bg=COLORS["page"], fg=COLORS["muted"], anchor="w").pack(fill="x")
@@ -1148,9 +1117,12 @@ class ReplyAssistantUI:
             wrap="word",
             relief="flat",
             borderwidth=0,
-            bg=COLORS["panel"],
+            bg=COLORS["input"],
             fg=COLORS["text"],
             font=("Microsoft YaHei UI", 9),
+            highlightthickness=1,
+            highlightbackground=COLORS["line"],
+            highlightcolor=COLORS["green"],
             padx=8,
             pady=6,
         )
@@ -1261,13 +1233,15 @@ class ReplyAssistantUI:
             *[label for _key, label in vision_items],
         )
         vision_provider_menu.configure(
-            bg=COLORS["panel"],
+            bg=COLORS["input"],
             fg=COLORS["text"],
             activebackground=COLORS["bubble"],
             relief="flat",
             borderwidth=0,
             font=("Microsoft YaHei UI", 10),
-            highlightthickness=0,
+            highlightthickness=1,
+            highlightbackground=COLORS["line"],
+            highlightcolor=COLORS["green"],
         )
         vision_provider_menu.pack(fill="x", ipady=3, pady=(3, 6))
         tk.Label(
@@ -1299,9 +1273,13 @@ class ReplyAssistantUI:
             textvariable=vision_api_var,
             show="*",
             relief="flat",
-            bg=COLORS["panel"],
+            bg=COLORS["input"],
             fg=COLORS["text"],
             font=("Microsoft YaHei UI", 10),
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=COLORS["line"],
+            highlightcolor=COLORS["green"],
         )
         vision_api_entry.pack(side="left", fill="x", expand=True, ipady=7)
 
@@ -1325,9 +1303,13 @@ class ReplyAssistantUI:
                 vision_detail_frame,
                 textvariable=var,
                 relief="flat",
-                bg=COLORS["panel"],
+                bg=COLORS["input"],
                 fg=COLORS["text"],
                 font=("Microsoft YaHei UI", 10),
+                borderwidth=0,
+                highlightthickness=1,
+                highlightbackground=COLORS["line"],
+                highlightcolor=COLORS["green"],
             ).pack(fill="x", ipady=7, pady=(3, 10))
 
         usage_visible = tk.BooleanVar(value=False)
@@ -1351,9 +1333,12 @@ class ReplyAssistantUI:
             wrap="word",
             relief="flat",
             borderwidth=0,
-            bg=COLORS["panel"],
+            bg=COLORS["input"],
             fg=COLORS["text"],
             font=("Microsoft YaHei UI", 9),
+            highlightthickness=1,
+            highlightbackground=COLORS["line"],
+            highlightcolor=COLORS["green"],
             padx=10,
             pady=8,
         )
@@ -1593,16 +1578,29 @@ class ReplyAssistantUI:
         tk.Label(top, text="话术库", bg=COLORS["page"], fg=COLORS["muted"]).pack(side="left")
         library_menu = tk.OptionMenu(top, library_var, "")
         library_menu.configure(
-            bg="white",
+            bg=COLORS["input"],
             fg=COLORS["text"],
             relief="flat",
-            highlightthickness=0,
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=COLORS["line"],
+            highlightcolor=COLORS["green"],
             activebackground=COLORS["green_soft"],
             width=32,
         )
         library_menu.pack(side="left", padx=(8, 16))
         tk.Label(top, text="测试客户说法", bg=COLORS["page"], fg=COLORS["muted"]).pack(side="left")
-        query_entry = tk.Entry(top, textvariable=query_var, relief="flat", bg="white", fg=COLORS["text"])
+        query_entry = tk.Entry(
+            top,
+            textvariable=query_var,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=COLORS["line"],
+            highlightcolor=COLORS["green"],
+            bg=COLORS["input"],
+            fg=COLORS["text"],
+        )
         query_entry.pack(side="left", fill="x", expand=True, padx=(8, 8), ipady=7)
 
         body = tk.Frame(dialog, bg=COLORS["page"], padx=14, pady=4)
@@ -1619,7 +1617,11 @@ class ReplyAssistantUI:
             list_frame,
             width=36,
             relief="flat",
-            bg="white",
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=COLORS["line"],
+            highlightcolor=COLORS["green"],
+            bg=COLORS["input"],
             fg=COLORS["text"],
             selectbackground=COLORS["green"],
             selectforeground="white",
@@ -1635,10 +1637,32 @@ class ReplyAssistantUI:
         summary = tk.Label(right, textvariable=summary_var, bg=COLORS["page"], fg=COLORS["muted"], anchor="w", justify="left")
         summary.pack(fill="x", pady=(0, 8))
         tk.Label(right, text="匹配上下文 / 客户说法", bg=COLORS["page"], fg=COLORS["text"], anchor="w").pack(fill="x")
-        cue_editor = scrolledtext.ScrolledText(right, height=9, relief="flat", bg="white", fg=COLORS["text"], wrap="word")
+        cue_editor = scrolledtext.ScrolledText(
+            right,
+            height=9,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=COLORS["line"],
+            highlightcolor=COLORS["green"],
+            bg=COLORS["input"],
+            fg=COLORS["text"],
+            wrap="word",
+        )
         cue_editor.pack(fill="both", expand=True, pady=(6, 12))
         tk.Label(right, text="推荐回复", bg=COLORS["page"], fg=COLORS["text"], anchor="w").pack(fill="x")
-        reply_editor = scrolledtext.ScrolledText(right, height=7, relief="flat", bg="white", fg=COLORS["text"], wrap="word")
+        reply_editor = scrolledtext.ScrolledText(
+            right,
+            height=7,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=COLORS["line"],
+            highlightcolor=COLORS["green"],
+            bg=COLORS["input"],
+            fg=COLORS["text"],
+            wrap="word",
+        )
         reply_editor.pack(fill="both", expand=True, pady=(6, 10))
 
         bottom = tk.Frame(dialog, bg=COLORS["page"], padx=14, pady=12)
