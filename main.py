@@ -11,6 +11,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from queue import Empty, Queue
 
+from automation_mode import FULL_AUTO, HALF_AUTO, OFF, automation_flags
 from chat_training import import_chat_zip_to_memory, import_chat_zip_to_memory_with_llm
 from capture_ocr import ChatOCR
 from float_ui import ReplyAssistantUI
@@ -70,6 +71,8 @@ def _setup_diag_log() -> logging.Logger:
 
 DIAG_LOG = _setup_diag_log()
 
+DOCK_FOLLOW_INTERVAL_SECONDS = 0.05
+
 
 def _diag(*args: object) -> None:
     try:
@@ -104,16 +107,15 @@ MSG = {
     "no_window": "请先点进一个微信、企业微信或 QQ 聊天",
     "no_context": "\u8fd8\u6ca1\u6709\u8bc6\u522b\u5230\u804a\u5929\u5185\u5bb9",
     "regenerating": "\u6b63\u5728\u91cd\u65b0\u751f\u6210...",
-    "auto_on": "\u5df2\u5f00\u542f\u81ea\u52a8\u8bc6\u522b\u3002\u5207\u6362\u804a\u5929\u540e\u4f1a\u81ea\u52a8\u751f\u6210\u3002",
-    "auto_off": "\u5df2\u5173\u95ed\u81ea\u52a8\u8bc6\u522b\u3002\u8bf7\u624b\u52a8\u70b9\u51fb\u8bc6\u522b\u6309\u94ae\u3002",
     "training_on": "\u5df2\u5f00\u542f\u8bad\u7ec3\u6a21\u5f0f\uff1a\u5c06\u6301\u7eed\u5b66\u4e60\u4e0a\u4e0b\u6587\u548c\u4f60\u53d1\u51fa\u7684\u56de\u590d\uff0c\u4e0d\u4f1a\u81ea\u52a8\u53d1\u9001\u3002",
     "training_off": "\u5df2\u5173\u95ed\u8bad\u7ec3\u6a21\u5f0f\u3002",
     "training_learned": "\u8bad\u7ec3\u6a21\u5f0f\u5df2\u5b66\u4e60\u5f53\u524d\u804a\u5929\u4e0a\u4e0b\u6587\u548c\u6211\u65b9\u56de\u590d\u3002",
-    "managed_on": "\u5df2\u5f00\u542f\u5168\u6258\u7ba1\uff1a\u751f\u6210\u540e\u4f1a\u5148\u5ba1\u6838\u8bed\u5883\uff0c\u518d\u81ea\u52a8\u53d1\u9001\u6700\u5408\u9002\u7684\u4e00\u6761\u3002",
-    "managed_off": "\u5df2\u5173\u95ed\u5168\u6258\u7ba1\u3002",
-    "auto_sending": "\u5168\u6258\u7ba1\u5ba1\u6838\u540e\u9009\u4e2d\uff1a{text}",
-    "managed_preflight_blocked": "全托管发送前复核未通过：{reason}",
-    "api_failed_stop_send": "接口未生效，已停止全托管自动发送。请先检查 API Key、额度、模型名或 Base URL。",
+    "half_auto_on": "已开启半自动：自动识别并生成候选回复，不会自动发送。",
+    "full_auto_on": "已开启全自动：自动识别、生成并发送回复。",
+    "automation_off": "已关闭自动功能，请手动点击识别按钮。",
+    "auto_sending": "全自动审核后选中：{text}",
+    "managed_preflight_blocked": "全自动发送前复核未通过：{reason}",
+    "api_failed_stop_send": "接口未生效，已停止全自动发送。请先检查 API Key、额度、模型名或 Base URL。",
     "no_send_window": "没有可发送的聊天窗口",
     "training_imported": "训练包已导入：{files} 个文件，{turns} 轮对话，写入 {examples} 条长期记忆样例。",
 }
@@ -148,6 +150,8 @@ class WeChatStyleReplyAssistant:
         self.managed_last_handled_partner = ""
         self.last_window_key = ""
         self.last_snap_geometry = ""
+        self.dock_target_hwnd = 0
+        self.dock_last_rect_key: tuple[int, int, int, int, int] | None = None
         self.generation_inflight = False
         self.pending_generation: tuple[str, WeChatWindow, list[str]] | None = None
         self.generation_active_turn: list[str] = []
@@ -187,8 +191,7 @@ class WeChatStyleReplyAssistant:
                 "settings": self._open_settings,
                 "recognize": self._recognize_current,
                 "training_changed": self._training_changed,
-                "auto_changed": self._auto_changed,
-                "managed_changed": self._managed_changed,
+                "automation_mode_changed": self._automation_mode_changed,
                 "source_mode_changed": self._source_mode_changed,
                 "regenerate": self._regenerate,
                 "send": self._send,
@@ -207,6 +210,11 @@ class WeChatStyleReplyAssistant:
 
     def start(self) -> None:
         self.ui.set_status(MSG["waiting"] if self.settings.api_key else MSG["no_key"])
+        threading.Thread(
+            target=self._dock_follow_loop,
+            daemon=True,
+            name="wecom-window-follow",
+        ).start()
         threading.Thread(target=self._monitor_loop, daemon=True).start()
         self.ui.root.after(250, self._ui_loop)
         # 首次使用群聊功能：用户名未填写 → 弹提示（UI 线程）
@@ -241,6 +249,25 @@ class WeChatStyleReplyAssistant:
         if getattr(self, "current_chat_type", "personal") == "group":
             return float(self.settings.group_poll_interval_ms)
         return float(self.settings.poll_interval_ms)
+
+    def _dock_follow_once(self) -> None:
+        window = _resolve_dock_follow_window(self.detector, self.dock_target_hwnd)
+        if window is None:
+            return
+        self.dock_target_hwnd = int(window.hwnd)
+        rect_key = _dock_window_rect_key(window)
+        if rect_key == getattr(self, "dock_last_rect_key", None):
+            return
+        self.dock_last_rect_key = rect_key
+        self.queue.put(("dock_window", window))
+
+    def _dock_follow_loop(self) -> None:
+        while self.running:
+            try:
+                self._dock_follow_once()
+            except Exception:
+                pass
+            time.sleep(DOCK_FOLLOW_INTERVAL_SECONDS)
 
     def _monitor_loop(self) -> None:
         while self.running:
@@ -967,11 +994,9 @@ class WeChatStyleReplyAssistant:
                 self.ui.set_partner(MSG["current"].format(title=getattr(data, "display_title", data.title)))
                 if not self.settings.auto_recognize:
                     self.ui.set_status(MSG["manual_ready"])
-                self.last_snap_geometry = _snap_geometry_if_changed(
-                    self.ui.root,
-                    self.detector.snap_geometry(data, self.ui.root.winfo_width(), self.ui.root.winfo_height()),
-                    self.last_snap_geometry,
-                )
+                self._apply_dock_geometry(data)
+            elif kind == "dock_window" and isinstance(data, WeChatWindow):
+                self._apply_dock_geometry(data)
             elif kind == "hide_for_capture":
                 try:
                     self.ui.root.withdraw()
@@ -1000,6 +1025,17 @@ class WeChatStyleReplyAssistant:
                 self._show_bypass_alert(str(data))
         if self.running:
             self.ui.root.after(250, self._ui_loop)
+
+    def _apply_dock_geometry(self, window: WeChatWindow) -> None:
+        self.last_snap_geometry = _snap_geometry_if_changed(
+            self.ui.root,
+            self.detector.snap_geometry(
+                window,
+                self.ui.root.winfo_width(),
+                self.ui.root.winfo_height(),
+            ),
+            self.last_snap_geometry,
+        )
 
     def _show_bypass_alert(self, message: str) -> None:
         """旁路告警：屏幕正中央 + 最上层 + 系统提示音。"""
@@ -1193,15 +1229,37 @@ class WeChatStyleReplyAssistant:
         self.current_window = wechat
         threading.Thread(target=lambda: self._process_window(wechat, force=True), daemon=True).start()
 
-    def _auto_changed(self, enabled: bool) -> None:
+    def _automation_mode_changed(self, mode: str) -> None:
+        auto_recognize, managed_auto_reply = automation_flags(mode)
+        self.settings.auto_recognize = auto_recognize
+        self.settings.managed_auto_reply = managed_auto_reply
         self.current_hash = ""
         self.last_capture = 0.0
-        self.ui.set_status(MSG["auto_on"] if enabled else MSG["auto_off"])
-        if enabled:
-            wechat = self._target_wechat_window()
-            if wechat:
-                self.current_window = wechat
-                threading.Thread(target=lambda: self._process_window(wechat, force=True), daemon=True).start()
+        if managed_auto_reply:
+            self.managed_waiting_for_own_echo = False
+            self.managed_last_handled_turn_messages = []
+            self.managed_last_handled_turn_key = ""
+            self.managed_last_sent_at = 0.0
+            self.managed_last_handled_partner = ""
+        self.settings.save()
+        self.ui.set_status(
+            {
+                HALF_AUTO: MSG["half_auto_on"],
+                FULL_AUTO: MSG["full_auto_on"],
+                OFF: MSG["automation_off"],
+            }[mode]
+        )
+        if not auto_recognize:
+            return
+        wechat = self._target_wechat_window()
+        if not wechat:
+            self.ui.set_status(MSG["no_window"])
+            return
+        self.current_window = wechat
+        threading.Thread(
+            target=lambda: self._process_window(wechat, force=True),
+            daemon=True,
+        ).start()
 
     def _training_changed(self, enabled: bool) -> None:
         self.settings.training_mode = enabled
@@ -1214,27 +1272,6 @@ class WeChatStyleReplyAssistant:
             if wechat:
                 self.current_window = wechat
                 threading.Thread(target=lambda: self._process_window(wechat, force=False), daemon=True).start()
-
-    def _managed_changed(self, enabled: bool) -> None:
-        self.settings.managed_auto_reply = enabled
-        if enabled:
-            self.settings.auto_recognize = True
-            self.last_capture = 0.0
-            self.managed_waiting_for_own_echo = False
-            self.managed_last_handled_turn_messages = []
-            self.managed_last_handled_turn_key = ""
-            self.managed_last_sent_at = 0.0
-            self.managed_last_handled_partner = ""
-        self.settings.save()
-        self.ui.set_status(MSG["managed_on"] if enabled else MSG["managed_off"])
-        if enabled:
-            self.current_hash = ""
-            wechat = self._target_wechat_window()
-            if wechat:
-                self.current_window = wechat
-                threading.Thread(target=lambda: self._process_window(wechat, force=True), daemon=True).start()
-            else:
-                self.ui.set_status(MSG["no_window"])
 
     def _source_mode_changed(self, mode: str) -> None:
         self.settings.reply_source_mode = mode if mode in {"model", "memory", "model_memory"} else "model_memory"
@@ -2091,6 +2128,38 @@ def _window_key(wechat: WeChatWindow) -> str:
     return f"{wechat.hwnd}:{wechat.title}"
 
 
+def _resolve_dock_follow_window(detector: object, last_hwnd: int) -> WeChatWindow | None:
+    """Resolve a fresh window rectangle without requiring WeCom to keep focus."""
+    try:
+        foreground = detector.foreground_chat()
+    except Exception:
+        foreground = None
+    if foreground is not None:
+        return foreground
+    if last_hwnd:
+        try:
+            refreshed = detector.window_from_hwnd(last_hwnd)
+        except Exception:
+            refreshed = None
+        if refreshed is not None:
+            return refreshed
+    try:
+        return detector.any_chat_window()
+    except Exception:
+        return None
+
+
+def _dock_window_rect_key(window: object) -> tuple[int, int, int, int, int]:
+    rect = window.rect
+    return (
+        int(window.hwnd),
+        int(rect.left),
+        int(rect.top),
+        int(rect.right),
+        int(rect.bottom),
+    )
+
+
 def _snap_geometry_if_changed(root, geometry: str, previous: str) -> str:
     if not geometry:
         return previous
@@ -2113,7 +2182,7 @@ def _geometry_close_enough(current: str, previous: str) -> bool:
 
 
 def _parse_geometry(value: str) -> tuple[int, int, int, int] | None:
-    match = re.match(r"^(\d+)x(\d+)\+(-?\d+)\+(-?\d+)$", value or "")
+    match = re.match(r"^(\d+)x(\d+)([+-]\d+)([+-]\d+)$", value or "")
     if not match:
         return None
     return tuple(int(part) for part in match.groups())  # type: ignore[return-value]

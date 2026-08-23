@@ -9,9 +9,11 @@ from settings import ChatArea
 
 
 try:
+    import win32api
     import win32gui
     import win32process
 except Exception:  # pragma: no cover - Windows optional dependency
+    win32api = None
     win32gui = None
     win32process = None
 
@@ -150,15 +152,25 @@ class ChatWindowDetector:
         return ChatWindow(hwnd=hwnd, title=title, rect=rect, platform=platform)
 
     def snap_geometry(self, window: ChatWindow, width: int, height: int) -> str:
+        return snap_geometry_for_work_area(
+            window.rect,
+            width,
+            height,
+            self._work_area_for_window(window.hwnd),
+        )
+
+    @staticmethod
+    def _work_area_for_window(hwnd: int) -> tuple[int, int, int, int]:
+        if win32api is not None:
+            try:
+                monitor = win32api.MonitorFromWindow(int(hwnd), 2)
+                work = win32api.GetMonitorInfo(monitor).get("Work")
+                if work and len(work) == 4:
+                    return tuple(int(value) for value in work)
+            except Exception:
+                pass
         user32 = ctypes.windll.user32
-        screen_w = user32.GetSystemMetrics(0)
-        screen_h = user32.GetSystemMetrics(1)
-        margin = 8
-        x = window.rect.right + margin
-        if x + width > screen_w:
-            x = max(0, window.rect.left - width - margin)
-        y = max(0, min(window.rect.top, screen_h - height - margin))
-        return f"{width}x{height}+{x}+{y}"
+        return (0, 0, int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1)))
 
     def _match_platform(self, hwnd: int, title: str) -> ChatPlatform | None:
         """仅识别企业微信：本应用只针对企业微信使用，微信/QQ 窗口一律不处理。
@@ -216,6 +228,27 @@ class ChatWindowDetector:
 
 WeChatWindow = ChatWindow
 WeChatWindowDetector = ChatWindowDetector
+
+
+def snap_geometry_for_work_area(
+    window_rect: WindowRect,
+    width: int,
+    height: int,
+    work_area: tuple[int, int, int, int],
+    margin: int = 8,
+) -> str:
+    """Place the assistant beside WeCom within the target monitor work area."""
+    work_left, work_top, work_right, work_bottom = work_area
+    x = window_rect.right + margin
+    if x + width > work_right:
+        x = window_rect.left - width - margin
+    max_x = max(work_left, work_right - width)
+    max_y = max(work_top, work_bottom - height - margin)
+    x = max(work_left, min(x, max_x))
+    y = max(work_top, min(window_rect.top, max_y))
+    x_part = f"+{x}" if x >= 0 else str(x)
+    y_part = f"+{y}" if y >= 0 else str(y)
+    return f"{int(width)}x{int(height)}{x_part}{y_part}"
 
 
 def _is_non_chat_popup(title: str) -> bool:

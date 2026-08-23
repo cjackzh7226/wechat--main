@@ -1,0 +1,32 @@
+{
+  "api_provider": "deepseek",
+  "api_key": "",
+  "provider_api_keys": {},
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-v4-flash",
+  "vision_provider": "zhipu",
+  "vision_api_key": "",
+  "vision_base_url": "https://open.bigmodel.cn/api/paas/v4",
+  "vision_model": "glm-4v-flash",
+  "custom_headers": "{\"Authorization\":\"Bearer {api_key}\",\"Content-Type\":\"application/json\"}",
+  "custom_body": "{\"model\":\"{model}\",\"messages\":{messages_json}}",
+  "custom_response_path": "choices.0.message.content",
+  "reply_source_mode": "model_memory",
+  "ocr_engine": "rapidocr",
+  "training_mode": false,
+  "auto_recognize": true,
+  "managed_auto_reply": false,
+  "enable_web_search": true,
+  "search_max_results": 3,
+  "auto_reply_delay_seconds": 1.2,
+  "poll_interval_ms": 800,
+  "capture_cooldown_seconds": 0.8,
+  "wecom_account_name": "程正恒",
+  "group_poll_interval_ms": 500,
+  "chat_area": {
+    "x_left": 0.31,
+    "x_right": 0.98,
+    "y_top": 0.09,
+    "y_bottom": 0.91
+  }
+}

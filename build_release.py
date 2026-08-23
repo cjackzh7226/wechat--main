@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import json
 from pathlib import Path
 
 
@@ -13,6 +14,7 @@ PACKAGE_DIR = DIST_ROOT / APP_NAME
 ZIP_PATH = DIST_ROOT / f"{APP_NAME}_便携版.zip"
 REQUIREMENTS = ROOT / "requirements.txt"
 ICON_PATH = ROOT / "assets" / "app_icon_clean.ico"
+RELEASE_SEED_DIR = ROOT / "release_seed" / "user_data"
 
 REQUIRED_IMPORTS = [
     "requests",
@@ -64,9 +66,9 @@ README_TEXT = """聊小智 - 便携版使用说明
 
 三、基本使用
 1. 手动模式：点“识别当前聊天”，程序会截图、OCR，并生成 3 条候选回复。
-2. 点候选右侧“改”可以编辑；点“发”会发送到当前聊天。
-3. 下方手动输入框也可以自己写回复并发送。
-4. 只有手动确认发送的候选或手动输入内容，才会写入长期记忆；全托管发送不会写入记忆。
+2. 点候选右侧“发送”，会把该条回复发送到当前聊天。
+3. 半自动会自动识别并生成候选，但不会自动发送；全自动会自动识别、生成并发送。
+4. 只有手动确认发送的候选回复，才会写入长期记忆；全自动发送不会写入记忆。
 
 四、回复来源
 1. 大模型：只调用模型接口，根据当前上下文生成。
@@ -80,7 +82,7 @@ README_TEXT = """聊小智 - 便携版使用说明
    B: 你希望程序学习的回复
 3. 也支持客服宝类 Excel 话术格式：
    一级分类 | 二级分类 | 话术标题 | 话术内容
-4. 在设置里点“话术管理”，选择导入文件或 zip。
+4. 点主界面右上角“管理话术”，选择导入文件或 zip。
 
 六、企业年报知识库
 1. 上传包含“模块”、机构类型列和“问题：…答：…”单元格的年报问答 Excel 时，程序会自动识别为企业年报知识库。
@@ -133,6 +135,7 @@ def main() -> None:
 
     _write_release_files()
     _remove_private_data()
+    _copy_release_seed()
     shutil.make_archive(str(ZIP_PATH.with_suffix("")), "zip", DIST_ROOT, APP_NAME)
     print(f"打包完成：{PACKAGE_DIR}")
     print(f"便携压缩包：{ZIP_PATH}")
@@ -171,13 +174,42 @@ def _remove_private_data() -> None:
             target.unlink()
 
 
+def _copy_release_seed() -> None:
+    required_names = ("settings.json", "memory.json", "vector_memory.json")
+    missing = [name for name in required_names if not (RELEASE_SEED_DIR / name).is_file()]
+    if missing:
+        raise RuntimeError(f"完整发布种子缺少文件：{', '.join(missing)}")
+
+    settings = json.loads((RELEASE_SEED_DIR / "settings.json").read_text(encoding="utf-8"))
+    if (
+        settings.get("api_key")
+        or settings.get("vision_api_key")
+        or settings.get("provider_api_keys")
+    ):
+        raise RuntimeError("完整发布种子仍包含 API Key，已阻止打包")
+
+    memory = json.loads((RELEASE_SEED_DIR / "memory.json").read_text(encoding="utf-8"))
+    examples = memory.get("examples", [])
+    if len(examples) < 400 or any(
+        not isinstance(item, dict)
+        or item.get("source") != "enterprise_annual_report_kb"
+        for item in examples
+    ):
+        raise RuntimeError("完整发布种子不是纯企业年报知识库，已阻止打包")
+
+    target = PACKAGE_DIR / "user_data"
+    target.mkdir(parents=True, exist_ok=True)
+    for name in required_names:
+        shutil.copy2(RELEASE_SEED_DIR / name, target / name)
+
+
 def _write_clean_marker() -> None:
     marker = PACKAGE_DIR / "重要说明_首次打开先填APIKey.txt"
     marker.write_text(
-        "这个便携包不包含打包者本机的 API Key、设置、聊天记忆或话术库。\n"
-        "首次打开后，请在右上角“设置”里选择模型公司，并填写自己的 API Key。\n"
-        "Base URL 和模型名会自动填入默认值，普通用户不用修改。\n"
-        "如需风格训练或话术库，请在设置中导入自己的聊天记录或话术表。\n",
+        "这个发布包不包含任何 API Key、聊天记录、运行日志或发送账本。\n"
+        "发布包已内置企业年报知识库和不含密钥的非敏感设置。\n"
+        "首次打开后，请在右上角“设置”里填写自己的 API Key。\n"
+        "Base URL、模型名和现有知识库已经准备好。\n",
         encoding="utf-8-sig",
     )
 
