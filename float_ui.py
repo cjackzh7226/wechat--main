@@ -6,6 +6,14 @@ import webbrowser
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from pathlib import Path
 
+from automation_mode import (
+    FULL_AUTO,
+    HALF_AUTO,
+    automation_flags,
+    automation_mode,
+    automation_mode_label,
+    next_automation_mode,
+)
 from llm_clients import provider_defaults, provider_labels, supported_provider_help
 from settings import AppSettings
 
@@ -19,10 +27,11 @@ TEXT = {
     "recognize": "\u8bc6\u522b\u5f53\u524d\u804a\u5929",
     "training": "\u8bad\u7ec3\u6a21\u5f0f  i",
     "training_tip": "\u8bad\u7ec3\u6a21\u5f0f\uff1a\u6301\u7eed\u8bc6\u522b\u5f53\u524d\u804a\u5929\uff0c\u53ea\u5b66\u4e60\u4e0a\u4e0b\u6587\u548c\u4f60\u5b9e\u9645\u53d1\u51fa\u7684\u56de\u590d\uff0c\u7528\u6765\u589e\u52a0\u573a\u666f\u8bdd\u672f\u5e93\u3002\u4e0d\u4f1a\u81ea\u52a8\u53d1\u9001\u6d88\u606f\u3002",
-    "auto": "\u81ea\u52a8  i",
-    "managed": "\u5168\u6258\u7ba1  i",
-    "auto_tip": "自动识别：当你切换微信、企业微信或 QQ 聊天时，程序会自动截图 OCR 并生成候选回复。适合 OCR 稳定后再开。",
-    "managed_tip": "\u5168\u6258\u7ba1\uff1a\u81ea\u52a8\u8bc6\u522b\u5f53\u524d\u804a\u5929\uff0c\u751f\u62103\u6761\u5019\u9009\u540e\u5148\u5ba1\u6838\u4e0a\u4e0b\u6587\u548c\u8bed\u5883\uff0c\u518d\u53d1\u9001\u6700\u5408\u9002\u7684\u4e00\u6761\u3002\u5168\u6258\u7ba1\u53d1\u9001\u4e0d\u5199\u5165\u8bb0\u5fc6\uff0c\u5efa\u8bae OCR \u7a33\u5b9a\u540e\u518d\u5f00\u3002",
+    "automation_tip": (
+        "半自动：等同于原来的“自动”已勾选、“全托管”未勾选，只自动识别并生成候选，不自动发送。\n"
+        "全自动：等同于原来的“自动”和“全托管”都已勾选，会自动识别、生成并发送。\n"
+        "再次选择当前模式即可关闭自动功能。"
+    ),
     "replies": "\u5019\u9009\u56de\u590d",
     "reply_source_empty": "来源：未生成",
     "regen": "\u91cd\u65b0\u751f\u6210\u56de\u590d",
@@ -108,7 +117,7 @@ TEXT["usage_body"] = (
     "3. 只需要填写自己的 API Key；Base URL 和模型名会随模型公司自动填好，普通用户不用改。\n"
     "4. 保存后回到主界面，点击“识别当前聊天”，程序会截图、OCR，并生成 3 条候选回复。\n"
     "5. 可以点候选右侧“发”直接发送，或点“改”后在下方编辑再发送。\n"
-    "6. 只有手动确认发送的候选/手动输入内容，才会写入长期记忆；全托管发送不会写入记忆。\n\n"
+    "6. 只有手动确认发送的候选/手动输入内容，才会写入长期记忆；全自动发送不会写入记忆。\n\n"
     "回复来源：\n"
     "1. 大模型：只根据当前聊天上下文调用你填写的模型接口生成。\n"
     "2. 话术库：优先从你导入或发送后积累的长期记忆中找相似回复；没有可用数据时会用大模型兜底。\n"
@@ -182,8 +191,14 @@ class ReplyAssistantUI:
         self.status_var = tk.StringVar(value=TEXT["starting"])
         self.progress_var = tk.StringVar(value="")
         self.training_var = tk.BooleanVar(value=self.settings.training_mode)
-        self.auto_var = tk.BooleanVar(value=self.settings.auto_recognize)
-        self.managed_var = tk.BooleanVar(value=self.settings.managed_auto_reply)
+        initial_automation_mode = automation_mode(
+            self.settings.auto_recognize,
+            self.settings.managed_auto_reply,
+        )
+        self.automation_mode_var = tk.StringVar(value=initial_automation_mode)
+        self.automation_mode_label_var = tk.StringVar(
+            value=automation_mode_label(initial_automation_mode)
+        )
         self.source_mode_var = tk.StringVar(value=self.settings.reply_source_mode)
         self.source_mode_label_var = tk.StringVar(value=self._source_mode_short_label(self.settings.reply_source_mode))
         self.selected_reply = ""
@@ -290,38 +305,26 @@ class ReplyAssistantUI:
         source_button.configure(menu=self.source_menu)
         source_button.pack(side="left")
         Tooltip(source_button, TEXT["reply_source_tip"])
-        auto_group = tk.Frame(mode_row, bg=COLORS["page"])
-        auto_group.pack(side="right", padx=(8, 0))
-        auto = tk.Checkbutton(
-            auto_group,
-            text=TEXT["auto"],
-            variable=self.auto_var,
-            command=self._toggle_auto,
+        automation_group = tk.Frame(mode_row, bg=COLORS["page"])
+        automation_group.pack(side="right", padx=(8, 0))
+        automation_button = tk.Menubutton(
+            automation_group,
+            textvariable=self.automation_mode_label_var,
             bg=COLORS["page"],
-            fg=COLORS["muted"],
-            activebackground=COLORS["page"],
-            selectcolor=COLORS["panel"],
-            font=("Microsoft YaHei UI", 10),
-            padx=4,
+            fg=COLORS["text"],
+            activebackground=COLORS["bubble"],
+            relief="flat",
+            borderwidth=0,
+            font=("Microsoft YaHei UI", 9, "bold"),
+            highlightthickness=0,
+            padx=8,
+            pady=4,
         )
-        auto.pack(side="left")
-        Tooltip(auto, TEXT["auto_tip"])
-        managed_group = tk.Frame(mode_row, bg=COLORS["page"])
-        managed_group.pack(side="right", padx=(4, 0))
-        managed = tk.Checkbutton(
-            managed_group,
-            text=TEXT["managed"],
-            variable=self.managed_var,
-            command=self._toggle_managed,
-            bg=COLORS["page"],
-            fg=COLORS["muted"],
-            activebackground=COLORS["page"],
-            selectcolor=COLORS["panel"],
-            font=("Microsoft YaHei UI", 10),
-            padx=4,
-        )
-        managed.pack(side="left")
-        Tooltip(managed, TEXT["managed_tip"])
+        self.automation_menu = tk.Menu(automation_button, tearoff=0)
+        automation_button.configure(menu=self.automation_menu)
+        self._refresh_automation_menu()
+        automation_button.pack(side="left")
+        Tooltip(automation_button, TEXT["automation_tip"])
 
         bottom = tk.Frame(outer, bg=COLORS["page"])
         bottom.pack(side="bottom", fill="x", pady=(4, 0))
@@ -533,26 +536,41 @@ class ReplyAssistantUI:
         Tooltip(label, tip)
         return label
 
-    def _toggle_auto(self) -> None:
-        enabled = bool(self.auto_var.get())
-        self.settings.auto_recognize = enabled
-        self.settings.save()
-        self.callbacks["auto_changed"](enabled)
-
     def _toggle_training(self) -> None:
         enabled = bool(self.training_var.get())
         self.settings.training_mode = enabled
         self.settings.save()
         self.callbacks["training_changed"](enabled)
 
-    def _toggle_managed(self) -> None:
-        enabled = bool(self.managed_var.get())
-        self.settings.managed_auto_reply = enabled
-        if enabled:
-            self.settings.auto_recognize = True
-            self.auto_var.set(True)
+    def _set_automation_mode(self, selected: str) -> None:
+        current = automation_mode(
+            self.settings.auto_recognize,
+            self.settings.managed_auto_reply,
+        )
+        mode = next_automation_mode(current, selected)
+        auto_recognize, managed_auto_reply = automation_flags(mode)
+        self.settings.auto_recognize = auto_recognize
+        self.settings.managed_auto_reply = managed_auto_reply
+        self.automation_mode_var.set(mode)
+        self.automation_mode_label_var.set(automation_mode_label(mode))
         self.settings.save()
-        self.callbacks["managed_changed"](enabled)
+        self._refresh_automation_menu()
+        self.callbacks["automation_mode_changed"](mode)
+
+    def _refresh_automation_menu(self) -> None:
+        if not hasattr(self, "automation_menu"):
+            return
+        current = automation_mode(
+            self.settings.auto_recognize,
+            self.settings.managed_auto_reply,
+        )
+        self.automation_menu.delete(0, "end")
+        for value, label in ((HALF_AUTO, "半自动"), (FULL_AUTO, "全自动")):
+            prefix = "✓ " if value == current else "   "
+            self.automation_menu.add_command(
+                label=f"{prefix}{label}",
+                command=lambda selected=value: self._set_automation_mode(selected),
+            )
 
     def _toggle_source_mode(self) -> None:
         mode = self._source_mode_value(self.source_mode_label_var.get())
