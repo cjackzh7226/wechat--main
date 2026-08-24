@@ -12,6 +12,7 @@ from tools.prepare_release_seed import ENTERPRISE_KNOWLEDGE_SOURCE, prepare_rele
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_USER_DATA = ROOT / "release_seed" / "user_data"
 FULL_INSTALLER = ROOT / "build" / "聊小智_installer.iss"
+UPDATE_INSTALLER = ROOT / "build" / "聊小智_update_installer.iss"
 INSTALLER_LANGUAGE = ROOT / "build" / "ChineseSimplified.isl"
 
 
@@ -160,3 +161,19 @@ def test_full_installer_chinese_language_file_is_available() -> None:
 
     assert "Inno Setup version 6.5.0+ Chinese Simplified messages" in text
     assert "[LangOptions]" in text
+
+
+def test_update_installer_accepts_isolated_release_parameters() -> None:
+    script = UPDATE_INSTALLER.read_text(encoding="utf-8-sig")
+
+    for name in (
+        "AppVersion",
+        "AppVersionNumeric",
+        "PackageSource",
+        "InstallerOutputDir",
+        "InstallerAppId",
+    ):
+        assert f"#ifndef {name}" in script
+    assert "AppId={#InstallerAppId}" in script
+    assert "OutputDir={#InstallerOutputDir}" in script
+    assert 'Source: "{#PackageSource}\\*"' in script

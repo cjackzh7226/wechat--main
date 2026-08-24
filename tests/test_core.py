@@ -4999,7 +4999,8 @@ class BuildReleaseTests(unittest.TestCase):
         script_path = Path(__file__).resolve().parents[1] / "build" / "聊小智_update_installer.iss"
         script = script_path.read_text(encoding="utf-8")
 
-        self.assertIn("AppId={{D67B9715-251B-4BBE-B2AB-3481CC740C70}", script)
+        self.assertIn('#define InstallerAppId "{{D67B9715-251B-4BBE-B2AB-3481CC740C70}"', script)
+        self.assertIn("AppId={#InstallerAppId}", script)
         self.assertIn("OutputBaseFilename=聊小智_更新包_{#AppVersion}", script)
         self.assertIn('Excludes: "user_data\\*"', script)
         self.assertIn('Name: "{app}\\user_data"; Flags: uninsneveruninstall', script)
