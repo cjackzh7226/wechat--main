@@ -440,14 +440,25 @@ def _detect_chat_right_boundary(
     if platform_key != "wecom":
         return None
     width, height = image.size
-    scan_left = max(int(width * 0.60), int(left) + int(width * 0.30))
+    # 侧栏宽度会随窗口宽度和 DPI 改变，不能假定分隔线永远位于整窗
+    # 60% 之后。只排除左侧导航/会话列表，从当前聊天区前半段开始扫描。
+    # 即使左边界检测受到极窄布局干扰，也保留在其右侧重新发现侧栏的机会。
+    scan_left = max(int(left) + 1, int(width * 0.45))
     scan_right = min(int(fallback_right), int(width * 0.97))
     if scan_right - scan_left < 2:
         return None
+    return _detect_neutral_vertical_divider(image, scan_left, scan_right)
+
+
+def _detect_neutral_vertical_divider(image, scan_left: int, scan_right: int) -> int | None:
+    """Return the first durable neutral divider inside a dynamic horizontal range."""
+    _width, height = image.size
     hits: list[int] = []
+    strong_single_pixel_hits: list[int] = []
     for x in range(scan_left, scan_right):
         total = 0
         divider = 0
+        contrasting_divider = 0
         for y in range(int(height * 0.12), int(height * 0.96), 4):
             r, g, b = image.getpixel((x, y))[:3]
             total += 1
@@ -458,12 +469,35 @@ def _detect_chat_right_boundary(
                 and max(r, g, b) - min(r, g, b) <= 8
             ):
                 divider += 1
-        if total and divider / total >= 0.82:
+                offset = 3
+                left_pixel = image.getpixel((max(0, x - offset), y))[:3]
+                right_pixel = image.getpixel((min(image.width - 1, x + offset), y))[:3]
+                left_delta = sum(abs(channel - neighbor) for channel, neighbor in zip((r, g, b), left_pixel)) / 3
+                right_delta = sum(abs(channel - neighbor) for channel, neighbor in zip((r, g, b), right_pixel)) / 3
+                center_brightness = (r + g + b) / 3
+                left_brightness = sum(left_pixel) / 3
+                right_brightness = sum(right_pixel) / 3
+                if (
+                    max(left_delta, right_delta) >= 3.0
+                    and center_brightness + 1.0 <= min(left_brightness, right_brightness)
+                ):
+                    contrasting_divider += 1
+        if not total:
+            continue
+        divider_ratio = divider / total
+        contrast_ratio = contrasting_divider / total
+        if divider_ratio >= 0.82 and contrast_ratio >= 0.70:
             hits.append(x)
+        # 企业微信 4.x 的群公告/群成员侧栏在部分 DPI 与主题下只有一列
+        # 物理像素宽。此时不能继续要求相邻两列同时命中；但单列必须几乎
+        # 贯穿整个消息区域，避免把气泡边缘或普通文字竖线误判成侧栏边界。
+        if divider_ratio >= 0.96 and contrast_ratio >= 0.70:
+            strong_single_pixel_hits.append(x)
+    candidates = list(strong_single_pixel_hits)
     for index in range(1, len(hits)):
         if hits[index] == hits[index - 1] + 1:
-            return hits[index - 1]
-    return None
+            candidates.append(hits[index - 1])
+    return min(candidates) if candidates else None
 
 
 def _detect_chat_left_boundary(image, platform_key: str) -> int | None:
@@ -471,7 +505,22 @@ def _detect_chat_left_boundary(image, platform_key: str) -> int | None:
         return None
     width, height = image.size
     min_x = max(80, int(width * 0.08))
-    max_x = min(int(width * 0.55), width - 80)
+    if platform_key == "wecom":
+        # 企业微信的导航/会话列表与聊天区之间也有稳定纵向分隔线。
+        # 优先识别真实分隔线，使左侧列表保持固定像素宽或随窗口缩放时
+        # 都能得到正确聊天起点；取最左命中可避开更靠右的群详情栏。
+        divider = _detect_neutral_vertical_divider(
+            image,
+            min_x,
+            min(int(width * 0.55), width - 80),
+        )
+        if divider is not None:
+            return divider
+    # 企业微信的左侧导航与会话列表位于窗口左半区。群详情栏在窄窗下
+    # 可能移动到 55% 以内；若继续扫描到那里，会把群详情栏误判成聊天
+    # 左边界。其他平台保留原有范围。
+    max_ratio = 0.45 if platform_key == "wecom" else 0.55
+    max_x = min(int(width * max_ratio), width - 80)
     if max_x <= min_x:
         return None
 
