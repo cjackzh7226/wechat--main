@@ -17,10 +17,12 @@ class _Detector:
         self.foreground = foreground
         self.refreshed = refreshed
         self.discovered = discovered
+        self.foreground_calls = 0
         self.refreshed_hwnds: list[int] = []
         self.any_calls = 0
 
     def foreground_chat(self):
+        self.foreground_calls += 1
         return self.foreground
 
     def window_from_hwnd(self, hwnd: int):
@@ -128,12 +130,39 @@ def test_automation_mode_matches_the_two_legacy_checkbox_states() -> None:
     assert automation_mode(True, True) == FULL_AUTO
 
 
-def test_selecting_current_automation_mode_again_turns_it_off() -> None:
+def test_automation_mode_menu_has_an_explicit_off_choice() -> None:
     from automation_mode import FULL_AUTO, HALF_AUTO, OFF, next_automation_mode
 
+    assert next_automation_mode(FULL_AUTO, OFF) == OFF
     assert next_automation_mode(OFF, HALF_AUTO) == HALF_AUTO
     assert next_automation_mode(HALF_AUTO, FULL_AUTO) == FULL_AUTO
-    assert next_automation_mode(FULL_AUTO, FULL_AUTO) == OFF
+    assert next_automation_mode(FULL_AUTO, FULL_AUTO) == FULL_AUTO
+
+
+def test_off_mode_monitor_loop_sleeps_without_window_or_ocr_polling(monkeypatch) -> None:
+    detector = _Detector(foreground=object(), discovered=object())
+    app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+    app.running = True
+    app.detector = detector
+    app.settings = SimpleNamespace(
+        auto_recognize=False,
+        training_mode=False,
+        managed_auto_reply=False,
+    )
+    app._poll_interval = lambda: 800.0
+    sleeps: list[float] = []
+
+    def sleep_once(seconds: float) -> None:
+        sleeps.append(seconds)
+        app.running = False
+
+    monkeypatch.setattr(main.time, "sleep", sleep_once)
+
+    app._monitor_loop()
+
+    assert detector.foreground_calls == 0
+    assert detector.any_calls == 0
+    assert sleeps == [0.8]
 
 
 def test_main_ui_replaces_legacy_auto_and_managed_checkboxes_with_one_menu() -> None:
@@ -147,6 +176,7 @@ def test_main_ui_replaces_legacy_auto_and_managed_checkboxes_with_one_menu() -> 
 def test_automation_help_describes_current_functions_without_legacy_wording() -> None:
     tip = float_ui.TEXT["automation_tip"]
 
+    assert "关闭：停止 OCR 轮询" in tip
     assert "半自动：自动识别并生成候选回复，不会自动发送" in tip
     assert "全自动：自动识别、生成并自动发送回复" in tip
     assert all(word not in tip for word in ("原来", "之前", "勾选"))
@@ -160,7 +190,7 @@ def test_default_window_is_wider_and_username_has_hover_help() -> None:
     assert "为什么" in float_ui.TEXT["account_name_tip"]
 
 
-def test_automation_menu_exposes_exactly_half_and_full_auto(tmp_path) -> None:
+def test_automation_menu_exposes_off_half_and_full_auto(tmp_path) -> None:
     import tkinter as tk
     from tkinter import scrolledtext
 
@@ -203,17 +233,28 @@ def test_automation_menu_exposes_exactly_half_and_full_auto(tmp_path) -> None:
         assert automation_button.cget("background") == float_ui.COLORS["green"]
         assert automation_button.cget("foreground") == "white"
         assert automation_button.cget("cursor") == "hand2"
-        assert ui.automation_mode_label_var.get().endswith("▾")
-        assert [menu.entrycget(index, "label").strip() for index in range(menu.index("end") + 1)] == [
+        assert ui.automation_mode_label_var.get() == "模式选择  ▾"
+        assert [
+            menu.entrycget(index, "label").replace("✓", "").strip()
+            for index in range(menu.index("end") + 1)
+        ] == [
+            "关闭",
             "半自动",
             "全自动",
         ]
         menu.invoke(0)
-        assert (settings.auto_recognize, settings.managed_auto_reply) == (True, False)
-        assert events == ["half_auto"]
+        assert (settings.auto_recognize, settings.managed_auto_reply) == (False, False)
+        assert settings.training_mode is False
+        assert events == ["off"]
         menu.invoke(1)
+        assert (settings.auto_recognize, settings.managed_auto_reply) == (True, False)
+        assert events == ["off", "half_auto"]
+        menu.invoke(2)
         assert (settings.auto_recognize, settings.managed_auto_reply) == (True, True)
-        assert events == ["half_auto", "full_auto"]
+        assert events == ["off", "half_auto", "full_auto"]
+        menu.invoke(2)
+        assert (settings.auto_recognize, settings.managed_auto_reply) == (True, True)
+        assert events == ["off", "half_auto", "full_auto", "full_auto"]
 
         ui.set_replies(["这是第一条候选回复"])
         candidate_buttons = [
@@ -271,6 +312,7 @@ def test_portable_help_matches_approved_candidate_send_and_automation_names() ->
     help_text = build_release.README_TEXT
 
     assert "候选右侧“发送”" in help_text
+    assert "关闭会停止 OCR 轮询" in help_text
     assert "半自动会自动识别并生成候选" in help_text
     assert "全自动会自动识别、生成并发送" in help_text
     assert "主界面右上角“管理话术”" in help_text
