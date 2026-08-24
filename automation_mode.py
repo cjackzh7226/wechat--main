@@ -28,16 +28,11 @@ def automation_flags(mode: str) -> tuple[bool, bool]:
 
 
 def next_automation_mode(current: str, selected: str) -> str:
-    """Selecting the active menu item again provides the off action."""
-    if selected not in {HALF_AUTO, FULL_AUTO}:
+    """Return the explicitly selected menu mode."""
+    if selected not in AUTOMATION_MODES:
         raise ValueError(f"unknown selectable automation mode: {selected}")
-    return OFF if current == selected else selected
+    return selected
 
 
 def automation_mode_label(mode: str) -> str:
-    label = {
-        OFF: "自动模式",
-        HALF_AUTO: "半自动",
-        FULL_AUTO: "全自动",
-    }.get(mode, "自动模式")
-    return f"{label}  ▾"
+    return "模式选择  ▾"

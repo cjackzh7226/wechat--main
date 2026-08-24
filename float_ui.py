@@ -9,6 +9,7 @@ from pathlib import Path
 from automation_mode import (
     FULL_AUTO,
     HALF_AUTO,
+    OFF,
     automation_flags,
     automation_mode,
     automation_mode_label,
@@ -28,9 +29,10 @@ TEXT = {
     "training": "\u8bad\u7ec3\u6a21\u5f0f  i",
     "training_tip": "\u8bad\u7ec3\u6a21\u5f0f\uff1a\u6301\u7eed\u8bc6\u522b\u5f53\u524d\u804a\u5929\uff0c\u53ea\u5b66\u4e60\u4e0a\u4e0b\u6587\u548c\u4f60\u5b9e\u9645\u53d1\u51fa\u7684\u56de\u590d\uff0c\u7528\u6765\u589e\u52a0\u573a\u666f\u8bdd\u672f\u5e93\u3002\u4e0d\u4f1a\u81ea\u52a8\u53d1\u9001\u6d88\u606f\u3002",
     "automation_tip": (
+        "关闭：停止 OCR 轮询，程序保持休眠，不自动识别、生成或发送。\n"
         "半自动：自动识别并生成候选回复，不会自动发送。\n"
         "全自动：自动识别、生成并自动发送回复。\n"
-        "再次选择当前模式即可关闭自动功能。"
+        "需要恢复时，请重新选择半自动或全自动。"
     ),
     "account_name_tip": (
         "为什么要填写用户名：群聊中只有消息开头完整 @ 当前企业微信账号时，程序才会处理该问题。\n"
@@ -560,6 +562,9 @@ class ReplyAssistantUI:
         auto_recognize, managed_auto_reply = automation_flags(mode)
         self.settings.auto_recognize = auto_recognize
         self.settings.managed_auto_reply = managed_auto_reply
+        if mode == OFF:
+            self.settings.training_mode = False
+            self.training_var.set(False)
         self.automation_mode_var.set(mode)
         self.automation_mode_label_var.set(automation_mode_label(mode))
         self.settings.save()
@@ -574,7 +579,11 @@ class ReplyAssistantUI:
             self.settings.managed_auto_reply,
         )
         self.automation_menu.delete(0, "end")
-        for value, label in ((HALF_AUTO, "半自动"), (FULL_AUTO, "全自动")):
+        for value, label in (
+            (OFF, "关闭"),
+            (HALF_AUTO, "半自动"),
+            (FULL_AUTO, "全自动"),
+        ):
             prefix = "✓ " if value == current else "   "
             self.automation_menu.add_command(
                 label=f"{prefix}{label}",

@@ -74,6 +74,15 @@ DIAG_LOG = _setup_diag_log()
 DOCK_FOLLOW_INTERVAL_SECONDS = 0.05
 
 
+def _ocr_polling_enabled(settings: object) -> bool:
+    """Whether background window detection and OCR work should run."""
+    return bool(
+        getattr(settings, "auto_recognize", False)
+        or getattr(settings, "training_mode", False)
+        or getattr(settings, "managed_auto_reply", False)
+    )
+
+
 def _diag(*args: object) -> None:
     try:
         DIAG_LOG.info(" ".join(str(arg) for arg in args))
@@ -112,7 +121,7 @@ MSG = {
     "training_learned": "\u8bad\u7ec3\u6a21\u5f0f\u5df2\u5b66\u4e60\u5f53\u524d\u804a\u5929\u4e0a\u4e0b\u6587\u548c\u6211\u65b9\u56de\u590d\u3002",
     "half_auto_on": "已开启半自动：自动识别并生成候选回复，不会自动发送。",
     "full_auto_on": "已开启全自动：自动识别、生成并发送回复。",
-    "automation_off": "已关闭自动功能，请手动点击识别按钮。",
+    "automation_off": "已关闭：OCR 轮询已停止，程序保持休眠。需要时可手动识别。",
     "auto_sending": "全自动审核后选中：{text}",
     "managed_preflight_blocked": "全自动发送前复核未通过：{reason}",
     "api_failed_stop_send": "接口未生效，已停止全自动发送。请先检查 API Key、额度、模型名或 Base URL。",
@@ -271,6 +280,9 @@ class WeChatStyleReplyAssistant:
 
     def _monitor_loop(self) -> None:
         while self.running:
+            if not _ocr_polling_enabled(self.settings):
+                time.sleep(self._poll_interval() / 1000)
+                continue
             try:
                 wechat = self.detector.foreground_chat()
                 if not wechat and (
@@ -1233,6 +1245,9 @@ class WeChatStyleReplyAssistant:
         auto_recognize, managed_auto_reply = automation_flags(mode)
         self.settings.auto_recognize = auto_recognize
         self.settings.managed_auto_reply = managed_auto_reply
+        if mode == OFF:
+            self.settings.training_mode = False
+            self.ui.training_var.set(False)
         self.current_hash = ""
         self.last_capture = 0.0
         if managed_auto_reply:
