@@ -445,6 +445,7 @@ def _detect_chat_right_boundary(
     if scan_right - scan_left < 2:
         return None
     hits: list[int] = []
+    strong_single_pixel_hits: list[int] = []
     for x in range(scan_left, scan_right):
         total = 0
         divider = 0
@@ -458,12 +459,21 @@ def _detect_chat_right_boundary(
                 and max(r, g, b) - min(r, g, b) <= 8
             ):
                 divider += 1
-        if total and divider / total >= 0.82:
+        if not total:
+            continue
+        divider_ratio = divider / total
+        if divider_ratio >= 0.82:
             hits.append(x)
+        # 企业微信 4.x 的群公告/群成员侧栏在部分 DPI 与主题下只有一列
+        # 物理像素宽。此时不能继续要求相邻两列同时命中；但单列必须几乎
+        # 贯穿整个消息区域，避免把气泡边缘或普通文字竖线误判成侧栏边界。
+        if divider_ratio >= 0.96:
+            strong_single_pixel_hits.append(x)
+    candidates = list(strong_single_pixel_hits)
     for index in range(1, len(hits)):
         if hits[index] == hits[index - 1] + 1:
-            return hits[index - 1]
-    return None
+            candidates.append(hits[index - 1])
+    return min(candidates) if candidates else None
 
 
 def _detect_chat_left_boundary(image, platform_key: str) -> int | None:
