@@ -1,9 +1,9 @@
 #define AppName "聊小智"
 #ifndef AppVersion
-  #define AppVersion "2026.09.12.2"
+  #define AppVersion "2026.09.12.3"
 #endif
 #ifndef AppVersionNumeric
-  #define AppVersionNumeric "2026.9.12.2"
+  #define AppVersionNumeric "2026.9.12.3"
 #endif
 #ifndef PackageSource
   #define PackageSource "..\dist\聊小智"

@@ -2267,7 +2267,7 @@ class ReplyParsingTests(unittest.TestCase):
         self.assertEqual(result, ["未在当前企业年报知识库中找到对应答案。"])
         self.assertIn("判断不一致", engine.last_source)
 
-    def test_enterprise_judgement_failure_returns_no_answer(self):
+    def test_enterprise_judgement_failure_pauses_reply(self):
         settings = AppSettings(api_key="configured", reply_source_mode="model_memory")
         settings.enable_web_search = False
         tmp = tempfile.TemporaryDirectory()
@@ -2276,11 +2276,11 @@ class ReplyParsingTests(unittest.TestCase):
         memory.learn_from_training_examples(_enterprise_history_lookup_examples("历史报告请到公示页面查询。"))
         engine = ReplyEngine(settings, memory)
 
-        # 判断调用失败（异常/乱码）→ 安全降级为未命中文案，绝不误发
+        # 接口失败不是知识库未命中：暂停回复，并向操作员显示错误。
         with patch("reply_engine.requests.post", side_effect=RuntimeError("timeout")):
             result = engine.generate("[对方] 想查一下之前的年报", "客户")
 
-        self.assertEqual(result, ["未在当前企业年报知识库中找到对应答案。"])
+        self.assertEqual(result, [])
         self.assertIn("判断失败", engine.last_source)
         self.assertIn("timeout", engine.last_error)
 

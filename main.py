@@ -653,13 +653,18 @@ class WeChatStyleReplyAssistant:
             engine_lock = getattr(self, "engine_call_lock", None)
             if engine_lock is None:
                 replies = self.engine.generate(question, "群聊")
+                generation_error = self.engine.last_error
             else:
                 with engine_lock:
                     replies = self.engine.generate(question, "群聊")
+                    generation_error = self.engine.last_error
             lock = getattr(self, "group_generation_lock", None)
             with lock:
                 has_newer_pending = self.pending_group_generation is not None
             if has_newer_pending:
+                return
+            if generation_error:
+                self.queue.put(("status", f"群聊 @ 回复已暂停：{generation_error}"))
                 return
             if not replies:
                 self.queue.put(("status", f"群聊 @ 回复：未找到合适回答（问题：{question[:30]}）"))
