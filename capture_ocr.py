@@ -415,11 +415,17 @@ def _detected_chat_area_box(image, platform_key: str, fallback_area) -> tuple[in
     detected_right = _detect_chat_right_boundary(image, left, right, platform_key)
     if detected_right is not None:
         right = detected_right
-    bottom = _detect_chat_bottom_boundary(image, left, right, platform_key)
+    # 企业微信会随窗口高度动态调整输入框。最新消息可能落在旧的 72%
+    # 固定裁剪线以下，因此先识别横跨聊天区的持续结构变化或分隔线。
+    # 找不到这个强证据时，才沿用旧横线检测和平台兜底比例。
+    input_panel_top = _detect_wecom_input_panel_top(image, left, right) if platform_key == "wecom" else None
+    bottom = input_panel_top
+    if bottom is None:
+        bottom = _detect_chat_bottom_boundary(image, left, right, platform_key)
     fallback_bottom = int(height * fallback_area.y_bottom)
     if bottom is None:
         bottom = fallback_bottom
-    elif platform_key == "wecom" and bottom > fallback_bottom:
+    elif input_panel_top is None and platform_key == "wecom" and bottom > fallback_bottom:
         # 企业微信 4.x 的“输入框分隔线”下方还有工具栏（@全员、表情等按钮），
         # 检测到的线会把工具栏文字包进来，收紧到裁剪比例以内。
         bottom = fallback_bottom
@@ -428,6 +434,134 @@ def _detected_chat_area_box(image, platform_key: str, fallback_area) -> tuple[in
     right = max(left + 1, min(right, width))
     bottom = max(top + 1, min(bottom, height))
     return left, top, right, bottom
+
+
+def _detect_wecom_input_panel_top(image, left: int, right: int) -> int | None:
+    """Find WeCom's responsive input boundary from wide structural evidence."""
+    width, height = image.size
+    left = max(0, min(int(left), width - 2))
+    right = max(left + 1, min(int(right), width))
+    span = right - left
+    if span < 80 or height < 160:
+        return None
+
+    scan_top = int(height * 0.56)
+    scan_bottom = int(height * 0.92)
+    row_step = max(2, height // 400)
+    offset = max(2, height // 300)
+    padding = max(20, int(span * 0.05))
+    x1 = min(right - 1, left + padding)
+    x2 = max(x1 + 1, right - padding)
+    sample_step = max(3, span // 120)
+    xs = range(x1, x2, sample_step)
+    pixels = image.load()
+
+    for y in range(scan_top, scan_bottom, row_step):
+        above_y = max(0, y - offset)
+        below_y = min(height - 1, y + offset)
+        changed = 0
+        total = 0
+        for x in xs:
+            above = pixels[x, above_y][:3]
+            below = pixels[x, below_y][:3]
+            total += 1
+            if _rgb_distance(above, below) >= 4.0:
+                changed += 1
+        if not total:
+            continue
+        # 输入区会让几乎整条聊天宽度一起变化，并在下方持续保持同一底色；
+        # 普通气泡只覆盖局部宽度，无法同时满足这两个条件。
+        if (
+            changed / total >= 0.80
+            and _row_dominant_color_ratio(image, x1, x2, below_y, sample_step) >= 0.85
+            and _panel_background_persists(pixels, xs, below_y, y, height)
+            and _panel_differs_from_message_area(pixels, xs, below_y, y, height)
+        ):
+            return max(int(height * 0.42), y - max(1, row_step * 2))
+
+    # 某些主题的消息区和输入区底色相同，只剩一条横向分隔线。此时要求
+    # 分隔线横跨绝大部分聊天区，且线下仍是持续、均匀的面板背景。
+    for y in range(scan_top, scan_bottom):
+        above_y = max(0, y - offset)
+        below_y = min(height - 1, y + offset)
+        divider = 0
+        total = 0
+        for x in xs:
+            center = pixels[x, y][:3]
+            above = pixels[x, above_y][:3]
+            below = pixels[x, below_y][:3]
+            total += 1
+            if _rgb_distance(center, above) >= 4.0 and _rgb_distance(center, below) >= 4.0:
+                divider += 1
+        if (
+            total
+            and divider / total >= 0.80
+            and _row_dominant_color_ratio(image, x1, x2, y, sample_step) >= 0.85
+            and _row_dominant_color_ratio(image, x1, x2, below_y, sample_step) >= 0.85
+            and _panel_background_persists(pixels, xs, below_y, y, height)
+        ):
+            return max(int(height * 0.42), y - 1)
+    return None
+
+
+def _rgb_distance(first, second) -> float:
+    return sum(abs(int(a) - int(b)) for a, b in zip(first[:3], second[:3])) / 3.0
+
+
+def _panel_background_persists(pixels, xs: range, base_y: int, boundary_y: int, height: int) -> bool:
+    """Require the candidate panel background to continue well below its edge."""
+    sample_xs = tuple(xs)
+    if not sample_xs:
+        return False
+    base = [pixels[x, base_y][:3] for x in sample_xs]
+    stable_bands = 0
+    checked_bands = 0
+    for ratio in (0.04, 0.08, 0.12, 0.16):
+        later_y = min(height - 1, boundary_y + max(12, int(height * ratio)))
+        if later_y <= base_y:
+            continue
+        checked_bands += 1
+        stable = sum(
+            _rgb_distance(color, pixels[x, later_y][:3]) <= 5.0
+            for x, color in zip(sample_xs, base)
+        )
+        if stable / len(sample_xs) >= 0.60:
+            stable_bands += 1
+    return checked_bands >= 3 and stable_bands >= 3
+
+
+def _panel_differs_from_message_area(pixels, xs: range, panel_y: int, boundary_y: int, height: int) -> bool:
+    """Reject a wide bubble edge that merely returns to the chat background."""
+    sample_xs = tuple(xs)
+    if not sample_xs:
+        return False
+    panel = [pixels[x, panel_y][:3] for x in sample_xs]
+    changed_bands = 0
+    checked_bands = 0
+    for ratio in (0.04, 0.10, 0.16):
+        message_y = max(0, boundary_y - max(12, int(height * ratio)))
+        if message_y >= panel_y:
+            continue
+        checked_bands += 1
+        changed = sum(
+            _rgb_distance(color, pixels[x, message_y][:3]) >= 4.0
+            for x, color in zip(sample_xs, panel)
+        )
+        if changed / len(sample_xs) >= 0.70:
+            changed_bands += 1
+    return checked_bands >= 2 and changed_bands >= 2
+
+
+def _row_dominant_color_ratio(image, x1: int, x2: int, y: int, step: int) -> float:
+    buckets: dict[tuple[int, int, int], int] = {}
+    total = 0
+    pixels = image.load()
+    for x in range(x1, x2, step):
+        r, g, b = pixels[x, y][:3]
+        bucket = (int(r) // 8, int(g) // 8, int(b) // 8)
+        buckets[bucket] = buckets.get(bucket, 0) + 1
+        total += 1
+    return max(buckets.values(), default=0) / total if total else 0.0
 
 
 def _detect_chat_right_boundary(

@@ -432,6 +432,28 @@ class MainConversationRoutingTests(unittest.TestCase):
 
         self.assertEqual(app._schedule_group_generation.call_count, 2)
 
+    def test_group_question_with_trailing_mention_enters_the_same_generation_pipeline(self):
+        import main
+        from group_chat_handler import GroupChatHandler
+
+        app = main.WeChatStyleReplyAssistant.__new__(main.WeChatStyleReplyAssistant)
+        app.settings = SimpleNamespace(wecom_account_name="程正恒", chat_area=SimpleNamespace())
+        app.queue = Queue()
+        app.group_handler = GroupChatHandler(app.settings)
+        app.group_last_handled_msg = ""
+        app._read_top_title = MagicMock(return_value="阳光、琳、阿琳")
+        app._schedule_group_generation = MagicMock()
+        window = SimpleNamespace()
+        context = "[发送者] 阳光@微信\n[对方] 负责人超过理事数的1/3 @程正恒\u2005"
+
+        app._handle_group_chat(window, context=context, full=object())
+
+        app._schedule_group_generation.assert_called_once()
+        args = app._schedule_group_generation.call_args.args
+        self.assertEqual(args[2], "负责人超过理事数的1/3 @程正恒")
+        self.assertEqual(args[3], "负责人超过理事数的1/3")
+        self.assertEqual(args[4], "阳光")
+
     def test_group_generation_exception_resets_worker_and_reports_status(self):
         import main
         from group_chat_handler import GroupChatHandler

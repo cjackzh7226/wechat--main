@@ -552,7 +552,7 @@ class WeChatStyleReplyAssistant:
         self.queue.put(("status", f"当前会话已识别为{labels[detected]}「{top_title}」"))
 
     def _handle_group_chat(self, wechat: WeChatWindow, context: str = "", full=None) -> None:
-        """群聊客服处理：@ 我 → 提取问题 → 生成回复 → @ 回发送者；没 @ → 不回复。
+        """群聊客服处理：消息开头或结尾完整 @ 我时生成回复；没 @ 则不回复。
 
         用户名为空时：提示填写；填写前群聊消息一律视为"聊天内容无变化"。
         context/full 可复用旁路已截取的上下文与全窗图（避免重复截图）。

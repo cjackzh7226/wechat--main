@@ -2,7 +2,7 @@
 """群聊客服处理器（企业微信 5.0.9.6060）。
 
 职责（按 docs/群聊客服功能_功能交接.md）：
-- detect_at_mention：最新对方消息开头是否 @ 了当前账号用户名（容错匹配）
+- detect_at_mention：最新对方消息开头或结尾是否完整 @ 了当前账号用户名
 - extract_question：从 @ 我的消息里提取真正的问题内容
 - extract_sender_name：识别 @ 我的消息的发送者名字（去掉平台标记后缀）
 - build_reply：构建 "@发送者名字 回复内容"
@@ -30,28 +30,80 @@ _PLATFORM_MARKERS = (
 )
 
 # @ 后的分隔标点（OCR 可能识别出 : ： ， , 空格等）
-_MENTION_SEPARATORS = "：:，,、。 ."
+_MENTION_SEPARATORS = "：:，,、。 .；;！!？?"
+_INVISIBLE_SPACES = "\u200b\u200c\u200d\u2060\ufeff"
 
 
 def _clean_name(text: str) -> str:
     """去掉所有空白，用于名字比较与提取。"""
-    return re.sub(r"[\s\u3000]+", "", unicodedata.normalize("NFKC", text or ""))
+    return re.sub(
+        rf"[\s\u3000{_INVISIBLE_SPACES}]+",
+        "",
+        unicodedata.normalize("NFKC", text or ""),
+    )
 
 
-def _extract_mention_target(message: str) -> str:
-    """提取消息开头的 @ 后面的用户名部分（@ 后第一个词，去空格标点），无 @ 返回空。
+def _is_mention_boundary_char(char: str) -> bool:
+    return bool(
+        char
+        and (
+            char.isspace()
+            or char in _INVISIBLE_SPACES
+            or unicodedata.category(char).startswith("P")
+        )
+    )
 
-    容错：OCR 可能把名字识别成"程 正恒"（中间插空格），取 @ 后第一个空白/标点分隔的词，
-    判定时与用户名做前缀/相等比较。
+
+def _only_mention_boundaries(text: str) -> bool:
+    return all(_is_mention_boundary_char(char) for char in text)
+
+
+def _only_ignorable_space(text: str) -> bool:
+    return all(char.isspace() or char in _INVISIBLE_SPACES for char in text)
+
+
+def _looks_like_joined_question_suffix(text: str) -> bool:
+    """Recognize non-ASCII question text joined to a leading mention by OCR.
+
+    An ASCII letter/digit immediately after the configured name remains blocked,
+    because it can be part of a longer account name (for example ``@Alice1``).
     """
-    text = (message or "").lstrip()
-    if not text.startswith("@"):
-        return ""
-    rest = text[1:].lstrip()
-    matched = re.match(r"^[^\s，,。：:、.！!？?]+", rest)
-    if matched:
-        return _clean_name(matched.group(0))
-    return ""
+    cleaned = (text or "").strip(_INVISIBLE_SPACES)
+    if len(cleaned) < 2:
+        return False
+    return not (cleaned[0].isascii() and cleaned[0].isalnum())
+
+
+def _find_account_mention_span(message: str, account_name: str) -> tuple[int, int, str] | None:
+    """Return an exact full-account mention anchored at message start or end."""
+    text = unicodedata.normalize("NFKC", message or "")
+    name = _clean_name(account_name)
+    if not text or not name:
+        return None
+
+    # OCR 可能在姓名中插入空格；仍须逐字匹配完整账号名，不能降级为前缀。
+    gap = rf"[\s\u3000{_INVISIBLE_SPACES}]*"
+    pattern = re.compile("@" + gap.join(re.escape(char) for char in name))
+    for matched in pattern.finditer(text):
+        before = text[: matched.start()]
+        after = text[matched.end() :]
+        leading = _only_ignorable_space(before)
+        if leading and (
+            not after
+            or _is_mention_boundary_char(after[0])
+            or _looks_like_joined_question_suffix(after)
+        ):
+            # OCR 偶尔把“@账号 问题”合并成“@账号问题”。只对完整姓名后的
+            # 明显正文放宽；紧跟数字/拉丁字符仍视为更长账号名并阻断。
+            return matched.start(), matched.end(), "leading"
+        if (
+            before
+            and _is_mention_boundary_char(before[-1])
+            and (not after or _is_mention_boundary_char(after[0]))
+            and _only_mention_boundaries(after)
+        ):
+            return matched.start(), matched.end(), "trailing"
+    return None
 
 
 def _strip_platform_marker(text: str) -> str:
@@ -165,35 +217,24 @@ class GroupChatHandler:
         return ""
 
     def detect_at_mention(self, context: str, account_name: str) -> bool:
-        """检测最新对方消息开头是否 @ 了当前账号用户名。
-
-        规则：@ 必须在消息第一个字符；比较前都去空格；@ 后第一个词与用户名
-        相等或互为前缀（容错 OCR 在名字中插空格，如"@程 正恒"）。
-        """
+        """检测最新对方消息开头或结尾是否完整 @ 当前账号用户名。"""
         if not account_name:
             return False
         message = _latest_other_message(context)
         if not message:
             return False
-        target = _extract_mention_target(message)
-        if not target:
-            return False
-        name = _clean_name(account_name)
-        return target == name or name.startswith(target) or target.startswith(name)
+        return _find_account_mention_span(message, account_name) is not None
 
     def extract_question(self, message: str, account_name: str) -> str:
-        """从 @ 我的消息里提取问题内容（去掉 @用户名 前缀及分隔标点）。"""
-        text = (message or "").lstrip()
-        if not text.startswith("@"):
+        """从消息开头或结尾的完整 @ 中提取问题正文。"""
+        text = unicodedata.normalize("NFKC", message or "")
+        mention = _find_account_mention_span(text, account_name)
+        if mention is None:
             return text.strip()
-        rest = text[1:].lstrip()
-        name = _clean_name(account_name)
-        if name:
-            compact = re.sub(r"[\s\u3000]+", "", rest)
-            if compact.startswith(name):
-                rest = compact[len(name):]
-        rest = rest.lstrip("：:，,、。 .")
-        return rest.strip()
+        start, end, position = mention
+        if position == "leading":
+            return text[end:].lstrip(_MENTION_SEPARATORS + _INVISIBLE_SPACES).strip()
+        return text[:start].rstrip(_INVISIBLE_SPACES).strip()
 
     def extract_sender_name(self, context: str) -> str:
         """从最新对方消息识别发送者名字（去平台标记）。

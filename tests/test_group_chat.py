@@ -29,13 +29,50 @@ class GroupChatHandlerTests(unittest.TestCase):
         context = "[对方] @程 正恒 你好"
         self.assertTrue(self.handler.detect_at_mention(context, ACCOUNT))
 
+    def test_leading_mention_survives_ocr_dropped_separator_before_question(self):
+        context = "[发送者] -@微信\n[对方] @程正恒负责人超过理事数的1/3"
+        self.assertTrue(self.handler.detect_at_mention(context, ACCOUNT))
+        self.assertEqual(
+            self.handler.extract_question(self.handler.latest_other_message(context), ACCOUNT),
+            "负责人超过理事数的1/3",
+        )
+
     def test_no_mention(self):
         context = "[对方] 阳光@微信\n[对方] 民非单位未按规定换届怎么整改"
         self.assertFalse(self.handler.detect_at_mention(context, ACCOUNT))
 
-    def test_mention_not_at_start(self):
-        context = "[对方] 你好 @程正恒"
+    def test_mention_in_middle_is_not_a_trigger(self):
+        context = "[对方] 你好 @程正恒 请看前面的记录"
         self.assertFalse(self.handler.detect_at_mention(context, ACCOUNT))
+
+    def test_mention_at_end_is_a_trigger(self):
+        context = "[发送者] 阳光@微信\n[对方] 负责人超过理事数的1/3 @程正恒\u2005\u2005"
+        self.assertTrue(self.handler.detect_at_mention(context, ACCOUNT))
+
+    def test_mention_at_end_allows_ocr_spaces_inside_full_name(self):
+        context = "[发送者] 阳光@微信\n[对方] 负责人超过理事数的1/3 @程 正恒 "
+        self.assertTrue(self.handler.detect_at_mention(context, ACCOUNT))
+
+    def test_mention_at_end_normalizes_fullwidth_at_and_terminal_punctuation(self):
+        context = "[发送者] 阳光@微信\n[对方] 负责人超过理事数的1/3　＠程正恒。"
+        self.assertTrue(self.handler.detect_at_mention(context, ACCOUNT))
+
+    def test_mention_at_either_boundary_supports_latin_account_names(self):
+        self.assertTrue(self.handler.detect_at_mention("[对方] @Alice: Please check", "Alice"))
+        self.assertTrue(self.handler.detect_at_mention("[对方] Please check @Alice", "Alice"))
+        self.assertFalse(self.handler.detect_at_mention("[对方] Please @Alice check", "Alice"))
+
+    def test_partial_or_extended_name_is_not_a_trigger_at_either_boundary(self):
+        for message in (
+            "@程 问题",
+            "@程正 问题",
+            "@程正恒1 问题",
+            "问题 @程",
+            "问题 @程正",
+            "问题 @程正恒1",
+        ):
+            with self.subTest(message=message):
+                self.assertFalse(self.handler.detect_at_mention(f"[对方] {message}", ACCOUNT))
 
     def test_mention_other_name(self):
         context = "[对方] @李四 你好"
@@ -88,6 +125,12 @@ class GroupChatHandlerTests(unittest.TestCase):
 
     def test_extract_question_spaced_name(self):
         self.assertEqual(self.handler.extract_question("@程 正恒 你好", ACCOUNT), "你好")
+
+    def test_extract_question_when_full_mention_is_at_end(self):
+        self.assertEqual(
+            self.handler.extract_question("负责人超过理事数的1/3 @程正恒\u2005\u2005", ACCOUNT),
+            "负责人超过理事数的1/3",
+        )
 
     # ---- extract_sender_name ----
     def test_sender_plain_at_wechat(self):
