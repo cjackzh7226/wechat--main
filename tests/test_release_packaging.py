@@ -176,4 +176,6 @@ def test_update_installer_accepts_isolated_release_parameters() -> None:
         assert f"#ifndef {name}" in script
     assert "AppId={#InstallerAppId}" in script
     assert "OutputDir={#InstallerOutputDir}" in script
-    assert 'Source: "{#PackageSource}\\*"' in script
+    assert 'Source: "{#PackageSource}\\{#AppExeName}"' in script
+    assert 'Source: "{#PackageSource}\\_internal\\*"' in script
+    assert 'Source: "{#PackageSource}\\*"' not in script

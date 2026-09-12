@@ -5002,7 +5002,9 @@ class BuildReleaseTests(unittest.TestCase):
         self.assertIn('#define InstallerAppId "{{D67B9715-251B-4BBE-B2AB-3481CC740C70}"', script)
         self.assertIn("AppId={#InstallerAppId}", script)
         self.assertIn("OutputBaseFilename=聊小智_更新包_{#AppVersion}", script)
-        self.assertIn('Excludes: "user_data\\*"', script)
+        self.assertIn('Source: "{#PackageSource}\\{#AppExeName}"', script)
+        self.assertIn('Source: "{#PackageSource}\\_internal\\*"', script)
+        self.assertNotIn('Source: "{#PackageSource}\\*"', script)
         self.assertIn('Name: "{app}\\user_data"; Flags: uninsneveruninstall', script)
         self.assertNotIn('Source: "..\\dist\\聊小智\\user_data', script)
 
