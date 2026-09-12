@@ -4,6 +4,7 @@ import ctypes
 import re
 import unicodedata
 from dataclasses import dataclass
+from statistics import median
 
 from settings import AppSettings
 from wechat_window import WeChatWindow
@@ -227,6 +228,8 @@ class ChatOCR:
                     "x": sum(xs) / len(xs),
                     "left": min(xs),
                     "right": max(xs),
+                    "top": min(ys),
+                    "bottom": max(ys),
                     "y": sum(ys) / len(ys),
                 }
             )
@@ -259,9 +262,13 @@ class ChatOCR:
                 merged[-1]["x"] = (merged[-1]["x"] + item["x"]) / 2
                 merged[-1]["left"] = min(float(merged[-1].get("left", merged[-1]["x"])), float(item.get("left", item["x"])))
                 merged[-1]["right"] = max(float(merged[-1].get("right", merged[-1]["x"])), float(item.get("right", item["x"])))
+                merged[-1]["top"] = min(float(merged[-1].get("top", merged[-1]["y"] - 8)), float(item.get("top", item["y"] - 8)))
+                merged[-1]["bottom"] = max(float(merged[-1].get("bottom", merged[-1]["y"] + 8)), float(item.get("bottom", item["y"] + 8)))
             else:
                 merged.append(dict(item))
 
+        # 系统提示须在跨行气泡拼接前剔除，避免通知成为上一条问题的尾部。
+        merged = _filter_system_notice_rows(merged, image_width, image)
         merged = _merge_wrapped_ocr_items(merged, image_width)
 
         lines: list[ChatLine] = []
@@ -278,6 +285,89 @@ class ChatOCR:
                     role = "发送者" if _is_group_sender_header(text) else _infer_chat_role(item, image_width, image)
                 lines.append(ChatLine(role=role, text=text, y=item["y"]))
         return _merge_wrapped_chat_lines(lines)
+
+
+def _is_membership_notice(text: str) -> bool:
+    compact = re.sub(r"\s+", "", unicodedata.normalize("NFKC", text))
+    # 匹配完整通知，不以“加入群聊”等子串删除正常提问；机构长名不受 60 字限制。
+    return bool(re.fullmatch(
+        r'[^，。！？!?：:@]{1,300}?(?:加入了(?:外部)?群聊|退出了(?:外部)?群聊)[。.]?',
+        compact,
+    ))
+
+
+def _muted_text_on_chat_background(item: dict, image) -> bool:
+    """要求低对比度灰字且文字底色与聊天空白一致；灰色/蓝色气泡不能通过。"""
+    if image is None:
+        return False
+    width, height = image.size
+    left = max(0, int(item.get("left", item["x"])))
+    right = min(width, int(item.get("right", item["x"])))
+    top = max(0, int(item.get("top", item["y"] - 8)))
+    bottom = min(height, int(item.get("bottom", item["y"] + 8)) + 1)
+    if right <= left or bottom <= top:
+        return False
+    step = max(1, (right - left) // 180)
+    pixels = [image.getpixel((x, y))[:3]
+              for x in range(left, right, step) for y in range(top, bottom, 2)]
+    background = tuple(median(p[c] for p in pixels) for c in range(3))
+    # 两侧空白给出当前行的聊天背景，兼容窗口缩放及轻微色偏。
+    edges = [image.getpixel((x, y))[:3]
+             for x in (min(5, width - 1), max(0, width - 6))
+             for y in range(top, bottom, 2)]
+    reference = tuple(median(p[c] for p in edges) for c in range(3))
+    if max(abs(background[c] - reference[c]) for c in range(3)) > 10:
+        return False
+    ink = [p for p in pixels if sum(background[c] - p[c] for c in range(3)) / 3 >= 22]
+    if len(ink) < 5:
+        return False
+    muted = [p for p in ink if max(p) - min(p) <= 40
+             and 22 <= sum(background[c] - p[c] for c in range(3)) / 3 <= 145]
+    return len(muted) / len(ink) >= 0.85
+
+
+def _filter_system_notice_rows(items: list[dict], image_width: int, image) -> list[dict]:
+    ignored: set[int] = set()
+    muted: dict[int, bool] = {}
+
+    def is_muted(index: int) -> bool:
+        if index not in muted:
+            muted[index] = _muted_text_on_chat_background(items[index], image)
+        return muted[index]
+
+    for index, item in enumerate(items):
+        text = str(item["text"])
+        if _is_recall_message_text(text) or _is_group_sender_header(text):
+            continue
+        left = float(item.get("left", item["x"]))
+        right = float(item.get("right", item["x"]))
+        centered = abs((left + right) / 2 - image_width / 2) <= image_width * 0.12
+        notice_prefix = text.replace(" ", "").startswith("来自微信的")
+        if (centered or notice_prefix) and is_muted(index):
+            ignored.add(index)
+        if not (centered or notice_prefix):
+            continue
+        # OCR 可能把完整通知拆成多行；只归并近邻，且每行均不得是发送者/撤回。
+        combined = ""
+        for end in range(index, min(len(items), index + 6)):
+            if end > index and not (notice_prefix or "邀请" in text or "通过扫描" in text):
+                break
+            row = items[end]
+            row_text = str(row["text"])
+            if _is_group_sender_header(row_text) or _is_recall_message_text(row_text):
+                break
+            if end > index:
+                previous = items[end - 1]
+                row_height = float(row.get("bottom", row["y"] + 8)) - float(row.get("top", row["y"] - 8))
+                if float(row["y"]) - float(previous["y"]) > max(34, row_height * 2):
+                    break
+            if image is not None and not is_muted(end):
+                break
+            combined += row_text
+            if _is_membership_notice(combined):
+                ignored.update(range(index, end + 1))
+                break
+    return [item for index, item in enumerate(items) if index not in ignored]
 
 
 def _voice_duration_seconds(text: str) -> int | None:
